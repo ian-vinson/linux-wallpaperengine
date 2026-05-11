@@ -132,5 +132,3 @@ float CFBO::getSpritesheetDuration () const {
 void CFBO::incrementUsageCount () const { }
 void CFBO::decrementUsageCount () const { }
 void CFBO::update () const { }
-// FBOs are always ready
-bool CFBO::isReady () const { return true; }

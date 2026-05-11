@@ -27,6 +27,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-narrowing")
 find_package(X11)
 find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
+find_package(Freetype REQUIRED)
 
 find_package(DBus REQUIRED)
 find_package(GLUT REQUIRED)
@@ -436,6 +437,8 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Render/Objects/CImage.cpp
     src/WallpaperEngine/Render/Objects/CSound.h
     src/WallpaperEngine/Render/Objects/CSound.cpp
+    src/WallpaperEngine/Render/Objects/CText.h
+    src/WallpaperEngine/Render/Objects/CText.cpp
     src/WallpaperEngine/Render/Objects/CParticle.h
     src/WallpaperEngine/Render/Objects/CParticle.cpp
     src/WallpaperEngine/Render/Objects/CText.h
@@ -578,6 +581,7 @@ add_library(
 target_link_libraries (linux-wallpaperengine-lib PUBLIC
     ${OPENGL_LIBRARIES}
     GLEW::GLEW
+    Freetype::Freetype
     ${GLUT_LIBRARIES}
     ${ZLIB_LIBRARIES}
     ${LZ4_LIBRARY}
@@ -604,6 +608,7 @@ if (BUILD_TESTING)
         Catch2::Catch2WithMain
         ${OPENGL_LIBRARIES}
         GLEW::GLEW
+        Freetype::Freetype
         ${GLUT_LIBRARIES}
         ${ZLIB_LIBRARIES}
         ${LZ4_LIBRARY}

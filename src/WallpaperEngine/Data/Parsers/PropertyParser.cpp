@@ -33,6 +33,9 @@ PropertySharedPtr PropertyParser::parse (const JSON& it, const std::string& name
     if (type == "textinput") {
 	return parseTextInput (it, name);
     }
+    if (type == "usershortcut") {
+	return parseTextInput (it, name);
+    }
 
     if (type.has_value () && type != "group") {
 	std::cerr << "WARNING: Unknown property type '" << type.value ().get<std::string> ()
