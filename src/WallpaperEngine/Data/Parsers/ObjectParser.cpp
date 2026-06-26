@@ -178,6 +178,15 @@ ObjectParser::parseImage (const JSON& it, const Project& project, ObjectData bas
     const auto& effects = it.optional ("effects");
     const auto& animationLayers = it.optional ("animationlayers");
 
+    ModelUniquePtr model;
+    try {
+	model = ModelParser::load (project, image);
+    } catch (const std::exception& e) {
+	std::cerr << "WARNING: Cannot load model '" << image << "': " << e.what () << ", skipping object"
+		  << std::endl;
+	return nullptr;
+    }
+
     auto result = std::make_unique<Image> (
 	std::move (base),
 	ImageData {
@@ -191,7 +200,7 @@ ObjectParser::parseImage (const JSON& it, const Project& project, ObjectData bas
 	    .parallaxDepth = it.user ("parallaxDepth", properties, glm::vec2 (0.0f)),
 	    .colorBlendMode = it.user ("colorBlendMode", properties, 0),
 	    .brightness = it.user ("brightness", properties, 1.0f),
-	    .model = ModelParser::load (project, image),
+	    .model = std::move (model),
 	    .effects = effects.has_value () ? parseEffects (*effects, project) : std::vector<ImageEffectUniquePtr> {},
 	    .animationLayers = animationLayers.has_value () ? parseAnimationLayers (*animationLayers, project)
 							    : std::vector<ImageAnimationLayerUniquePtr> {},

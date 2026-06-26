@@ -97,7 +97,14 @@ ObjectList WallpaperParser::parseObjects (const JSON& objects, const Project& pr
     ObjectList result = {};
 
     for (const auto& cur : objects) {
-	result.emplace_back (ObjectParser::parse (cur, project));
+	try {
+	    auto obj = ObjectParser::parse (cur, project);
+	    if (obj != nullptr) {
+		result.emplace_back (std::move (obj));
+	    }
+	} catch (const std::exception& e) {
+	    sLog.error ("Failed to parse object, skipping: ", e.what ());
+	}
     }
 
     return result;
