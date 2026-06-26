@@ -1,5 +1,6 @@
 #include "PropertyParser.h"
 #include "../Model/Property.h"
+#include <iostream>
 
 using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Data::Model;
@@ -32,14 +33,10 @@ PropertySharedPtr PropertyParser::parse (const JSON& it, const std::string& name
     if (type == "textinput") {
 	return parseTextInput (it, name);
     }
-    if (type == "usershortcut") {
-	return parseTextInput (it, name);
-    }
 
     if (type.has_value () && type != "group") {
-	// show the error and ignore this property
-	sLog.error ("Unexpected type for property: ", type);
-	sLog.error (it.dump ());
+	std::cerr << "WARNING: Unknown property type '" << type.value ().get<std::string> ()
+		  << "' for property '" << name << "', skipping" << std::endl;
     }
 
     return nullptr;
