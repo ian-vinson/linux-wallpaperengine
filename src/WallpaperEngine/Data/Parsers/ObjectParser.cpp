@@ -12,10 +12,29 @@
 #include "WallpaperEngine/Logging/Log.h"
 
 #include <glm/gtc/constants.hpp>
+#include <iostream>
 #include <sstream>
 
 using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Data::Model;
+
+[[maybe_unused]] static float safeGetFloat (const JSON& j, float defaultVal = 0.0f) {
+    if (j.is_number ()) return j.get<float> ();
+    if (j.is_string ()) {
+        try { return std::stof (j.get<std::string> ()); }
+        catch (...) { return defaultVal; }
+    }
+    return defaultVal;
+}
+
+static int safeGetInt (const JSON& j, int defaultVal = 0) {
+    if (j.is_number ()) return j.get<int> ();
+    if (j.is_string ()) {
+        try { return std::stoi (j.get<std::string> ()); }
+        catch (...) { return defaultVal; }
+    }
+    return defaultVal;
+}
 
 ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
     const auto imageIt = it.find ("image");
@@ -123,22 +142,34 @@ SoundUniquePtr ObjectParser::parseSound (const JSON& it, ObjectData base) {
 }
 
 TextUniquePtr ObjectParser::parseText (const JSON& it, const Project& project, ObjectData base) {
-    return std::make_unique<Text> (
-	std::move (base),
-	TextData {
-	    .text = it.user ("text", project.properties),
-	    .font = it.optional ("font", std::string ()),
-	    .pointSize = it.user ("pointsize", project.properties, 32.0f),
-	    .size = it.optional ("size", glm::vec2 (0.0f)),
-	    .scale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
-	    .color = it.color ("color", project.properties, Builders::ColorBuilder::White),
-	    .alpha = it.user ("alpha", project.properties, 1.0f),
-	    .visible = it.user ("visible", project.properties, true),
-	    .alignment = it.optional ("horizontalalign", it.optional ("alignment", std::string ("center"))),
-	    .verticalalign = it.optional ("verticalalign", std::string ("center")),
-	    .padding = it.optional ("padding", 0),
-	}
-    );
+    try {
+	// Use untyped optional + safeGetInt to avoid type_error.302 when padding is stored as "0" string.
+	// The typed optional<int>(key, default) overload is noexcept but can still throw inside, causing
+	// std::terminate() instead of a catchable exception.
+	const auto paddingRaw = it.optional ("padding");
+	const int padding = paddingRaw.has_value () ? safeGetInt (*paddingRaw, 0) : 0;
+
+	return std::make_unique<Text> (
+	    std::move (base),
+	    TextData {
+		.text = it.user ("text", project.properties),
+		.font = it.optional ("font", std::string ()),
+		.pointSize = it.user ("pointsize", project.properties, 32.0f),
+		.size = it.optional ("size", glm::vec2 (0.0f)),
+		.scale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
+		.color = it.color ("color", project.properties, Builders::ColorBuilder::White),
+		.alpha = it.user ("alpha", project.properties, 1.0f),
+		.visible = it.user ("visible", project.properties, true),
+		.alignment = it.optional ("horizontalalign", it.optional ("alignment", std::string ("center"))),
+		.verticalalign = it.optional ("verticalalign", std::string ("center")),
+		.padding = padding,
+	    }
+	);
+    } catch (const nlohmann::json::exception& e) {
+	std::cerr << "WARNING: ObjectParser::parseText failed for object "
+		  << "(json exception: " << e.what () << "), skipping" << std::endl;
+	return nullptr;
+    }
 }
 
 ImageUniquePtr
