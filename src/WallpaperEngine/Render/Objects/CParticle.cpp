@@ -336,12 +336,11 @@ const glm::vec3& CParticle::getColor () const {
     return defaultColor;
 }
 
-const glm::vec4& CParticle::getColor4 () const {
-    static const glm::vec4 defaultColor (1.0f);
+glm::vec4 CParticle::getColor4 () const {
     if (m_particle.instanceOverride.color && m_particle.instanceOverride.color->value) {
 	return m_particle.instanceOverride.color->value->getVec4 ();
     }
-    return defaultColor;
+    return glm::vec4 (1.0f);
 }
 
 const glm::vec3& CParticle::getCompositeColor () const { return getColor (); }

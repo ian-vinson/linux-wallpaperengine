@@ -45,7 +45,7 @@ public:
     [[nodiscard]] const float& getUserAlpha () const override;
     [[nodiscard]] const float& getAlpha () const override;
     [[nodiscard]] const glm::vec3& getColor () const override;
-    [[nodiscard]] const glm::vec4& getColor4 () const override;
+    [[nodiscard]] glm::vec4 getColor4 () const override;
     [[nodiscard]] const glm::vec3& getCompositeColor () const override;
 
     /**

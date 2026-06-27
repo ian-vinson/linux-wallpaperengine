@@ -957,7 +957,9 @@ const float& CImage::getAlpha () const { return this->m_image.alpha->value->getF
 
 const glm::vec3& CImage::getColor () const { return this->m_image.color->value->getVec3 (); }
 
-const glm::vec4& CImage::getColor4 () const { return this->m_image.color->value->getVec4 (); }
+glm::vec4 CImage::getColor4 () const {
+    return glm::vec4 (this->m_image.color->value->getVec3 (), this->m_image.alpha->value->getFloat ());
+}
 
 const glm::vec3& CImage::getCompositeColor () const { return this->m_image.color->value->getVec3 (); }
 

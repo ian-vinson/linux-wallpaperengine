@@ -26,7 +26,7 @@ public:
     [[nodiscard]] virtual const float& getUserAlpha () const = 0;
     [[nodiscard]] virtual const float& getAlpha () const = 0;
     [[nodiscard]] virtual const glm::vec3& getColor () const = 0;
-    [[nodiscard]] virtual const glm::vec4& getColor4 () const = 0;
+    [[nodiscard]] virtual glm::vec4 getColor4 () const = 0;
     [[nodiscard]] virtual const glm::vec3& getCompositeColor () const = 0;
 
 protected:
