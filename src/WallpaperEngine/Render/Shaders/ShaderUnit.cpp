@@ -3,6 +3,7 @@
 #include "WallpaperEngine/Logging/Log.h"
 #include <exception>
 #include <regex>
+#include <set>
 #include <stack>
 #include <string>
 #include <utility>
@@ -391,23 +392,108 @@ std::string ShaderUnit::applyLinkedVaryingCompatibility (std::string source) con
 	linkedOffset += varyingMatch.position () + varyingMatch.length ();
 
 	const std::regex vertexVec2Decl ("\\bvarying\\s+vec2\\s+" + name + "\\s*;");
-	if (!std::regex_search (source, vertexVec2Decl)) {
+	const std::regex vertexVec4Decl ("\\bvarying\\s+vec4\\s+" + name + "\\s*;");
+	const bool vertexHasVec2 = std::regex_search (source, vertexVec2Decl);
+	const bool vertexHasVec4 = std::regex_search (source, vertexVec4Decl);
+
+	// Skip entirely if this varying isn't declared in the vertex shader at all.
+	if (!vertexHasVec2 && !vertexHasVec4) {
 	    continue;
 	}
 
-	source = std::regex_replace (source, vertexVec2Decl, "varying vec4 " + name + ";");
+	if (vertexHasVec2) {
+	    // Upgrade vec2 declaration to vec4 and wrap bare assignments.
+	    source = std::regex_replace (source, vertexVec2Decl, "varying vec4 " + name + ";");
 
-	const std::regex assignment ("(^|\\n)([ \\t]*)" + name + "\\s*=\\s*([^;\\n]+);");
-	std::smatch assignmentMatch;
-	size_t offset = 0;
-	while (std::regex_search (source.cbegin () + offset, source.cend (), assignmentMatch, assignment)) {
-	    const std::string prefix = assignmentMatch[1].str ();
-	    const std::string indent = assignmentMatch[2].str ();
-	    const std::string expression = assignmentMatch[3].str ();
-	    const std::string replacement = prefix + indent + name + " = vec4(" + expression + ", 0.0, 1.0);";
-	    const size_t position = offset + assignmentMatch.position ();
-	    source.replace (position, assignmentMatch.length (), replacement);
-	    offset = position + replacement.length ();
+	    const std::regex assignment ("(^|\\n)([ \\t]*)" + name + "\\s*=\\s*([^;\\n]+);");
+	    std::smatch assignmentMatch;
+	    size_t offset = 0;
+	    while (std::regex_search (source.cbegin () + offset, source.cend (), assignmentMatch, assignment)) {
+		const std::string prefix = assignmentMatch[1].str ();
+		const std::string indent = assignmentMatch[2].str ();
+		const std::string expression = assignmentMatch[3].str ();
+		const std::string replacement = prefix + indent + name + " = vec4(" + expression + ", 0.0, 1.0);";
+		const size_t position = offset + assignmentMatch.position ();
+		source.replace (position, assignmentMatch.length (), replacement);
+		offset = position + replacement.length ();
+	    }
+	}
+
+	// After upgrading the declaration and wrapping assignments, any remaining
+	// unswizzled read of `name` in an arithmetic expression is now a vec4
+	// where the surrounding code expects a vec2. Add .xy to each such read.
+	//
+	// A "read context" occurrence is: \bname\b NOT followed by [.([=]
+	// (which would indicate a swizzle, index, call, or assignment LHS)
+	// and NOT immediately preceded by a GLSL type keyword (declaration).
+	static const auto isWordChar = [] (char c) {
+	    return std::isalnum (static_cast<unsigned char> (c)) || c == '_';
+	};
+	static const auto isGlslType = [] (const std::string& w) {
+	    static const std::set<std::string> types = {
+		"vec2", "vec3", "vec4", "float", "int", "uint", "bool",
+		"mat2", "mat3", "mat4", "mat4x3", "mat3x3",
+		"sampler2D", "uvec4", "ivec2", "ivec3", "ivec4",
+		"varying", "uniform", "attribute", "in", "out",
+	    };
+	    return types.count (w) > 0;
+	};
+
+	size_t pos = 0;
+	while ((pos = source.find (name, pos)) != std::string::npos) {
+	    const size_t afterName = pos + name.size ();
+
+	    // Must be a word boundary on both sides
+	    if ((pos > 0 && isWordChar (source[pos - 1])) ||
+		(afterName < source.size () && isWordChar (source[afterName]))) {
+		pos = afterName;
+		continue;
+	    }
+
+	    // Skip if followed by swizzle '.', index '[', call '(', or assignment '='
+	    size_t j = afterName;
+	    while (j < source.size () && source[j] == ' ') j++;
+	    const char nextChar = j < source.size () ? source[j] : '\0';
+	    if (nextChar == '.' || nextChar == '[' || nextChar == '(' || nextChar == '=') {
+		pos = afterName;
+		continue;
+	    }
+
+	    // Skip if immediately preceded by a GLSL type keyword (it's a declaration)
+	    size_t k = pos;
+	    while (k > 0 && source[k - 1] == ' ') k--;
+	    if (k > 0 && isWordChar (source[k - 1])) {
+		size_t wordEnd = k;
+		while (k > 0 && isWordChar (source[k - 1])) k--;
+		if (isGlslType (source.substr (k, wordEnd - k))) {
+		    pos = afterName;
+		    continue;
+		}
+	    }
+
+	    source.insert (afterName, ".xy");
+	    pos = afterName + 3;
+	}
+    }
+
+    // SECOND PASS: fix unswizzled reads of vec4 varyings that are already declared
+    // as vec4 in the vertex shader itself (not upgraded from vec2 above).
+    // Pattern: lines where the assignment target is vec2 but the RHS contains an
+    // unswizzled vec4 varying — e.g. "vec2 da = v_PointerUV * vec2expr;"
+    // This matches WE shaders that rely on DX11 implicit vec4→vec2 truncation.
+    {
+	static const std::regex vertexVec4Re (R"(\bvarying\s+vec4\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
+	std::sregex_iterator it (source.cbegin (), source.cend (), vertexVec4Re);
+	std::sregex_iterator end;
+	for (; it != end; ++it) {
+	    const std::string vname = (*it)[1].str ();
+	    // Find lines of the form "vec2 var = ... vname ..." where vname has no swizzle.
+	    // Lazy [^\n]*? so we find the first unswizzled occurrence after the '='.
+	    const std::regex vec2Line ("(vec2\\s+\\w+\\s*=[^\\n]*?)\\b(" + vname + ")\\b(?![.\\[\\(])");
+	    const std::string patched = std::regex_replace (source, vec2Line, "$1$2.xy");
+	    if (patched != source) {
+		source = patched;
+	    }
 	}
     }
 
