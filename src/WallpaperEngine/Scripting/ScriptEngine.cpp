@@ -304,6 +304,22 @@ void ScriptEngine::installBuiltins () {
 	logJSException (this->m_context, "installBuiltins");
     }
     JS_FreeValue (this->m_context, result);
+
+    // Expose each registered native module as a global namespace object so
+    // that layer scripts (evaluated as plain IIFE, not modules) can reference
+    // e.g. WEMath.smoothStep after their 'import * as WEMath from …' lines
+    // are stripped.  The module loader is already installed at this point.
+    for (const auto& [name, _] : this->m_modules) {
+	const std::string src = "import * as m from '" + name
+				+ "';\nglobalThis['" + name + "'] = m;\n";
+	JSValue modResult
+	    = JS_Eval (this->m_context, src.c_str (), src.size (), "<module-global>", JS_EVAL_TYPE_MODULE);
+	if (JS_IsException (modResult)) {
+	    logJSException (this->m_context, "installBuiltins/module-global");
+	}
+	JS_FreeValue (this->m_context, modResult);
+    }
+
     this->m_builtinsInstalled = true;
 }
 
@@ -360,6 +376,24 @@ ScriptLayerHandle ScriptEngine::createLayerScript (
     }
     while ((pos = body.find ("export ")) != std::string::npos) {
 	body.erase (pos, 7);
+    }
+    // Strip ES6 static import declarations — they are valid only at module
+    // top-level but layer scripts run inside an IIFE in global evaluation
+    // mode.  Native module namespaces (WEMath, WEColor, …) are pre-exposed
+    // as globals by installBuiltins() so references to them still resolve.
+    {
+	size_t i = 0;
+	while ((i = body.find ("import ", i)) != std::string::npos) {
+	    // Only strip when 'import' is at a line start (no non-whitespace
+	    // chars before it on the same line) to avoid matching 'import'
+	    // inside a string literal or comment.
+	    if (i != 0 && body[i - 1] != '\n') {
+		i += 7;
+		continue;
+	    }
+	    const size_t end = body.find ('\n', i);
+	    body.erase (i, end == std::string::npos ? body.size () - i : end - i + 1);
+	}
     }
 
     // The IIFE gives every layer its own closure for top-level vars and
