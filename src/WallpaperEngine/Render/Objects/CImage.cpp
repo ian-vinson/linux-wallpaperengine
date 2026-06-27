@@ -778,6 +778,7 @@ void CImage::setup () {
     CRenderable::setup ();
 
     this->setupPasses ();
+
     this->m_initialized = true;
 }
 

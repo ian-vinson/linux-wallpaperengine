@@ -631,7 +631,23 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
     // script properties do not need update as they're connected directly to the source data
     this->m_runningModule = &inserted.first->second;
 
-    // check if there's an update method and run it
+    // Call init() if the script exports it — it sets up initial state (e.g. transition timer,
+    // shared palette values) and returns the correct starting value.  Fall back to update() for
+    // scripts that don't export init.
+    JSValue initArgs[] = { this->dynamicToJs (currentValue) };
+    JSValue initResult = this->call (module, 1, initArgs, "init");
+
+    ScopeGuard initGuard ([this, initArgs, initResult] () {
+	JS_FreeValue (this->m_context, initResult);
+	JS_FreeValue (this->m_context, initArgs[0]);
+    });
+
+    if (!JS_IsException (initResult) && !JS_IsUndefined (initResult)) {
+	jsToDynamicValue (this->m_context, initResult, currentValue);
+	return;
+    }
+
+    // No init() exported — fall back to a first update() call to prime the value.
     JSValue args[] = { this->dynamicToJs (currentValue) };
     JSValue result = this->call (module, 1, args, "update");
 
