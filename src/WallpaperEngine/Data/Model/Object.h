@@ -621,4 +621,16 @@ public:
 	Object (std::move (data)), TextData (std::move (textData)) { };
     ~Text () override = default;
 };
+
+struct CameraObjectData {
+    std::string cameraName;
+    UserSettingUniquePtr zoom;
+};
+
+class CameraObject : public Object, public CameraObjectData {
+public:
+    explicit CameraObject (ObjectData data, CameraObjectData camData) noexcept :
+	Object (std::move (data)), CameraObjectData (std::move (camData)) { };
+    ~CameraObject () override = default;
+};
 } // namespace WallpaperEngine::Data::Model

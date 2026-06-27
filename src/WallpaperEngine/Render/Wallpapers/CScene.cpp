@@ -243,6 +243,13 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
 	}
 
 	renderObject = new Objects::CParticle (*this, particleData);
+    } else if (object.is<CameraObject> ()) {
+	const auto& cam = *object.as<CameraObject> ();
+	if (cam.cameraName == "default" && cam.origin && cam.origin->value) {
+	    float zoom = (cam.zoom && cam.zoom->value) ? cam.zoom->value->getFloat () : 1.0f;
+	    this->m_camera->applyObjectCamera (cam.origin->value->getVec3 (), zoom);
+	}
+	return nullptr;
     } else {
 	sLog.error ("Unknown object type, creating placeholder, empty object: ", object.id);
 	renderObject = new CObject (*this, object);

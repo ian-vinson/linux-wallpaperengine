@@ -20,6 +20,7 @@ public:
     ~Camera ();
 
     void setOrthogonalProjection (const float width, const float height);
+    void applyObjectCamera (const glm::vec3& eye, float zoom);
 
     [[nodiscard]] const glm::vec3& getCenter () const;
     [[nodiscard]] const glm::vec3& getEye () const;

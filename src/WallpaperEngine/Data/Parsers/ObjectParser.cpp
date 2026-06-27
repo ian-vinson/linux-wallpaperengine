@@ -44,6 +44,7 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
     const auto lightIt = it.find ("light");
     // use shape to refer to VolumeLight
     const auto shapeIt = it.find ("shape");
+    const auto cameraIt = it.find ("camera");
 
     // Parse base object data
     // Some particle objects have numeric 'name' fields, so handle type mismatches gracefully
@@ -92,6 +93,8 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	return parseParticle (it, project, std::move (basedata));
     } else if (textIt != it.end ()) {
 	return parseText (it, project, std::move (basedata));
+    } else if (cameraIt != it.end () && cameraIt->is_string ()) {
+	return parseCamera (it, project, std::move (basedata));
     } else if (lightIt != it.end ()) {
 	sLog.error ("Light objects are not supported yet");
     } else if (shapeIt != it.end ()) {
@@ -916,4 +919,14 @@ ParticleInstanceOverride ObjectParser::parseParticleInstanceOverride (const JSON
 	.color = it.user ("color", properties, glm::vec3 (1.0f)),
 	.colorn = it.user ("colorn", properties, glm::vec3 (1.0f)),
     };
+}
+
+CameraObjectUniquePtr ObjectParser::parseCamera (const JSON& it, const Project& project, ObjectData base) {
+    return std::make_unique<CameraObject> (
+	std::move (base),
+	CameraObjectData {
+	    .cameraName = it.optional<std::string> ("camera", "default"),
+	    .zoom = it.user ("zoom", project.properties, 1.0f),
+	}
+    );
 }

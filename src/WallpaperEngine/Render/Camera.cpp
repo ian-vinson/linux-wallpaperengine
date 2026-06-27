@@ -50,3 +50,17 @@ void Camera::setOrthogonalProjection (const float width, const float height) {
     this->m_projection = glm::translate (this->m_projection, this->getEye ());
     this->m_isOrthogonal = true;
 }
+
+void Camera::applyObjectCamera (const glm::vec3& eye, float zoom) {
+    if (zoom <= 0.0f)
+	zoom = 1.0f;
+
+    float w = this->m_width / zoom;
+    float h = this->m_height / zoom;
+
+    float nearz = this->m_camera.projection.nearz->value->getFloat ();
+    float farz = this->m_camera.projection.farz->value->getFloat ();
+
+    this->m_projection = glm::ortho<float> (-w / 2.0f, w / 2.0f, -h / 2.0f, h / 2.0f, nearz, farz);
+    this->m_projection = glm::translate (this->m_projection, eye);
+}
