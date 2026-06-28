@@ -100,10 +100,17 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
     } else if (shapeIt != it.end ()) {
 	sLog.error ("VolumeLight objects are not supported yet");
     } else {
-	if (!it.optional ("solid", false)) {
-	    // dump the object for now, might want to change later
-	    // TODO: RE-EVALUATE IF THIS MAKES SENSE, THERE'S OBJECTS THAT CONTAIN OTHER OBJECTS AND THUS AREN'T REALLY
-	    // ANYTHING SPECIAL
+	// Suppress the warning for typeless objects that carry only known annotation fields:
+	//   solid=true      — compositor sort hint (already suppresses when true)
+	//   fullscreenlayer — full-screen overlay marker; treated as a no-op placeholder here
+	//   disablepropagation — property-propagation flag on every modern scene object
+	//   ledsource       — hardware LED output flag; irrelevant on Linux
+	//   config          — composelayer pass-through config dict; safely ignored
+	const bool knownHintOnly = it.find ("fullscreenlayer") != it.end ()
+	                        || it.find ("disablepropagation") != it.end ()
+	                        || it.find ("ledsource") != it.end ()
+	                        || it.find ("config") != it.end ();
+	if (!it.optional ("solid", false) && !knownHintOnly) {
 	    sLog.error ("Unknown object type found: ", it.dump ());
 	}
     }

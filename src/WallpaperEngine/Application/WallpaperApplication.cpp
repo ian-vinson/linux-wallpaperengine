@@ -98,6 +98,16 @@ AssetLocatorUniquePtr WallpaperApplication::setupAssetLocator (const std::string
 	sLog.exception ("Cannot find a valid assets folder, resolved to ", this->m_context.settings.general.assets);
     }
 
+    // Also mount the bundled assets directory (next to the binary) as a supplemental fallback.
+    // This provides stub particle materials and util assets for installations without a full
+    // Steam assets directory, even when --assets-dir is provided.
+    try {
+	const auto bundled = std::filesystem::canonical ("/proc/self/exe").parent_path () / "assets";
+	if (bundled != this->m_context.settings.general.assets && std::filesystem::is_directory (bundled)) {
+	    container->mount (bundled, "/");
+	}
+    } catch (...) { }
+
     // mount the current directory as root
     try {
 	container->mount (std::filesystem::current_path (), "/");

@@ -694,6 +694,12 @@ add_executable(linux-wallpaperengine
 
 target_link_libraries (linux-wallpaperengine PUBLIC linux-wallpaperengine-lib)
 
+# Copy bundled stub assets (particle materials, util materials) alongside the binary.
+# These serve as fallbacks when the user lacks a full Steam assets installation.
+if(EXISTS ${CMAKE_SOURCE_DIR}/assets)
+    file(COPY ${CMAKE_SOURCE_DIR}/assets/ DESTINATION ${TARGET_OUTPUT_DIRECTORY}/assets)
+endif()
+
 # Install the main executable and shared library via install(TARGETS)
 # so that CMake automatically strips/replaces the build-time RPATH.
 install(TARGETS linux-wallpaperengine
