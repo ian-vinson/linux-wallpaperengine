@@ -137,6 +137,8 @@ struct SoundData {
     // TODO: WRITE AN ENUM FOR THIS
     std::optional<std::string> playbackmode;
     std::vector<std::string> sounds;
+    /** Per-stream volume scale [0.0, 1.0], may be bound to a user property */
+    UserSettingUniquePtr volume;
 };
 
 class Sound : public Object, public SoundData {

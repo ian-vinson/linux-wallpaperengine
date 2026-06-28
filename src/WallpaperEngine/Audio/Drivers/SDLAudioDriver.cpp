@@ -57,10 +57,13 @@ void audio_callback (void* userdata, uint8_t* streamData, int length) {
 		len1 = streamLength;
 	    }
 
-	    // mix the audio
+	    // mix the audio — scale global volume by per-stream volume
+	    const int effectiveVolume = static_cast<int> (
+		driver->getApplicationContext ().state.audio.volume * buffer->stream->getVolume ()
+	    );
 	    SDL_MixAudioFormat (
 		streamDataPointer, &buffer->audio_buf[buffer->audio_buf_index], driver->getSpec ().format, len1,
-		driver->getApplicationContext ().state.audio.volume
+		effectiveVolume
 	    );
 
 	    streamLength -= len1;

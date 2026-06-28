@@ -28,6 +28,7 @@ void CSound::load () {
 	    = new Audio::AudioStream (this->getScene ().getAudioContext (), this->getAssetLocator ().read (cur));
 
 	stream->setRepeat (this->m_sound.playbackmode.has_value () && this->m_sound.playbackmode == "loop");
+	stream->setVolume (this->m_sound.volume->value->getFloat ());
 
 	// add the stream to the context so it can be played
 	this->m_audioStreams.insert_or_assign (this->getScene ().getAudioContext ().addStream (stream), stream);

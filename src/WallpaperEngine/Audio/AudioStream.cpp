@@ -414,6 +414,10 @@ void AudioStream::setRepeat (const bool newRepeat) { this->m_repeat = newRepeat;
 
 bool AudioStream::isRepeat () const { return this->m_repeat; }
 
+void AudioStream::setVolume (const float newVolume) { this->m_volume = newVolume; }
+
+float AudioStream::getVolume () const { return this->m_volume; }
+
 ReadStreamSharedPtr& AudioStream::getBuffer () { return this->m_buffer; }
 
 SDL_cond* AudioStream::getWaitCondition () const { return this->m_queue->wait; }

@@ -84,6 +84,14 @@ public:
      */
     [[nodiscard]] bool isRepeat () const;
     /**
+     * @param newVolume Per-stream volume scale in [0.0, 1.0]
+     */
+    void setVolume (float newVolume);
+    /**
+     * @return Per-stream volume scale in [0.0, 1.0]
+     */
+    [[nodiscard]] float getVolume () const;
+    /**
      * Stops decoding and playback of the stream
      */
     void stop ();
@@ -165,6 +173,8 @@ private:
     bool m_initialized = false;
     /** Repeat enabled? */
     bool m_repeat = false;
+    /** Per-stream volume scale [0.0, 1.0] */
+    float m_volume = 1.0f;
     /** The codec context that contains the original audio format information */
     AVCodecContext* m_context = nullptr;
     /** The format context that controls how data is read off the file */
