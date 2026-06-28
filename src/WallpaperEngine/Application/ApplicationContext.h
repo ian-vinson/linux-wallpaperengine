@@ -85,6 +85,8 @@ public:
 	    bool dumpStructure;
 	    /** If the user requested the particles to be deactivated */
 	    bool disableParticles;
+	    /** Path to a .pkg file to validate and dump (--pkg-validate); empty = not requested */
+	    std::filesystem::path pkgValidatePath;
 	    /** The path to the assets folder */
 	    std::filesystem::path assets;
 	    /** Background to load (provided as the final argument) as fallback for multi-screen setups */
@@ -187,6 +189,8 @@ public:
         .general = {
             .onlyListProperties = false,
             .dumpStructure = false,
+            .disableParticles = false,
+            .pkgValidatePath = "",
             .assets = "",
             .defaultBackground = "",
             .screenBackgrounds = {},

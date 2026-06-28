@@ -3,6 +3,7 @@
 
 #include "WallpaperEngine/Application/ApplicationContext.h"
 #include "WallpaperEngine/Application/WallpaperApplication.h"
+#include "WallpaperEngine/Data/Parsers/PackageParser.h"
 #include "WallpaperEngine/Logging/Log.h"
 
 WallpaperEngine::Application::WallpaperApplication* app;
@@ -46,6 +47,11 @@ int main (int argc, char* argv[]) {
 	WallpaperEngine::Application::ApplicationContext appContext (argc, argv);
 
 	appContext.loadSettingsFromArgv ();
+
+	if (!appContext.settings.general.pkgValidatePath.empty ()) {
+	    WallpaperEngine::Data::Parsers::PackageParser::dumpPkg (appContext.settings.general.pkgValidatePath);
+	    return 0;
+	}
 
 	app = new WallpaperEngine::Application::WallpaperApplication (appContext);
 

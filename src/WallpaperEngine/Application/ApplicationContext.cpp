@@ -596,6 +596,15 @@ void ApplicationContext::loadSettingsFromArgv () {
 
     auto& debuggingGroup = program.add_group ("Debugging options");
 
+    debuggingGroup.add_argument ("--pkg-validate")
+	.help ("Parse and validate a .pkg file; print version, format, and entry list, then exit")
+	.default_value ("")
+	.action ([this] (const std::string& value) -> void {
+	    if (!value.empty ()) {
+		this->settings.general.pkgValidatePath = value;
+	    }
+	});
+
     debuggingGroup.add_argument ("-z", "--dump-structure")
 	.help ("Dumps the structure of the backgrounds")
 	.flag ()
@@ -658,7 +667,8 @@ void ApplicationContext::loadSettingsFromArgv () {
     try {
 	program.parse_known_args (this->m_argc, this->m_argv);
 
-	if (this->settings.general.defaultBackground.empty ()) {
+	if (this->settings.general.defaultBackground.empty ()
+	    && this->settings.general.pkgValidatePath.empty ()) {
 	    throw std::runtime_error ("At least one background ID must be specified");
 	}
 
