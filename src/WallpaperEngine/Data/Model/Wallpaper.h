@@ -99,8 +99,6 @@ struct SceneData {
 	    int width;
 	    int height;
 	    bool isAuto;
-	    bool hasOrthogonal;           // true when orthogonalprojection key is present
-	    float perspectiveOverrideFov; // from perspectiveoverridefov; 0 = absent
 	    UserSettingUniquePtr nearz;
 	    UserSettingUniquePtr farz;
 	    UserSettingUniquePtr fov;
