@@ -73,6 +73,7 @@ CScene::CScene (
     // TODO: CONVERSION
     if (scene->camera.projection.hasOrthogonal) {
         this->m_camera->setOrthogonalProjection (width, height);
+        this->setScalingMode (WallpaperState::TextureUVsScaling::ZoomFillUVs);
     } else if (scene->camera.projection.perspectiveOverrideFov > 0.0f) {
         const float screenW = this->getContext ().getOutput ().getFullWidth ();
         const float screenH = this->getContext ().getOutput ().getFullHeight ();

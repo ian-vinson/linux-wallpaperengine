@@ -326,6 +326,10 @@ AudioContext& CWallpaper::getAudioContext () const { return this->m_audioContext
 
 const WallpaperState& CWallpaper::getState () const { return this->m_state; }
 
+void CWallpaper::setScalingMode (WallpaperState::TextureUVsScaling mode) {
+    this->m_state.setTextureUVsStrategy (mode);
+}
+
 std::shared_ptr<const CFBO> CWallpaper::findFBO (const std::string& name) const {
     const auto fbo = this->find (name);
 

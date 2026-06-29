@@ -159,6 +159,12 @@ protected:
      */
     void setupFramebuffers ();
 
+    /**
+     * Override the texture UV scaling mode (used by subclasses to enforce
+     * wallpaper-type-specific scaling — e.g. ZoomFillUVs for orthogonal scenes)
+     */
+    void setScalingMode (WallpaperState::TextureUVsScaling mode);
+
     const Wallpaper& m_wallpaperData;
 
     [[nodiscard]] const Wallpaper& getWallpaperData () const;
