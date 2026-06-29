@@ -35,10 +35,12 @@ public:
     [[nodiscard]] int getHeight () const override { return this->m_height; }
 
     void setSize (int width, int height);
+    void setPropertyValue (const std::string& key, const std::string& value);
 
 protected:
     void renderFrame (const glm::ivec4& viewport) override;
     void updateMouse (const glm::ivec4& viewport);
+    void injectProperties ();
     const Web& getWeb () const { return *this->getWallpaperData ().as<Web> (); }
 
     friend class CWallpaper;
@@ -57,5 +59,6 @@ private:
 
     glm::vec2 m_mousePosition = {};
     glm::vec2 m_mousePositionLast = {};
+    bool m_propertiesInjected = false;
 };
 }

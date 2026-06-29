@@ -5,7 +5,10 @@
 #include "WallpaperEngine/WebBrowser/CEF/WPSchemeHandlerFactory.h"
 
 #include "WallpaperEngine/Data/Model/Project.h"
+#include "WallpaperEngine/Data/Model/Property.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
+
+#include <sstream>
 
 using namespace WallpaperEngine::Render;
 using namespace WallpaperEngine::Render::Wallpapers;
@@ -63,10 +66,88 @@ void CWeb::setSize (const int width, const int height) {
     this->m_browser->GetHost ()->WasResized ();
 }
 
+static std::string jsEscapeString (const std::string& s) {
+    std::string out;
+    out.reserve (s.size ());
+    for (char c : s) {
+	if (c == '"') out += "\\\"";
+	else if (c == '\\') out += "\\\\";
+	else if (c == '\n') out += "\\n";
+	else if (c == '\r') out += "\\r";
+	else out += c;
+    }
+    return out;
+}
+
+void CWeb::injectProperties () {
+    using namespace WallpaperEngine::Data::Model;
+    const auto& props = this->getWeb ().project.properties;
+
+    std::ostringstream js;
+    js << "(function() {\n"
+       << "  if (!window.wallpaperPropertyListener) return;\n"
+       << "  if (!window.wallpaperPropertyListener.applyUserProperties) return;\n"
+       << "  window.wallpaperPropertyListener.applyUserProperties({\n";
+
+    bool first = true;
+    for (const auto& [key, prop] : props) {
+	// PropertyText is a display-label with no JS-visible value — skip it
+	if (dynamic_cast<const PropertyText*> (prop.get ())) {
+	    continue;
+	}
+
+	std::string valueStr;
+	if (auto* color = dynamic_cast<const PropertyColor*> (prop.get ())) {
+	    // WE convention: "r g b" space-separated floats in 0-1 range
+	    const auto& v = color->getVec4 ();
+	    std::ostringstream ss;
+	    ss << v.r << " " << v.g << " " << v.b;
+	    valueStr = ss.str ();
+	} else {
+	    valueStr = prop->toString ();
+	}
+
+	if (!first) js << ",\n";
+	first = false;
+	js << "    \"" << jsEscapeString (key) << "\": {\"value\": \"" << jsEscapeString (valueStr) << "\"}";
+    }
+
+    js << "\n  });\n"
+       << "})();\n";
+
+    CefRefPtr<CefFrame> frame = this->m_browser->GetMainFrame ();
+    if (frame) {
+	frame->ExecuteJavaScript (js.str (), frame->GetURL (), 0);
+    }
+
+    this->m_propertiesInjected = true;
+}
+
+void CWeb::setPropertyValue (const std::string& key, const std::string& value) {
+    std::ostringstream js;
+    js << "(function() {\n"
+       << "  if (!window.wallpaperPropertyListener) return;\n"
+       << "  if (!window.wallpaperPropertyListener.applyUserProperties) return;\n"
+       << "  window.wallpaperPropertyListener.applyUserProperties({\n"
+       << "    \"" << jsEscapeString (key) << "\": {\"value\": \"" << jsEscapeString (value) << "\"}\n"
+       << "  });\n"
+       << "})();\n";
+
+    CefRefPtr<CefFrame> frame = this->m_browser->GetMainFrame ();
+    if (frame) {
+	frame->ExecuteJavaScript (js.str (), frame->GetURL (), 0);
+    }
+}
+
 void CWeb::renderFrame (const glm::ivec4& viewport) {
     // ensure the viewport matches the window size, and resize if needed
     if (viewport.z != this->getWidth () || viewport.w != this->getHeight ()) {
 	this->setSize (viewport.z, viewport.w);
+    }
+
+    // inject user properties once, after the page has finished loading
+    if (!this->m_propertiesInjected && this->m_client->isPageLoaded ()) {
+	this->injectProperties ();
     }
 
     // ensure the virtual mouse position is up to date
