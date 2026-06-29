@@ -82,6 +82,7 @@ void ShaderUnit::preprocess () {
     this->preprocessIncludes ();
     this->preprocessRequires ();
     this->preprocessVariables ();
+    this->stripOrphanedEndifs ();
 
     // replace gl_FragColor with the equivalent
     const std::string from = "gl_FragColor";
@@ -720,6 +721,40 @@ void ShaderUnit::parseParameterConfiguration (
 	parameter->setName (name);
 
 	this->m_parameters.push_back (parameter);
+    }
+}
+
+void ShaderUnit::stripOrphanedEndifs () {
+    // Workshop shaders (authored for HLSL's lenient preprocessor) sometimes emit one extra
+    // #endif that has no matching #if.  GLSL's preprocessor rejects these.  Walk the shader
+    // line-by-line, track depth, and blank-out any #endif whose depth would underflow.
+    int depth = 0;
+    size_t pos = 0;
+
+    while (pos < this->m_preprocessed.size ()) {
+        const size_t lineEnd = this->m_preprocessed.find ('\n', pos);
+        const size_t end = (lineEnd == std::string::npos) ? this->m_preprocessed.size () : lineEnd;
+
+        // Trim leading whitespace for the directive check only
+        size_t tok = pos;
+        while (tok < end && (this->m_preprocessed [tok] == ' ' || this->m_preprocessed [tok] == '\t')) {
+            tok++;
+        }
+
+        const size_t remaining = end - tok;
+        if (remaining >= 3 && this->m_preprocessed.substr (tok, 3) == "#if") {
+            depth++;
+        } else if (remaining >= 6 && this->m_preprocessed.substr (tok, 6) == "#endif") {
+            if (depth == 0) {
+                // orphaned #endif — comment it out
+                this->m_preprocessed [tok] = '/';
+                this->m_preprocessed [tok + 1] = '/';
+            } else {
+                depth--;
+            }
+        }
+
+        pos = (lineEnd == std::string::npos) ? this->m_preprocessed.size () : lineEnd + 1;
     }
 }
 

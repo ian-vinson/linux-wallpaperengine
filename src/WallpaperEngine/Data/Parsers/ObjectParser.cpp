@@ -110,7 +110,17 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	                        || it.find ("disablepropagation") != it.end ()
 	                        || it.find ("ledsource") != it.end ()
 	                        || it.find ("config") != it.end ();
-	if (!it.optional ("solid", false) && !knownHintOnly) {
+	// Also suppress for pure group/anchor objects that have no type-discriminating field at
+	// all.  These are organisational containers (parallaxDepth groups, parent anchors, etc.)
+	// that WE silently skips — they only ever carry base fields like name/id/parent/angles.
+	const bool isPureGroup = imageIt == it.end ()
+	                      && soundIt == it.end ()
+	                      && particleIt == it.end ()
+	                      && textIt == it.end ()
+	                      && lightIt == it.end ()
+	                      && shapeIt == it.end ()
+	                      && cameraIt == it.end ();
+	if (!it.optional ("solid", false) && !knownHintOnly && !isPureGroup) {
 	    sLog.error ("Unknown object type found: ", it.dump ());
 	}
     }

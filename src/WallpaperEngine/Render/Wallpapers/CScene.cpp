@@ -251,7 +251,7 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
 	}
 	return nullptr;
     } else {
-	sLog.error ("Unknown object type, creating placeholder, empty object: ", object.id);
+	sLog.debug ("Unknown object type, creating placeholder, empty object: ", object.id);
 	renderObject = new CObject (*this, object);
     }
 
