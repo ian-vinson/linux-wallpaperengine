@@ -41,6 +41,7 @@ protected:
     void renderFrame (const glm::ivec4& viewport) override;
     void updateMouse (const glm::ivec4& viewport);
     void injectProperties ();
+    void injectAudio ();
     const Web& getWeb () const { return *this->getWallpaperData ().as<Web> (); }
 
     friend class CWallpaper;
@@ -60,5 +61,6 @@ private:
     glm::vec2 m_mousePosition = {};
     glm::vec2 m_mousePositionLast = {};
     bool m_propertiesInjected = false;
+    int m_audioFrameCount = 0;
 };
 }

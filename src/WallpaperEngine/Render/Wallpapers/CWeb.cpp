@@ -4,6 +4,7 @@
 #include "CWeb.h"
 #include "WallpaperEngine/WebBrowser/CEF/WPSchemeHandlerFactory.h"
 
+#include "WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h"
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Property.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
@@ -83,6 +84,21 @@ void CWeb::injectProperties () {
     using namespace WallpaperEngine::Data::Model;
     const auto& props = this->getWeb ().project.properties;
 
+    // Install the audio listener shim so wallpaperRegisterAudioListener(cb) captures
+    // the callback even if supportsAudioProcessing is false — avoids ReferenceErrors.
+    {
+	CefRefPtr<CefFrame> frame = this->m_browser->GetMainFrame ();
+	if (frame) {
+	    const std::string audioShim
+		= "(function(){"
+		  "window.__muralAudioCallback=null;"
+		  "window.wallpaperRegisterAudioListener=function(cb){"
+		  "window.__muralAudioCallback=cb;};"
+		  "})();";
+	    frame->ExecuteJavaScript (audioShim, frame->GetURL (), 0);
+	}
+    }
+
     std::ostringstream js;
     js << "(function() {\n"
        << "  if (!window.wallpaperPropertyListener) return;\n"
@@ -139,6 +155,40 @@ void CWeb::setPropertyValue (const std::string& key, const std::string& value) {
     }
 }
 
+void CWeb::injectAudio () {
+    // Throttle: only inject every other frame to avoid building a 128-float string at 60 fps
+    if ((this->m_audioFrameCount++ & 1) != 0) {
+	return;
+    }
+
+    CefRefPtr<CefFrame> frame = this->m_browser->GetMainFrame ();
+    if (!frame) {
+	return;
+    }
+
+    const auto& recorder = this->getAudioContext ().getRecorder ();
+
+    // Build Float32Array literal with 128 elements: [0..63] left, [64..127] right.
+    // lwe does not separate left/right channels — mirror audio64 for both, matching
+    // how CPass assigns g_AudioSpectrum64Left == g_AudioSpectrum64Right.
+    std::ostringstream js;
+    js << "(function(){"
+       << "if(!window.__muralAudioCallback)return;"
+       << "var a=new Float32Array([";
+
+    for (int i = 0; i < 64; ++i) {
+	if (i > 0) js << ',';
+	js << recorder.audio64[i];
+    }
+    for (int i = 0; i < 64; ++i) {
+	js << ',' << recorder.audio64[i];
+    }
+
+    js << "]);window.__muralAudioCallback(a);})();";
+
+    frame->ExecuteJavaScript (js.str (), frame->GetURL (), 0);
+}
+
 void CWeb::renderFrame (const glm::ivec4& viewport) {
     // ensure the viewport matches the window size, and resize if needed
     if (viewport.z != this->getWidth () || viewport.w != this->getHeight ()) {
@@ -166,6 +216,10 @@ void CWeb::renderFrame (const glm::ivec4& viewport) {
     // But for now let it be like this
     //  glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     CefDoMessageLoopWork ();
+
+    if (this->getWeb ().project.supportsAudioProcessing) {
+	this->injectAudio ();
+    }
 }
 
 void CWeb::updateMouse (const glm::ivec4& viewport) {
