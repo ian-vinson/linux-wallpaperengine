@@ -402,6 +402,13 @@ std::string ShaderUnit::applyLinkedVaryingCompatibility (std::string source) con
 	    continue;
 	}
 
+	// If the vertex shader already declares this varying as vec4 (even inside a combo
+	// branch), the shader handles its own type variants — leave it untouched. The
+	// second pass below handles any vec4→vec2 read contexts independently.
+	if (vertexHasVec4) {
+	    continue;
+	}
+
 	if (vertexHasVec2) {
 	    // Upgrade vec2 declaration to vec4 and wrap bare assignments.
 	    source = std::regex_replace (source, vertexVec2Decl, "varying vec4 " + name + ";");
