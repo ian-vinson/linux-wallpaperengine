@@ -99,6 +99,8 @@ struct SceneData {
 	    int width;
 	    int height;
 	    bool isAuto;
+	    bool hasOrthogonal;
+	    float perspectiveOverrideFov;
 	    UserSettingUniquePtr nearz;
 	    UserSettingUniquePtr farz;
 	    UserSettingUniquePtr fov;

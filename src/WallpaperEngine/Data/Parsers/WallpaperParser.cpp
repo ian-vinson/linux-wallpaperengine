@@ -25,8 +25,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
     const auto scene = JSON::parse (project.assetLocator->readString (file));
     const auto camera = scene.require ("camera", "Scenes must have a camera section");
     const auto general = scene.require ("general", "Scenes must have a general section");
-    const auto projection
-	= general.require ("orthogonalprojection", "General section must have orthogonal projection info");
+    const auto projection = general.optional ("orthogonalprojection");
     const auto objects = scene.require ("objects", "Scenes must have an objects section");
     const auto& properties = project.properties;
 
@@ -69,12 +68,14 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
                     .up = camera.require <glm::vec3> ("up", "Camera must have an up position"),
                 },
                 .projection = {
-                    .width  = projection.optional ("auto", false) ? 0 : projection.require <int> ("width",  "Projection must have a width"),
-                    .height = projection.optional ("auto", false) ? 0 : projection.require <int> ("height", "Projection must have a height"),
-                    .isAuto = projection.optional ("auto", false),
-                    .nearz = camera.user ("nearz", properties, 0.0f),
-                    .farz = camera.user ("farz", properties, 1000.0f),
-                    .fov = camera.user ("fov", properties, 50.0f)
+                    .width  = (projection.has_value () && !projection->optional ("auto", false)) ? projection->require <int> ("width",  "Projection must have a width") : 0,
+                    .height = (projection.has_value () && !projection->optional ("auto", false)) ? projection->require <int> ("height", "Projection must have a height") : 0,
+                    .isAuto = projection.has_value () && projection->optional ("auto", false),
+                    .hasOrthogonal = projection.has_value (),
+                    .perspectiveOverrideFov = general.optional ("perspectiveoverridefov", 0.0f),
+                    .nearz = general.user ("nearz", properties, 0.0f),
+                    .farz = general.user ("farz", properties, 10000.0f),
+                    .fov = general.user ("fov", properties, 50.0f)
                 }
             },
             .objects = parseObjects (objects, project),

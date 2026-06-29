@@ -71,7 +71,20 @@ CScene::CScene (
     this->m_parallaxDisplacement = { 0, 0 };
 
     // TODO: CONVERSION
-    this->m_camera->setOrthogonalProjection (width, height);
+    if (scene->camera.projection.hasOrthogonal) {
+        this->m_camera->setOrthogonalProjection (width, height);
+    } else if (scene->camera.projection.perspectiveOverrideFov > 0.0f) {
+        const float screenW = this->getContext ().getOutput ().getFullWidth ();
+        const float screenH = this->getContext ().getOutput ().getFullHeight ();
+        const float fov = scene->camera.projection.perspectiveOverrideFov;
+        const float nearz = scene->camera.projection.nearz->value->getFloat ();
+        const float farz = scene->camera.projection.farz->value->getFloat ();
+        this->m_camera->setPerspectiveProjection (screenW, screenH, fov, nearz, farz);
+    } else {
+        const float screenW = this->getContext ().getOutput ().getFullWidth ();
+        const float screenH = this->getContext ().getOutput ().getFullHeight ();
+        this->m_camera->setOrthogonalProjection (screenW, screenH);
+    }
 
     // setup framebuffers here as they're required for the scene setup
     this->setupFramebuffers ();
