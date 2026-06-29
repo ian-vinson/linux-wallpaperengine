@@ -17,6 +17,13 @@ CWeb::CWeb (
     const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext, WebBrowserContext& browserContext,
     const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
 ) : CWallpaper (wallpaper, context, audioContext, scalingMode, clampMode), m_browserContext (browserContext) {
+    // Seed m_width/m_height from the output before creating framebuffers and the CEF browser.
+    // Without this, CreateBrowserSync triggers GetViewRect and receives 16×17 — the wrong size.
+    const int outputWidth = context.getOutput ().getFullWidth ();
+    const int outputHeight = context.getOutput ().getFullHeight ();
+    if (outputWidth > 0) this->m_width = outputWidth;
+    if (outputHeight > 0) this->m_height = outputHeight;
+
     // setup framebuffers
     this->setupFramebuffers ();
 

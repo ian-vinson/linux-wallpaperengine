@@ -50,7 +50,7 @@ private:
     WallpaperEngine::WebBrowser::CEF::RenderHandler* m_renderHandler = nullptr;
 
     int m_width = 16;
-    int m_height = 17;
+    int m_height = 16;
 
     WallpaperEngine::Input::MouseClickStatus m_leftClick = Input::Released;
     WallpaperEngine::Input::MouseClickStatus m_rightClick = Input::Released;
