@@ -484,17 +484,19 @@ std::string ShaderUnit::applyLinkedVaryingCompatibility (std::string source) con
 	}
     }
 
-    // SECOND PASS: fix unswizzled reads of vec4 varyings that are already declared
-    // as vec4 in the vertex shader itself (not upgraded from vec2 above).
-    // Pattern: lines where the assignment target is vec2 but the RHS contains an
-    // unswizzled vec4 varying — e.g. "vec2 da = v_PointerUV * vec2expr;"
-    // This matches WE shaders that rely on DX11 implicit vec4→vec2 truncation.
+    // SECOND PASS: fix unswizzled reads of vec4 identifiers in vec2 assignment contexts.
+    // Covers: (1) varyings already declared as vec4 in the vertex shader,
+    //         (2) local vec4 variables (e.g. from mat4 multiply results).
+    // WE's own GLSL compiler permits implicit vec4→vec2 truncation; standard glslang
+    // does not — so we must insert explicit .xy swizzles.
     {
-	static const std::regex vertexVec4Re (R"(\bvarying\s+vec4\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
-	std::sregex_iterator it (source.cbegin (), source.cend (), vertexVec4Re);
+	static const std::regex anyVec4Re (R"(\bvec4\s+([A-Za-z_][A-Za-z0-9_]*)\b)");
+	std::sregex_iterator it (source.cbegin (), source.cend (), anyVec4Re);
 	std::sregex_iterator end;
+	std::set<std::string> processed;
 	for (; it != end; ++it) {
 	    const std::string vname = (*it)[1].str ();
+	    if (!processed.insert (vname).second) continue;
 	    // Find lines of the form "vec2 var = ... vname ..." where vname has no swizzle.
 	    // Lazy [^\n]*? so we find the first unswizzled occurrence after the '='.
 	    const std::regex vec2Line ("(vec2\\s+\\w+\\s*=[^\\n]*?)\\b(" + vname + ")\\b(?![.\\[\\(])");
