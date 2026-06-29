@@ -19,7 +19,7 @@ public:
     Camera (Wallpapers::CScene& scene, const SceneData::Camera& camera);
     ~Camera ();
 
-    void setOrthogonalProjection (const float width, const float height);
+    void setOrthogonalProjection (float width, float height);
     void setPerspectiveProjection (const float width, const float height, const float fov, const float near, const float far);
     void applyObjectCamera (const glm::vec3& eye, float zoom);
 

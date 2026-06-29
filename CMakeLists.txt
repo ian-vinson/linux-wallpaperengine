@@ -537,6 +537,8 @@ set(COMMON_SOURCES
 
     src/WallpaperEngine/Scripting/ConsoleObject.h
     src/WallpaperEngine/Scripting/ConsoleObject.cpp
+    src/WallpaperEngine/Scripting/LocalStorageObject.h
+    src/WallpaperEngine/Scripting/LocalStorageObject.cpp
     src/WallpaperEngine/Scripting/EngineObject.h
     src/WallpaperEngine/Scripting/EngineObject.cpp
     src/WallpaperEngine/Scripting/InputObject.h

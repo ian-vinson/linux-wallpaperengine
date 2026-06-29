@@ -220,6 +220,7 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
     this->m_sceneObject = std::make_unique<SceneObject> (*this, scene);
     this->m_consoleObject = std::make_unique<ConsoleObject> (*this, scene);
     this->m_scriptPropertiesObject = std::make_unique<ScriptPropertiesObject> (*this, scene);
+    this->m_localStorageObject = std::make_unique<LocalStorageObject> (*this, scene);
 
     auto wemath = std::make_unique<Modules::MathModule> (*this);
     auto wecolor = std::make_unique<Modules::ColorModule> (*this);
@@ -246,6 +247,10 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
     JS_DefinePropertyValueStr (
 	this->m_context, this->m_globalThis, "shared", JS_NewObject (this->m_context), JS_PROP_ENUMERABLE
     );
+    JS_DefinePropertyValueStr (
+	this->m_context, this->m_globalThis, "localStorage", this->m_localStorageObject->getInstance (),
+	JS_PROP_ENUMERABLE
+    );
 }
 
 ScriptEngine::~ScriptEngine () {
@@ -267,6 +272,7 @@ ScriptEngine::~ScriptEngine () {
     this->m_inputObject.reset ();
     this->m_sceneObject.reset ();
     this->m_scriptPropertiesObject.reset ();
+    this->m_localStorageObject.reset ();
     this->m_modules.clear ();
     this->m_scriptModules.clear ();
 
