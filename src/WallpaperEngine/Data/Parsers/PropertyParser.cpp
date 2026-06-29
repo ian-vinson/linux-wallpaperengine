@@ -21,7 +21,7 @@ PropertySharedPtr PropertyParser::parse (const JSON& it, const std::string& name
     if (type == "combo") {
 	return parseCombo (it, name);
     }
-    if (type == "text") {
+    if (type == "text" || type == "Text") {
 	return parseText (it, name);
     }
     if (type == "scenetexture") {
