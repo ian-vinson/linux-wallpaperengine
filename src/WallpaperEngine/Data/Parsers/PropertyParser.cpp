@@ -85,7 +85,7 @@ PropertySharedPtr PropertyParser::parseColor (const JSON& it, const std::string&
 	    .name = name,
 	    .text = it.optional<std::string> ("text", ""),
 	},
-	it.require ("value", "Property must have a value")
+	it.optional<std::string> ("value", "")
     );
 }
 
@@ -110,7 +110,7 @@ PropertySharedPtr PropertyParser::parseSlider (const JSON& it, const std::string
 	    .max = it.optional ("max", 0.0f),
 	    .step = it.optional ("step", 0.0f),
 	},
-	it.require ("value", "Property must have a value")
+	it.optional ("value", 0.0f)
     );
 }
 
@@ -127,7 +127,7 @@ PropertySharedPtr PropertyParser::parseSceneTexture (const JSON& it, const std::
 	    .name = name,
 	    .text = it.optional<std::string> ("text", ""),
 	},
-	it.require ("value", "Property must have a value")
+	it.optional<std::string> ("value", "")
     );
 }
 
@@ -147,6 +147,6 @@ PropertySharedPtr PropertyParser::parseTextInput (const JSON& it, const std::str
 	    .name = name,
 	    .text = it.optional<std::string> ("text", ""),
 	},
-	it.require ("value", "Property must have a value").dump ()
+	it.optional<std::string> ("value", "")
     );
 }
