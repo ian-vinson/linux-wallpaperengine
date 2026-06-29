@@ -43,10 +43,9 @@ void Camera::setOrthogonalProjection (const float width, const float height) {
     this->m_width = width;
     this->m_height = height;
 
-    float nearz = this->m_camera.projection.nearz->value->getFloat ();
     float farz = this->m_camera.projection.farz->value->getFloat ();
 
-    this->m_projection = glm::ortho<float> (-width / 2.0, width / 2.0, -height / 2.0, height / 2.0, nearz, farz);
+    this->m_projection = glm::ortho<float> (-width / 2.0, width / 2.0, -height / 2.0, height / 2.0, 0.0f, farz);
     this->m_projection = glm::translate (this->m_projection, this->getEye ());
     this->m_isOrthogonal = true;
 }
