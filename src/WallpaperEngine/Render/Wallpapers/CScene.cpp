@@ -34,44 +34,54 @@ CScene::CScene (
     // setup the scene camera
     this->m_camera = std::make_unique<Camera> (*this, scene->camera);
 
-    float width = scene->camera.projection.width;
-    float height = scene->camera.projection.height;
-
-    // detect size if the orthogonal project is auto
-    if (scene->camera.projection.isAuto) {
-	glm::vec2 maxExtent = { 0.0f, 0.0f };
-
-	for (const auto& object : scene->objects) {
-	    if (!object->is<Image> ()) {
-		continue;
-	    }
-
-	    const auto* image = object->as<Image> ();
-	    if (!image->origin || !image->origin->value) {
-		continue;
-	    }
-
-	    const glm::vec3 origin = image->origin->value->getVec3 ();
-	    const glm::vec2 halfSize = image->size / 2.0f;
-
-	    maxExtent.x = glm::max (maxExtent.x, glm::abs (origin.x) + halfSize.x);
-	    maxExtent.y = glm::max (maxExtent.y, glm::abs (origin.y) + halfSize.y);
-	}
-
-	if (maxExtent.x > 0.0f && maxExtent.y > 0.0f) {
-	    width = maxExtent.x * 2.0f;
-	    height = maxExtent.y * 2.0f;
-	} else {
-	    width = this->getContext ().getOutput ().getFullWidth ();
-	    height = this->getContext ().getOutput ().getFullHeight ();
-	    sLog.debug ("Auto projection: falling back to screen resolution ", width, "x", height);
-	}
-    }
+    const float nearz = scene->camera.projection.nearz->value->getFloat ();
+    const float farz = scene->camera.projection.farz->value->getFloat ();
 
     this->m_parallaxDisplacement = { 0, 0 };
 
-    // TODO: CONVERSION
-    this->m_camera->setOrthogonalProjection (width, height);
+    if (scene->camera.projection.hasOrthogonal) {
+	float width = static_cast<float> (scene->camera.projection.width);
+	float height = static_cast<float> (scene->camera.projection.height);
+
+	if (scene->camera.projection.isAuto) {
+	    glm::vec2 maxExtent = { 0.0f, 0.0f };
+
+	    for (const auto& object : scene->objects) {
+		if (!object->is<Image> ()) {
+		    continue;
+		}
+
+		const auto* image = object->as<Image> ();
+		if (!image->origin || !image->origin->value) {
+		    continue;
+		}
+
+		const glm::vec3 origin = image->origin->value->getVec3 ();
+		const glm::vec2 halfSize = image->size / 2.0f;
+
+		maxExtent.x = glm::max (maxExtent.x, glm::abs (origin.x) + halfSize.x);
+		maxExtent.y = glm::max (maxExtent.y, glm::abs (origin.y) + halfSize.y);
+	    }
+
+	    if (maxExtent.x > 0.0f && maxExtent.y > 0.0f) {
+		width = maxExtent.x * 2.0f;
+		height = maxExtent.y * 2.0f;
+	    } else {
+		width = static_cast<float> (this->getContext ().getOutput ().getFullWidth ());
+		height = static_cast<float> (this->getContext ().getOutput ().getFullHeight ());
+		sLog.debug ("Auto projection: falling back to screen resolution ", width, "x", height);
+	    }
+	}
+
+	this->m_camera->setOrthogonalProjection (width, height);
+    } else {
+	const float w = static_cast<float> (this->getContext ().getOutput ().getFullWidth ());
+	const float h = static_cast<float> (this->getContext ().getOutput ().getFullHeight ());
+	const float fov = scene->camera.projection.perspectiveOverrideFov > 0.0f
+	    ? scene->camera.projection.perspectiveOverrideFov
+	    : scene->camera.projection.fov->value->getFloat ();
+	this->m_camera->setPerspectiveProjection (w, h, fov, nearz, farz);
+    }
 
     // setup framebuffers here as they're required for the scene setup
     this->setupFramebuffers ();

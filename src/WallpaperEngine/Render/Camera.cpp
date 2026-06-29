@@ -51,6 +51,15 @@ void Camera::setOrthogonalProjection (const float width, const float height) {
     this->m_isOrthogonal = true;
 }
 
+void Camera::setPerspectiveProjection (const float width, const float height, const float fov, const float near, const float far) {
+    this->m_width = width;
+    this->m_height = height;
+
+    const float aspect = width / height;
+    this->m_projection = glm::perspective (glm::radians (fov), aspect, near, far);
+    this->m_isOrthogonal = false;
+}
+
 void Camera::applyObjectCamera (const glm::vec3& eye, float zoom) {
     if (zoom <= 0.0f)
 	zoom = 1.0f;
