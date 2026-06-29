@@ -96,9 +96,9 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
     } else if (cameraIt != it.end () && cameraIt->is_string ()) {
 	return parseCamera (it, project, std::move (basedata));
     } else if (lightIt != it.end ()) {
-	sLog.error ("Light objects are not supported yet");
+	sLog.debug ("Light object skipped (not yet implemented): id=", basedata.id, " name=", basedata.name);
     } else if (shapeIt != it.end ()) {
-	sLog.error ("VolumeLight objects are not supported yet");
+	sLog.debug ("VolumeLight (shape) object skipped (not yet implemented): id=", basedata.id, " name=", basedata.name);
     } else {
 	// Suppress the warning for typeless objects that carry only known annotation fields:
 	//   solid=true      — compositor sort hint (already suppresses when true)
