@@ -88,6 +88,7 @@ CTexture::CTexture (RenderContext& context, TextureUniquePtr header) :
 		case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
 		case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
 		case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+		case GL_COMPRESSED_RGBA_BPTC_UNORM:
 		    glCompressedTexImage2D (
 			GL_TEXTURE_2D, level, internalFormat, width, height, 0, bufferSize, dataptr
 		    );
@@ -153,6 +154,8 @@ GLint CTexture::setupInternalFormat () const {
 	    return GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
 	case TextureFormat_DXT1:
 	    return GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+	case TextureFormat_BC7:
+	    return GL_COMPRESSED_RGBA_BPTC_UNORM;
 	case TextureFormat_ARGB8888:
 	    return GL_RGBA8;
 	case TextureFormat_R8:

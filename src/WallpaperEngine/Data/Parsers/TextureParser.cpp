@@ -40,7 +40,39 @@ TextureUniquePtr TextureParser::parse (const BinaryReader& file) {
 MipmapSharedPtr TextureParser::parseMipmap (const BinaryReader& file, const Texture& header) {
     auto result = std::make_shared<Mipmap> ();
 
-    // TEXB0004 has some extra data in the header that has to be handled
+    // TEXB0004 raw-GL variant (DXT5/BC7): no per-mipmap width/height or JSON.
+    // Width/height come from the TEXI header; compression is inferred from sizes.
+    if (header.containerVersion == ContainerVersion_TEXB0004 && header.freeImageFormat == FIF_UNKNOWN) {
+	result->width = header.textureWidth;
+	result->height = header.textureHeight;
+	result->uncompressedSize = file.nextInt ();
+	result->compressedSize = file.nextInt ();
+	result->compression = (result->uncompressedSize != result->compressedSize) ? 1 : 0;
+
+	result->uncompressedData = std::unique_ptr<char[]> (new char[result->uncompressedSize]);
+
+	if (result->compression == 1) {
+	    result->compressedData = std::unique_ptr<char[]> (new char[result->compressedSize]);
+	    file.next (result->compressedData.get (), result->compressedSize);
+
+	    int bytes = LZ4_decompress_safe (
+		result->compressedData.get (), result->uncompressedData.get (), result->compressedSize,
+		result->uncompressedSize
+	    );
+
+	    if (bytes < 0) {
+		sLog.exception (
+		    "TEXV0005: LZ4 decompression failed (", header.textureWidth, "x", header.textureHeight, ")"
+		);
+	    }
+	} else {
+	    file.next (result->uncompressedData.get (), result->uncompressedSize);
+	}
+
+	return result;
+    }
+
+    // TEXB0004 FreeImage variant (JPEG/PNG embedded in container): has JSON metadata per mipmap
     if (header.containerVersion == ContainerVersion_TEXB0004) {
 	// some integers that we can ignore as they only seem to affect
 	// the editor
@@ -219,8 +251,16 @@ void TextureParser::parseContainer (Texture& header, const BinaryReader& file) {
 	    header.freeImageFormat = FIF_MP4;
 	}
 
-	// default to TEXB0003 format here
-	if (header.freeImageFormat != FIF_MP4) {
+	if (header.freeImageFormat == FIF_UNKNOWN) {
+	    // Raw-GL format (DXT5/BC7 etc.): TEXB0004 block has 3 extra uint32 fields
+	    // before the per-image mip loop — gl_format, block_width, block_height.
+	    // These are redundant with the TEXI header; consume and discard them.
+	    std::ignore = file.nextUInt32 (); // gl_format
+	    std::ignore = file.nextUInt32 (); // block_width
+	    std::ignore = file.nextUInt32 (); // block_height
+	    // Keep containerVersion = TEXB0004 so parseMipmap uses the raw-GL path.
+	} else if (header.freeImageFormat != FIF_MP4) {
+	    // FreeImage variant (JPEG/PNG embedded): downgrade to TEXB0003 path.
 	    header.containerVersion = ContainerVersion_TEXB0003;
 	}
     } else if (strncmp (magic, "TEXB0003", 9) == 0) {
