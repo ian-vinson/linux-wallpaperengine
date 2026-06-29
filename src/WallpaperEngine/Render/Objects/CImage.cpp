@@ -221,8 +221,13 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
 	size.y = static_cast<float> (this->getImage ().model->height.value ());
     }
 
+    // autosize: mesh quad uses the texture's native pixel dimensions
+    if (this->getImage ().model->autosize && this->m_texture != nullptr) {
+	size.x = static_cast<float> (this->m_texture->getRealWidth ());
+	size.y = static_cast<float> (this->m_texture->getRealHeight ());
+    }
+
     // fullscreen layers should use the whole projection's size
-    // TODO: WHAT SHOULD AUTOSIZE DO?
     if (this->getImage ().model->fullscreen) {
 	size = { scene_width, scene_height };
 	origin = { scene_width / 2, scene_height / 2, 0 };
@@ -306,6 +311,21 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
     // TODO: RECALCULATE THESE POSITIONS FOR PASSTHROUGH SO THEY TAKE THE RIGHT PART OF THE TEXTURE
     float x = 0.0f;
     float y = 0.0f;
+
+    // cropoffset: shift UV origin into the texture to show the correct sprite region
+    if (this->getImage ().model->cropoffset.has_value ()) {
+	const glm::vec2& co = *this->getImage ().model->cropoffset;
+	const float tw = static_cast<float> (this->getTexture ()->getTextureWidth (0));
+	const float th = static_cast<float> (this->getTexture ()->getTextureHeight (0));
+	if (tw > 0.0f && th > 0.0f) {
+	    const float uOff = co.x / tw;
+	    const float vOff = co.y / th;
+	    x += uOff;
+	    y += vOff;
+	    width += uOff;
+	    height += vOff;
+	}
+    }
 
     if (this->getTexture ()->isAnimated ()) {
 	// animations should be copied completely
