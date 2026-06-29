@@ -533,6 +533,101 @@ std::string ShaderUnit::applyFragmentTexCoordCompatibility (std::string source) 
     return source;
 }
 
+std::string ShaderUnit::applyFragmentWritableVaryings (std::string source) const {
+    if (this->m_type != GLSLContext::UnitType_Fragment) {
+        return source;
+    }
+
+    // Only apply when the fragment shader actually WRITES to v_TexCoord
+    // (matches v_TexCoord = and v_TexCoord.xy = etc., but not ==).
+    // Shaders that only read v_TexCoord don't need the writable local alias.
+    static const std::regex writePattern (R"(\bv_TexCoord(?:\.[xyzwrgba]+)?\s*=[^=])");
+    if (!std::regex_search (source, writePattern)) {
+        return source;
+    }
+
+    // Build an uppercase combo map so we can evaluate #if/#ifdef/#ifndef guards the
+    // same way the GLSL compiler does (combos are emitted as uppercase #defines).
+    std::map<std::string, int> upperCombos;
+    const auto insertUpper = [&] (const ComboMap& map) {
+        for (const auto& [k, v] : map) {
+            std::string up;
+            std::ranges::transform (k, std::back_inserter (up), ::toupper);
+            upperCombos.emplace (up, v);
+        }
+    };
+    insertUpper (this->m_combos);
+    insertUpper (this->m_overrideCombos);
+    insertUpper (this->m_discoveredCombos);
+
+    // Walk the source line-by-line tracking #if/#else/#endif to find the
+    // varying <type> v_TexCoord declaration in the ACTIVE combo branch.
+    static const std::regex ifRe     (R"(^\s*#if\s+(\w+))");
+    static const std::regex ifdefRe  (R"(^\s*#ifdef\s+(\w+))");
+    static const std::regex ifndefRe (R"(^\s*#ifndef\s+(\w+))");
+    static const std::regex elseRe   (R"(^\s*#else\b)");
+    static const std::regex endifRe  (R"(^\s*#endif\b)");
+    static const std::regex varyDecl (R"(\bvarying\s+(\S+)\s+v_TexCoord\s*;)");
+
+    std::vector<bool> activeStack = {true};
+    std::string foundType;
+    size_t pos = 0;
+
+    while (pos < source.size () && foundType.empty ()) {
+        const size_t lineEnd = source.find ('\n', pos);
+        const size_t end     = (lineEnd == std::string::npos) ? source.size () : lineEnd;
+        const std::string line = source.substr (pos, end - pos);
+        std::smatch m;
+
+        if (std::regex_search (line, m, ifRe)) {
+            std::string up;
+            std::ranges::transform (m[1].str (), std::back_inserter (up), ::toupper);
+            const int val = upperCombos.count (up) ? upperCombos.at (up) : 0;
+            activeStack.push_back (activeStack.back () && (val != 0));
+        } else if (std::regex_search (line, m, ifdefRe)) {
+            std::string up;
+            std::ranges::transform (m[1].str (), std::back_inserter (up), ::toupper);
+            activeStack.push_back (activeStack.back () && (upperCombos.count (up) > 0));
+        } else if (std::regex_search (line, m, ifndefRe)) {
+            std::string up;
+            std::ranges::transform (m[1].str (), std::back_inserter (up), ::toupper);
+            activeStack.push_back (activeStack.back () && (upperCombos.count (up) == 0));
+        } else if (std::regex_search (line, elseRe)) {
+            if (activeStack.size () >= 2) {
+                const bool parentActive = activeStack[activeStack.size () - 2];
+                activeStack.back () = parentActive && !activeStack.back ();
+            }
+        } else if (std::regex_search (line, endifRe)) {
+            if (activeStack.size () > 1) {
+                activeStack.pop_back ();
+            }
+        } else if (activeStack.back () && std::regex_search (line, m, varyDecl)) {
+            foundType = m[1].str ();
+        }
+
+        pos = (lineEnd == std::string::npos) ? source.size () : lineEnd + 1;
+    }
+
+    if (foundType.empty ()) {
+        return source;
+    }
+
+    // Inject a local writable alias at the top of main().
+    // GLSL scoping: the RHS v_TexCoord resolves to the outer-scope (read-only) input
+    // before the local variable enters scope — the local copy is then freely writable.
+    const size_t mainPos = source.find ("void main");
+    if (mainPos == std::string::npos) {
+        return source;
+    }
+    const size_t bracePos = source.find ('{', mainPos);
+    if (bracePos == std::string::npos) {
+        return source;
+    }
+
+    source.insert (bracePos + 1, "\n    " + foundType + " v_TexCoord = v_TexCoord;");
+    return source;
+}
+
 void ShaderUnit::parseComboConfiguration (const std::string& content, const int defaultValue) {
     // TODO: SUPPORT REQUIRES SO WE PROPERLY FOLLOW THE REQUIRED CHAIN
     JSON data;
@@ -843,7 +938,9 @@ const std::string& ShaderUnit::compile () {
 
     // this should be the rest of the shader
     this->m_final
-	+= this->applyFragmentTexCoordCompatibility (this->applyLinkedVaryingCompatibility (this->m_preprocessed));
+	+= this->applyFragmentTexCoordCompatibility (
+	    this->applyFragmentWritableVaryings (
+		this->applyLinkedVaryingCompatibility (this->m_preprocessed)));
 
     // the pass itself handles shader compilation, the unit doesn't have enough information for this step
     return this->m_final;

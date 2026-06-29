@@ -105,6 +105,11 @@ private:
      */
     [[nodiscard]] std::string applyFragmentTexCoordCompatibility (std::string source) const;
     /**
+     * Makes v_TexCoord writable in fragment shaders by injecting a local variable alias at the
+     * top of main() that shadows the read-only varying input.
+     */
+    [[nodiscard]] std::string applyFragmentWritableVaryings (std::string source) const;
+    /**
      * Removes unmatched #endif directives (workshop shaders sometimes emit one extra #endif
      * that HLSL's preprocessor silently ignores but GLSL's does not).
      */
