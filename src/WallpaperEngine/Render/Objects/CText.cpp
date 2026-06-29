@@ -391,6 +391,12 @@ void CText::render () {
 	);
 	const std::string current = se.layerText (m_layerHandle);
 	renderedText = current.empty () ? std::string (" ") : current;
+    } else if (m_text.text->value->getType () == DynamicValue::String) {
+	// No layer script (createLayerScript failed): read text updated by ScriptEngine::tick().
+	const std::string& dvText = m_text.text->value->getString ();
+	if (!dvText.empty ()) {
+	    renderedText = dvText;
+	}
     }
 
     const unsigned int pixelSize = computeEffectivePixelSize ();

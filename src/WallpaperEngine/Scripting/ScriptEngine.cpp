@@ -680,11 +680,9 @@ void ScriptEngine::tick () {
 	    JS_FreeValue (this->m_context, args[0]);
 	});
 
-	if (JS_IsException (result)) {
-	    continue;
+	if (!JS_IsException (result) && !JS_IsUndefined (result)) {
+	    jsToDynamicValue (this->m_context, result, module.value);
 	}
-
-	jsToDynamicValue (this->m_context, result, module.value);
     }
 }
 
