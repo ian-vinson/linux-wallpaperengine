@@ -100,9 +100,9 @@ CScene::CScene (
     this->alias ("_alias_lightCookie", "_rt_shadowAtlas");
 
     // set clear color
-    const glm::vec3 clearColor = scene->colors.clear->value->getVec3 ();
+    const glm::vec3 clearVec = scene->colors.clear->value->getVec3 ();
 
-    glClearColor (clearColor.r, clearColor.g, clearColor.b, 1.0f);
+    glClearColor (clearVec.r, clearVec.g, clearVec.b, 1.0f);
 
     // create all objects based off their dependencies
     for (const auto& object : scene->objects) {
@@ -261,7 +261,9 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
 	const auto& cam = *object.as<CameraObject> ();
 	if (cam.cameraName == "default" && cam.origin && cam.origin->value) {
 	    float zoom = (cam.zoom && cam.zoom->value) ? cam.zoom->value->getFloat () : 1.0f;
-	    this->m_camera->applyObjectCamera (cam.origin->value->getVec3 (), zoom);
+	    if (!getenv ("LWE_DISABLE_CAMERA_OBJECT")) {
+		this->m_camera->applyObjectCamera (cam.origin->value->getVec3 (), zoom);
+	    }
 	}
 	return nullptr;
     } else {

@@ -20,10 +20,6 @@
 using namespace WallpaperEngine::Render::Objects;
 
 namespace {
-// TODO: Phase 2 – load font from wallpaper's materials/fonts/ using AssetLocator
-// Phase 1 uses a system font instead of the font shipped by the wallpaper.
-// Wallpaper Engine bundles .ttf files in `materials/fonts/`; wiring those in
-// is deferred to Phase 2 along with dynamic/scripted text.
 const std::vector<std::string> kFontCandidates = {
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -54,6 +50,39 @@ void main() {
     FragColor = vec4(uColor.rgb, uColor.a * coverage);
 }
 )glsl";
+
+// Decode a UTF-8 string into Unicode codepoints for FT_Load_Char.
+// Iterating raw bytes passes individual continuation bytes (0x80–0xBF) as
+// codepoints, producing garbage for any multi-byte character (CJK, custom
+// stylized glyphs, etc.).
+std::vector<FT_ULong> utf8ToCodepoints (const std::string& s) {
+    std::vector<FT_ULong> cps;
+    cps.reserve (s.size ());
+    for (size_t i = 0; i < s.size ();) {
+        const auto c = static_cast<unsigned char> (s[i]);
+        FT_ULong cp;
+        int bytes;
+        if (c < 0x80) {
+            cp = c;
+            bytes = 1;
+        } else if (c < 0xE0) {
+            cp = c & 0x1F;
+            bytes = 2;
+        } else if (c < 0xF0) {
+            cp = c & 0x0F;
+            bytes = 3;
+        } else {
+            cp = c & 0x07;
+            bytes = 4;
+        }
+        for (int j = 1; j < bytes && i + static_cast<size_t> (j) < s.size (); ++j) {
+            cp = (cp << 6) | (static_cast<unsigned char> (s[i + j]) & 0x3F);
+        }
+        cps.push_back (cp);
+        i += static_cast<size_t> (bytes);
+    }
+    return cps;
+}
 
 GLuint compileShader (GLenum type, const char* source) {
     GLuint shader = glCreateShader (type);
@@ -170,6 +199,7 @@ bool CText::loadEmbeddedFont () {
 		m_ftLibrary, m_fontData.data (), static_cast<FT_Long> (m_fontData.size ()), 0, &m_ftFace
 	    )
 	    == 0) {
+	    FT_Select_Charmap (m_ftFace, FT_ENCODING_UNICODE);
 	    return true;
 	}
 
@@ -198,6 +228,7 @@ bool CText::loadSystemFont () {
 	sLog.error ("CText: FT_New_Face failed for ", fontPath);
 	return false;
     }
+    FT_Select_Charmap (m_ftFace, FT_ENCODING_UNICODE);
     return true;
 }
 
@@ -238,12 +269,14 @@ void CText::rebuildTextureFrom (const std::string& text) {
     // bitmap every time the rendered string changes without leaking.
     FT_GlyphSlot slot = m_ftFace->glyph;
 
+    const auto codepoints = utf8ToCodepoints (text);
+
     int penX = 0;
     int maxAscent = 0;
     int maxDescent = 0;
 
-    for (unsigned char c : text) {
-	if (FT_Load_Char (m_ftFace, static_cast<FT_ULong> (c), FT_LOAD_RENDER) != 0) {
+    for (const FT_ULong cp : codepoints) {
+	if (FT_Load_Char (m_ftFace, cp, FT_LOAD_RENDER) != 0) {
 	    continue;
 	}
 	penX += slot->advance.x >> 6;
@@ -256,8 +289,8 @@ void CText::rebuildTextureFrom (const std::string& text) {
     std::vector<uint8_t> pixels (static_cast<size_t> (width) * height, 0);
 
     penX = 0;
-    for (unsigned char c : text) {
-	if (FT_Load_Char (m_ftFace, static_cast<FT_ULong> (c), FT_LOAD_RENDER) != 0) {
+    for (const FT_ULong cp : codepoints) {
+	if (FT_Load_Char (m_ftFace, cp, FT_LOAD_RENDER) != 0) {
 	    continue;
 	}
 
