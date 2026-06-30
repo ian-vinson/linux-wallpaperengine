@@ -68,12 +68,13 @@ void Camera::applyObjectCamera (const glm::vec3& eye, float zoom) {
     float nearz = this->m_camera.projection.nearz->value->getFloat ();
     float farz = this->m_camera.projection.farz->value->getFloat ();
 
+    // eye arrives in WE-space (top-left = 0,0, Y-down). Convert to GL-centered
+    // (center = 0,0, Y-up) before building the projection translate offset.
+    // WE (sceneW/2, sceneH/2) → GL (0,0) → no camera shift (correct identity).
+    float glX = eye.x - this->m_width / 2.0f;
+    float glY = -(eye.y - this->m_height / 2.0f);
     // glm::translate(ortho, v) centers the view at world position -v.
-    // eye is the camera object's world-space look-at position, so we negate
-    // XY to convert "look-at point" to the translate offset the projection expects.
-    // Z is kept positive so scene objects at z=0 map to z_eff = eye.z which
-    // stays within [nearz, farz] rather than being depth-clipped.
-    const glm::vec3 offset (-eye.x, -eye.y, eye.z);
+    const glm::vec3 offset (-glX, -glY, eye.z);
 
     this->m_projection = glm::ortho<float> (-w / 2.0f, w / 2.0f, -h / 2.0f, h / 2.0f, nearz, farz);
     this->m_projection = glm::translate (this->m_projection, offset);
