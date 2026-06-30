@@ -22,7 +22,7 @@ public:
 	const BinaryReader& file, const std::string& filename,
 	std::function<std::string (const std::string&)> metadataLoader
     );
-    static MipmapSharedPtr parseMipmap (const BinaryReader& file, const Texture& header);
+    static MipmapSharedPtr parseMipmap (const BinaryReader& file, const Texture& header, uint32_t mipIndex);
     static FrameSharedPtr parseFrame (const BinaryReader& file);
     static FrameSharedPtr parseFrameV1 (const BinaryReader& file);
     static TextureMap parseTextureMap (const JSON& it);

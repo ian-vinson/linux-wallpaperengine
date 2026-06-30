@@ -22,7 +22,7 @@ TextureUniquePtr TextureParser::parse (const BinaryReader& file) {
 	MipmapList mipmaps;
 
 	for (uint32_t mipmap = 0; mipmap < mipmapCount; mipmap++) {
-	    mipmaps.emplace_back (parseMipmap (file, *result));
+	    mipmaps.emplace_back (parseMipmap (file, *result, mipmap));
 	}
 
 	result->images.emplace (image, mipmaps);
@@ -37,14 +37,24 @@ TextureUniquePtr TextureParser::parse (const BinaryReader& file) {
     return result;
 }
 
-MipmapSharedPtr TextureParser::parseMipmap (const BinaryReader& file, const Texture& header) {
+MipmapSharedPtr TextureParser::parseMipmap (const BinaryReader& file, const Texture& header, uint32_t mipIndex) {
     auto result = std::make_shared<Mipmap> ();
 
-    // TEXB0004 raw-GL variant (DXT5/BC7): no per-mipmap width/height or JSON.
-    // Width/height come from the TEXI header; compression is inferred from sizes.
+    // TEXB0004 raw-GL variant (DXT5/BC7): no JSON, compression inferred from sizes.
+    // Mip 0: no per-mip header; width/height come from the TEXI header.
+    // Mip 1+: prefixed with [width u32][height u32][index u32] before the size fields.
     if (header.containerVersion == ContainerVersion_TEXB0004 && header.freeImageFormat == FIF_UNKNOWN) {
-	result->width = header.textureWidth;
-	result->height = header.textureHeight;
+	uint32_t mipWidth = header.textureWidth;
+	uint32_t mipHeight = header.textureHeight;
+
+	if (mipIndex > 0) {
+	    mipWidth = file.nextUInt32 ();
+	    mipHeight = file.nextUInt32 ();
+	    std::ignore = file.nextUInt32 (); // redundant mip index field
+	}
+
+	result->width = mipWidth;
+	result->height = mipHeight;
 	result->uncompressedSize = file.nextInt ();
 	result->compressedSize = file.nextInt ();
 	result->compression = (result->uncompressedSize != result->compressedSize) ? 1 : 0;
@@ -62,7 +72,7 @@ MipmapSharedPtr TextureParser::parseMipmap (const BinaryReader& file, const Text
 
 	    if (bytes < 0) {
 		sLog.exception (
-		    "TEXV0005: LZ4 decompression failed (", header.textureWidth, "x", header.textureHeight, ")"
+		    "TEXV0005: LZ4 decompression failed (", mipWidth, "x", mipHeight, ")"
 		);
 	    }
 	} else {
