@@ -65,16 +65,20 @@ void Camera::applyObjectCamera (const glm::vec3& eye, float zoom) {
     float w = this->m_width / zoom;
     float h = this->m_height / zoom;
 
-    float nearz = this->m_camera.projection.nearz->value->getFloat ();
+    // Use nearz=0 to match setOrthogonalProjection: scene nearz (typically 0.01)
+    // clips 2D geometry at z=0 because the projection and lookAt z-translations cancel,
+    // leaving effective z=0 which falls just below nearz and gets depth-clipped.
+    const float nearz = 0.0f;
     float farz = this->m_camera.projection.farz->value->getFloat ();
 
     // eye arrives in WE-space (top-left = 0,0, Y-down). Convert to GL-centered
     // (center = 0,0, Y-up) before building the projection translate offset.
-    // WE (sceneW/2, sceneH/2) → GL (0,0) → no camera shift (correct identity).
     float glX = eye.x - this->m_width / 2.0f;
     float glY = -(eye.y - this->m_height / 2.0f);
-    // glm::translate(ortho, v) centers the view at world position -v.
-    const glm::vec3 offset (-glX, -glY, eye.z);
+    const glm::vec3 sceneEye = this->getEye ();
+    // Match setOrthogonalProjection's approach: use scene camera eye to cancel the
+    // lookAt translation, then subtract the camera-object's GL-space pan.
+    const glm::vec3 offset (sceneEye.x - glX, sceneEye.y - glY, sceneEye.z);
 
     this->m_projection = glm::ortho<float> (-w / 2.0f, w / 2.0f, -h / 2.0f, h / 2.0f, nearz, farz);
     this->m_projection = glm::translate (this->m_projection, offset);
