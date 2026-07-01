@@ -233,20 +233,13 @@ bool CText::loadSystemFont () {
 }
 
 unsigned int CText::computeEffectivePixelSize () const {
-    const glm::vec3 initialScale = m_text.scale->value->getVec3 ();
-    const float avgScale = std::abs ((initialScale.x + initialScale.y) * 0.5f);
-
-    if (m_text.size.y > 0.0f) {
-        // Rasterise at the widget's display height in scene units so texture pixels
-        // map 1:1 to scene pixels — crisp glyphs, no bilinear stretch.
-        const float px = m_text.size.y * avgScale;
-        return std::max<unsigned int> (1u, static_cast<unsigned int> (std::min (px, 4096.0f)));
-    }
-
-    // Fallback for text objects without a declared size: compensate for small
-    // scale so the glyph isn't rasterised to near-zero pixels.
-    const float compensate = (avgScale > 0.0f && avgScale < 1.0f) ? std::min (1.0f / avgScale, 32.0f) : 1.0f;
-    return std::max<unsigned int> (1u, static_cast<unsigned int> (m_text.pointSize->value->getFloat () * compensate));
+    // WE pointsize is in scene units relative to a 540-unit reference height.
+    // Scale by scene_h/540 so the glyph is rasterised at the right pixel density
+    // for the current scene resolution (1080p → ×2, 4K → ×4, etc.).
+    const float sceneH = static_cast<float> (getScene ().getCamera ().getHeight ());
+    const float scaleH = (sceneH > 0.0f) ? sceneH / 540.0f : 1.0f;
+    const float pt = m_text.pointSize->value->getFloat ();
+    return std::max<unsigned int> (1u, static_cast<unsigned int> (std::min (pt * scaleH, 4096.0f)));
 }
 
 void CText::initScriptLayer () {
@@ -336,14 +329,9 @@ void CText::rebuildTextureFrom (const std::string& text) {
 
     m_textureSize = { width, height };
 
-    // Convert glyph pixel dimensions to scene units. The text widget occupies
-    // size.y scene units in height; the glyph was rasterised at effectivePixelSize
-    // (= size.y * scale for the quality path), so size.y / effectivePixelSize is
-    // the scene-units-per-pixel ratio that makes the quad fill the widget correctly.
-    const float effPx = static_cast<float> (std::max (1u, m_lastPixelSize));
-    const float sizeY = m_text.size.y;
-    const float scenePxRatio = (sizeY > 0.0f) ? sizeY / effPx : 1.0f;
-    m_quadSize = { static_cast<float> (width) * scenePxRatio, static_cast<float> (height) * scenePxRatio };
+    // Each FT pixel maps 1:1 to one scene unit. The font was rasterised at
+    // pointsize × (scene_h/540) pixels = the natural scene-unit size at this DPI.
+    m_quadSize = { static_cast<float> (width), static_cast<float> (height) };
 
     m_lastRenderedText = text;
 
