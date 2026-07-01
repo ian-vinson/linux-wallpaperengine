@@ -233,12 +233,18 @@ bool CText::loadSystemFont () {
 }
 
 unsigned int CText::computeEffectivePixelSize () const {
-    // WE text objects often come with scale ~0.09 that, combined with a modest
-    // pointsize, would rasterize glyphs to ~2px on screen (invisible). Rasterize
-    // at higher resolution so that after the model scale is applied in render()
-    // the on-screen size matches the intended pointsize.
     const glm::vec3 initialScale = m_text.scale->value->getVec3 ();
-    const float avgScale = (initialScale.x + initialScale.y) * 0.5f;
+    const float avgScale = std::abs ((initialScale.x + initialScale.y) * 0.5f);
+
+    if (m_text.size.y > 0.0f) {
+        // Rasterise at the widget's display height in scene units so texture pixels
+        // map 1:1 to scene pixels — crisp glyphs, no bilinear stretch.
+        const float px = m_text.size.y * avgScale;
+        return std::max<unsigned int> (1u, static_cast<unsigned int> (std::min (px, 4096.0f)));
+    }
+
+    // Fallback for text objects without a declared size: compensate for small
+    // scale so the glyph isn't rasterised to near-zero pixels.
     const float compensate = (avgScale > 0.0f && avgScale < 1.0f) ? std::min (1.0f / avgScale, 32.0f) : 1.0f;
     return std::max<unsigned int> (1u, static_cast<unsigned int> (m_text.pointSize->value->getFloat () * compensate));
 }
@@ -274,17 +280,19 @@ void CText::rebuildTextureFrom (const std::string& text) {
     int penX = 0;
     int maxAscent = 0;
     int maxDescent = 0;
+    int inkRight = 0; // rightmost ink pixel (may exceed advance for the last glyph)
 
     for (const FT_ULong cp : codepoints) {
 	if (FT_Load_Char (m_ftFace, cp, FT_LOAD_RENDER) != 0) {
 	    continue;
 	}
+	inkRight = std::max (inkRight, penX + slot->bitmap_left + static_cast<int> (slot->bitmap.width));
 	penX += slot->advance.x >> 6;
 	maxAscent = std::max (maxAscent, slot->bitmap_top);
 	maxDescent = std::max (maxDescent, static_cast<int> (slot->bitmap.rows) - slot->bitmap_top);
     }
 
-    const int width = std::max (1, penX);
+    const int width = std::max (1, std::max (penX, inkRight));
     const int height = std::max (1, maxAscent + maxDescent);
     std::vector<uint8_t> pixels (static_cast<size_t> (width) * height, 0);
 
@@ -327,7 +335,16 @@ void CText::rebuildTextureFrom (const std::string& text) {
     }
 
     m_textureSize = { width, height };
-    m_quadSize = { static_cast<float> (width), static_cast<float> (height) };
+
+    // Convert glyph pixel dimensions to scene units. The text widget occupies
+    // size.y scene units in height; the glyph was rasterised at effectivePixelSize
+    // (= size.y * scale for the quality path), so size.y / effectivePixelSize is
+    // the scene-units-per-pixel ratio that makes the quad fill the widget correctly.
+    const float effPx = static_cast<float> (std::max (1u, m_lastPixelSize));
+    const float sizeY = m_text.size.y;
+    const float scenePxRatio = (sizeY > 0.0f) ? sizeY / effPx : 1.0f;
+    m_quadSize = { static_cast<float> (width) * scenePxRatio, static_cast<float> (height) * scenePxRatio };
+
     m_lastRenderedText = text;
 
     uploadQuadVertices ();
