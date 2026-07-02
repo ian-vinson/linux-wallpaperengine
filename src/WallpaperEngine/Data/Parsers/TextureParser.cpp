@@ -60,6 +60,21 @@ MipmapSharedPtr TextureParser::parseMipmap (const BinaryReader& file, const Text
 	result->height = mipHeight;
 	result->uncompressedSize = file.nextInt ();
 	result->compressedSize = file.nextInt ();
+
+	// Video (TextureFlags_Video): the payload is a raw embedded MP4 container handed
+	// directly to the video player, never LZ4-compressed pixel data. The file's
+	// "uncompressedSize" field is a meaningless placeholder (always 0) for this case,
+	// so it must be replaced with the real byte count (compressedSize) rather than
+	// used to size the destination buffer for a (nonexistent) decompression step.
+	if (header.flags & TextureFlags_Video) {
+	    result->uncompressedSize = result->compressedSize;
+	    result->compression = 0;
+	    result->uncompressedData = std::unique_ptr<char[]> (new char[result->uncompressedSize]);
+	    file.next (result->uncompressedData.get (), result->uncompressedSize);
+
+	    return result;
+	}
+
 	result->compression = (result->uncompressedSize != result->compressedSize) ? 1 : 0;
 
 	result->uncompressedData = std::unique_ptr<char[]> (new char[result->uncompressedSize]);
