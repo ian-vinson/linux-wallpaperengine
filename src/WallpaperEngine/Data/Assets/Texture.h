@@ -160,6 +160,12 @@ struct Texture {
     bool isVideoMp4 = false;
     /** The amount of images in the texture file */
     uint32_t imageCount = 0;
+    /**
+     * TEXB0004 raw-GL variant only: the real number of physically stored mip
+     * blocks per image. The per-image count read right before each mip loop
+     * is a fixed placeholder (always 1) and cannot be used for that purpose.
+     */
+    uint32_t rawGLMipLevels = 0;
     /** List of mipmaps */
     std::map<uint32_t, MipmapList> images {};
     /** List of animation frames */

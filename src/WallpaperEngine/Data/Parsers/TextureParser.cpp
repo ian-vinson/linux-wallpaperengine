@@ -17,8 +17,11 @@ TextureUniquePtr TextureParser::parse (const BinaryReader& file) {
     parseTextureHeader (*result, file);
     parseContainer (*result, file);
 
+    const bool isRawGL = result->containerVersion == ContainerVersion_TEXB0004 && result->freeImageFormat == FIF_UNKNOWN;
+
     for (uint32_t image = 0; image < result->imageCount; image++) {
-	const uint32_t mipmapCount = file.nextUInt32 ();
+	const uint32_t placeholderMipmapCount = file.nextUInt32 ();
+	const uint32_t mipmapCount = isRawGL ? result->rawGLMipLevels : placeholderMipmapCount;
 	MipmapList mipmaps;
 
 	for (uint32_t mipmap = 0; mipmap < mipmapCount; mipmap++) {
@@ -263,9 +266,12 @@ void TextureParser::parseContainer (Texture& header, const BinaryReader& file) {
 
 	if (header.freeImageFormat == FIF_UNKNOWN) {
 	    // Raw-GL format (DXT5/BC7 etc.): TEXB0004 block has 3 extra uint32 fields
-	    // before the per-image mip loop — gl_format, block_width, block_height.
-	    // These are redundant with the TEXI header; consume and discard them.
-	    std::ignore = file.nextUInt32 (); // gl_format
+	    // before the per-image mip loop — real mip level count, block_width,
+	    // block_height. The mip level count is the actual number of mip blocks
+	    // physically stored for each image; the per-image count read later
+	    // (right before each mip loop) is a fixed placeholder and always 1,
+	    // so it cannot be used to drive the mip loop itself.
+	    header.rawGLMipLevels = file.nextUInt32 (); // real mip level count
 	    std::ignore = file.nextUInt32 (); // block_width
 	    std::ignore = file.nextUInt32 (); // block_height
 	    // Keep containerVersion = TEXB0004 so parseMipmap uses the raw-GL path.
