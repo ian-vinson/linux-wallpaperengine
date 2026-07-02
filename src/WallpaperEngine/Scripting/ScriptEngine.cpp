@@ -157,7 +157,7 @@ static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source)
 	    sLog.exception ("Vector's x and y components must be numbers");
 	}
 
-	double xVal = 0.0f, yVal = 0.0f, zVal = 0.0f, wVal = 0.0f;
+	double xVal = 0.0, yVal = 0.0, zVal = 0.0, wVal = 0.0;
 
 	JS_ToFloat64 (ctx, &xVal, x);
 	JS_ToFloat64 (ctx, &yVal, y);
@@ -167,13 +167,19 @@ static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source)
 	    return;
 	}
 
+	JS_ToFloat64 (ctx, &zVal, z);
 	if (!JS_IsNumber (w)) {
 	    source.update (glm::vec3 (xVal, yVal, zVal), DynamicValue::UpdateSource::Script);
 	    return;
 	}
 
+	JS_ToFloat64 (ctx, &wVal, w);
 	source.update (glm::vec4 (xVal, yVal, zVal, wVal), DynamicValue::UpdateSource::Script);
     }
+}
+
+void ScriptEngine::jsToDynamic (JSValue val, DynamicValue& dst) const {
+    jsToDynamicValue (this->m_context, val, dst);
 }
 
 ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& mediaSource) :
@@ -419,6 +425,7 @@ ScriptLayerHandle ScriptEngine::createLayerScript (
 	<< "    get currentTime() { var c = globalThis.__sceneCtx; return c ? c.time : 0; },\n"
 	<< "    get dt()          { var c = globalThis.__sceneCtx; return c ? c.dt   : 0; },\n"
 	<< "    get fps()         { var c = globalThis.__sceneCtx; return c ? c.fps  : 60; },\n"
+	<< "    getLayer: function(name) { var s = globalThis.thisScene; return (s && s.getLayer) ? s.getLayer(name) : undefined; },\n"
 	<< "  };\n"
 	// Minimal WE `engine` shim. Real Wallpaper Engine exposes a broad API
 	// (media events, audio buffer, user input); we provide just enough for

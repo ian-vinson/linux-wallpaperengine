@@ -1,5 +1,6 @@
 #include "ScriptableObjectAdapter.h"
 
+#include <stdexcept>
 #include <utility>
 
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
@@ -62,7 +63,15 @@ int scriptableobject_property_set (
 	return -1;
     }
 
-    return 0;
+    ScopeGuard nameGuard ([=] { JS_FreeCString (ctx, name); });
+
+    try {
+	auto& property = container->object.getProperty (name);
+	container->adapter.getEngine ().jsToDynamic (val, property);
+	return 1;
+    } catch (const std::exception&) {
+	return -1;
+    }
 }
 
 ScriptableObjectAdapter::ScriptableObjectAdapter (ScriptEngine& engine, std::string name) :
