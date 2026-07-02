@@ -1,6 +1,9 @@
 #include "EngineObject.h"
 #include "ScriptEngine.h"
+#include "WallpaperEngine/Audio/AudioContext.h"
+#include "WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h"
 #include "WallpaperEngine/Logging/Log.h"
+#include "WallpaperEngine/Render/Wallpapers/CScene.h"
 
 #include <ranges>
 
@@ -167,8 +170,26 @@ JSValue engine_set_timeout (JSContext* ctx, JSValueConst this_val, int argc, JSV
     return JS_NewInt32 (ctx, id);
 }
 
+JSValue engine_register_audio_buffers (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
+    const auto it = engineInstances.find (magic);
+
+    if (it == engineInstances.end ()) {
+	return JS_EXCEPTION;
+    }
+
+    int32_t resolution = 64;
+
+    if (argc > 0) {
+	JS_ToInt32 (ctx, &resolution, argv[0]);
+    }
+
+    return it->second.registerAudioBuffers (resolution);
+}
+
 EngineObject::EngineObject (ScriptEngine& engine, Render::Wallpapers::CScene& scene) :
     m_scene (scene), m_engine (engine), m_instanceId (++EngineInstanceId), m_classId (0) {
+    engineInstances.emplace (this->m_instanceId, *this);
+
     this->m_definition = { .class_name = "IEngine" };
     JS_NewClassID (this->m_engine.getRuntime (), &this->m_classId);
     JS_NewClass (this->m_engine.getRuntime (), this->m_classId, &this->m_definition);
@@ -248,6 +269,14 @@ EngineObject::EngineObject (ScriptEngine& engine, Render::Wallpapers::CScene& sc
 	JS_NewCFunction (this->m_engine.getContext (), engine_get_is_screensaver, "get", 0),
 	JS_NewCFunction (this->m_engine.getContext (), engine_set_value, "set", 1), JS_PROP_ENUMERABLE
     );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "registerAudioBuffers",
+	JS_NewCFunctionMagic (
+	    this->m_engine.getContext (), engine_register_audio_buffers, "registerAudioBuffers", 1,
+	    JS_CFUNC_generic_magic, this->m_instanceId
+	),
+	JS_PROP_ENUMERABLE
+    );
 }
 
 EngineObject::~EngineObject () {
@@ -258,10 +287,14 @@ EngineObject::~EngineObject () {
     for (const auto& [id, interval] : this->m_intervals) {
 	JS_FreeValue (this->m_engine.getContext (), interval.callback);
     }
+    for (const auto& binding : this->m_audioBuffers) {
+	JS_FreeValue (this->m_engine.getContext (), binding.average);
+    }
 
     engineInstances.erase (this->m_instanceId);
     this->m_intervals.clear ();
     this->m_timeouts.clear ();
+    this->m_audioBuffers.clear ();
 
     JS_FreeValue (this->m_engine.getContext (), this->m_instance);
 }
@@ -311,8 +344,45 @@ void EngineObject::clearTimeout (uint32_t id) {
     this->m_timeouts.erase (id);
 }
 
+JSValue EngineObject::registerAudioBuffers (int32_t resolution) {
+    // the recorder only ever produces 16/32/64-band data (the same tiers backing
+    // g_AudioSpectrum16/32/64); snap whatever was requested to the nearest one
+    const uint32_t bands = resolution >= 64 ? 64 : (resolution >= 32 ? 32 : 16);
+    JSContext* ctx = this->m_engine.getContext ();
+
+    JSValue averageArray = JS_NewArray (ctx);
+
+    for (uint32_t i = 0; i < bands; i++) {
+	JS_SetPropertyUint32 (ctx, averageArray, i, JS_NewFloat64 (ctx, 0.0));
+    }
+
+    JSValue result = JS_NewObject (ctx);
+    JS_SetPropertyStr (ctx, result, "average", JS_DupValue (ctx, averageArray));
+
+    this->m_audioBuffers.push_back (AudioBufferBinding { .resolution = bands, .average = averageArray });
+
+    return result;
+}
+
 void EngineObject::tick () {
     const auto now = std::chrono::steady_clock::now ();
+
+    // refresh any registered audio buffers before running scripts, so update()
+    // functions that read audioBuffer.average see this frame's data
+    if (!this->m_audioBuffers.empty ()) {
+	const auto& recorder = this->m_scene.getAudioContext ().getRecorder ();
+	JSContext* ctx = this->m_engine.getContext ();
+
+	for (const auto& binding : this->m_audioBuffers) {
+	    const float* source = binding.resolution == 64 ? recorder.audio64
+				 : binding.resolution == 32 ? recorder.audio32
+							     : recorder.audio16;
+
+	    for (uint32_t i = 0; i < binding.resolution; i++) {
+		JS_SetPropertyUint32 (ctx, binding.average, i, JS_NewFloat64 (ctx, source[i]));
+	    }
+	}
+    }
 
     // check any interval and run them if needed
     for (auto& timeout : this->m_intervals | std::views::values) {
