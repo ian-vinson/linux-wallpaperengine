@@ -110,6 +110,11 @@ private:
      */
     [[nodiscard]] std::string applyFragmentWritableVaryings (std::string source) const;
     /**
+     * HLSL allows float/int values as ternary conditions; GLSL 330 requires bool.
+     * Wraps bare-identifier ternary conditions in bool() in assignment and argument contexts.
+     */
+    [[nodiscard]] std::string applyFloatTernaryCompatibility (std::string source) const;
+    /**
      * Removes unmatched #endif directives (workshop shaders sometimes emit one extra #endif
      * that HLSL's preprocessor silently ignores but GLSL's does not).
      */

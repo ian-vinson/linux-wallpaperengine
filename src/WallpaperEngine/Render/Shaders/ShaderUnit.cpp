@@ -828,6 +828,25 @@ void ShaderUnit::parseParameterConfiguration (
     }
 }
 
+std::string ShaderUnit::applyFloatTernaryCompatibility (std::string source) const {
+    // HLSL allows float/int as ternary conditions; GLSL 330 requires bool.
+    // Match a bare identifier (no operators before it) used as a ternary condition in:
+    //   assignment:    = ident ?
+    //   return:        return ident ?
+    //   argument:      ( ident ?
+    //   comma-sep:     , ident ?
+    // and wrap it with bool() so GLSL accepts it.  bool(bool_val) is a no-op, so
+    // wrapping an already-bool identifier is harmless.
+    static const std::regex floatTernaryRe (
+        R"(((?:=\s*|return\s+|,\s*|\(\s*))([A-Za-z_][A-Za-z0-9_]*)\s*\?)"
+    );
+    const std::string patched = std::regex_replace (source, floatTernaryRe, "$1bool($2) ?");
+    if (patched != source) {
+        sLog.out ("Applied float-ternary bool() cast in ", this->m_file);
+    }
+    return patched;
+}
+
 void ShaderUnit::stripOrphanedEndifs () {
     // Workshop shaders (authored for HLSL's lenient preprocessor) sometimes emit one extra
     // #endif that has no matching #if.  GLSL's preprocessor rejects these.  Walk the shader
@@ -942,7 +961,8 @@ const std::string& ShaderUnit::compile () {
     this->m_final
 	+= this->applyFragmentTexCoordCompatibility (
 	    this->applyFragmentWritableVaryings (
-		this->applyLinkedVaryingCompatibility (this->m_preprocessed)));
+		this->applyFloatTernaryCompatibility (
+		    this->applyLinkedVaryingCompatibility (this->m_preprocessed))));
 
     // the pass itself handles shader compilation, the unit doesn't have enough information for this step
     return this->m_final;
