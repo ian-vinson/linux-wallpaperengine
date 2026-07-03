@@ -2,34 +2,33 @@
 
 #include "EngineObject.h"
 #include "ScriptEngine.h"
+#include "WallpaperEngine/Data/Model/DynamicValue.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 
 using namespace WallpaperEngine::Scripting;
+using namespace WallpaperEngine::Data::Model;
 
 JSValue get_cursor_world_position (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSClassID classId;
     auto* input = static_cast<InputObject*> (JS_GetAnyOpaque (this_val, &classId));
 
-    // TODO: PROPERLY IMPLEMENT THIS
-    return input->getScene ().getScriptEngine ().getAdapters ().vec3->instantiate ();
+    DynamicValue value (input->getScene ().getCursorWorldPosition ());
+    return input->getScene ().getScriptEngine ().getAdapters ().vec3->instantiate (value, true);
 }
 
 JSValue get_cursor_screen_position (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSClassID classId;
     auto* input = static_cast<InputObject*> (JS_GetAnyOpaque (this_val, &classId));
-    auto position = input->getScene ().getMousePositionNormalized ();
 
-    JSValue result = input->getScene ().getScriptEngine ().getAdapters ().vec2->instantiate ();
-
-    JS_SetPropertyStr (ctx, result, "x", JS_NewFloat64 (ctx, position->x));
-    JS_SetPropertyStr (ctx, result, "y", JS_NewFloat64 (ctx, position->y));
-
-    return result;
+    DynamicValue value (input->getScene ().getCursorScreenPosition ());
+    return input->getScene ().getScriptEngine ().getAdapters ().vec2->instantiate (value, true);
 }
 
 JSValue get_cursor_left_down (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    // TODO: IMPLEMENT THIS
-    return JS_NewBool (ctx, false);
+    JSClassID classId;
+    auto* input = static_cast<InputObject*> (JS_GetAnyOpaque (this_val, &classId));
+
+    return JS_NewBool (ctx, input->getScene ().isCursorLeftDown ());
 }
 
 JSValue input_set_value (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) { return JS_EXCEPTION; }

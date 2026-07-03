@@ -3,21 +3,32 @@
 #include "Adapters/ScriptableObjectAdapter.h"
 #include "EngineObject.h"
 #include "ScriptEngine.h"
+#include "WallpaperEngine/Data/Builders/VectorBuilder.h"
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 
 using namespace WallpaperEngine::Scripting;
+using namespace WallpaperEngine::Data::Builders;
 
 static uint32_t ScriptPropertiesObjectInstanceId = 0;
 std::map<uint32_t, ScriptPropertiesObject&> scriptPropertiesObjectInstances;
 
+// Identifies which .addXxx() method was used to register a property, since they all share the
+// same dispatch function — only the value's shape (and whether it needs color-string parsing)
+// differs.
+enum class ScriptPropertyType { Slider, Checkbox, Text, Combo, Color, File };
+
 struct OpaqueScriptPropertiesInstance {
     ScriptPropertiesObject& object;
     DynamicValue& value;
+    // Default values from .addXxx({..., value: ...}) calls, used when the wallpaper's JSON does
+    // not carry a "scriptproperties" override for a given name.
+    std::map<std::string, JSValue> defaults;
 };
 
 struct OpaqueScriptProperties {
     ScriptPropertiesObject& object;
+    std::map<std::string, JSValue> defaults;
 };
 
 JSValue scriptproperties_property_get (JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst receiver) {
@@ -37,11 +48,19 @@ JSValue scriptproperties_property_get (JSContext* ctx, JSValueConst obj_val, JSA
 	auto& properties = container->value.getProperties ();
 	const auto it = properties.find (name);
 
-	if (it == properties.end ()) {
-	    return JS_UNDEFINED;
+	if (it != properties.end ()) {
+	    return container->object.getEngine ().dynamicToJs (*it->second->value);
 	}
 
-	return container->object.getEngine ().dynamicToJs (*it->second->value);
+	// No JSON-provided override for this name — fall back to the default given to
+	// .addSlider()/.addCheckbox()/etc. when the script declared the property.
+	const auto defaultIt = container->defaults.find (name);
+
+	if (defaultIt != container->defaults.end ()) {
+	    return JS_DupValue (ctx, defaultIt->second);
+	}
+
+	return JS_UNDEFINED;
     } catch (const std::exception& e) {
 	return JS_EXCEPTION;
     }
@@ -54,11 +73,57 @@ int scriptproperties_property_set (
     return -1;
 }
 
-JSValue scriptpropertiescreator_add (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    // no need to do anything, any add call should just return itself
-    // we'll set them either way as what comes in the DynamicValue
-    // TODO: PROPERLY IMPLEMENT THIS CHAIN AT SOME POINT
-    return this_val;
+// Builds a JS Vec3 instance from a "r g b" WE color string, matching what scripts expect to read
+// off a color scriptProperty (see WEColor's own Vec3-returning conversions for the same pattern).
+JSValue scriptproperties_parse_color_default (JSContext* ctx, ScriptEngine& engine, const std::string& str) {
+    const glm::vec3 color = VectorBuilder::parse<glm::vec3> (str);
+    JSValue value = engine.getAdapters ().vec3->instantiate ();
+
+    JS_SetPropertyStr (ctx, value, "x", JS_NewFloat64 (ctx, color.x));
+    JS_SetPropertyStr (ctx, value, "y", JS_NewFloat64 (ctx, color.y));
+    JS_SetPropertyStr (ctx, value, "z", JS_NewFloat64 (ctx, color.z));
+
+    return value;
+}
+
+JSValue scriptpropertiescreator_add (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
+    if (argc >= 1 && JS_VALUE_GET_TAG (argv[0]) == JS_TAG_OBJECT) {
+	JSClassID classId = 0;
+	auto* container = static_cast<OpaqueScriptProperties*> (JS_GetAnyOpaque (this_val, &classId));
+
+	if (container != nullptr) {
+	    JSValue nameVal = JS_GetPropertyStr (ctx, argv[0], "name");
+	    const char* name = JS_ToCString (ctx, nameVal);
+
+	    if (name != nullptr) {
+		JSValue defaultValue = JS_GetPropertyStr (ctx, argv[0], "value");
+
+		if (static_cast<ScriptPropertyType> (magic) == ScriptPropertyType::Color
+		    && JS_IsString (defaultValue)) {
+		    const char* colorStr = JS_ToCString (ctx, defaultValue);
+
+		    if (colorStr != nullptr) {
+			container->defaults[name]
+			    = scriptproperties_parse_color_default (ctx, container->object.getEngine (), colorStr);
+			JS_FreeCString (ctx, colorStr);
+		    }
+
+		    JS_FreeValue (ctx, defaultValue);
+		} else {
+		    container->defaults[name] = defaultValue;
+		}
+
+		JS_FreeCString (ctx, name);
+	    }
+
+	    JS_FreeValue (ctx, nameVal);
+	}
+    }
+
+    // this_val is a borrowed reference (JSValueConst) — the caller takes ownership of whatever we
+    // return, so it must be dup'd before returning it, or the object's refcount goes stale and it
+    // gets collected/detached partway through a chained .addSlider(...).addCheckbox(...) call.
+    return JS_DupValue (ctx, this_val);
 }
 
 JSValue scriptpropertiescreator_finish (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
@@ -72,12 +137,21 @@ JSValue scriptpropertiescreator_finish (JSContext* ctx, JSValueConst this_val, i
 	return JS_UNDEFINED;
     }
 
+    std::map<std::string, JSValue> defaults;
+
+    for (const auto& [name, value] : container->defaults) {
+	defaults[name] = JS_DupValue (ctx, value);
+    }
+
     // create a new object based off the properties in the dynamic value and call it a day
     JSValue result = JS_NewObjectClass (ctx, container->object.getPropertiesClassId ());
     JS_SetOpaque (
 	result,
-	new OpaqueScriptPropertiesInstance { .object = container->object,
-					     .value = container->object.getEngine ().getRunningModule ()->value }
+	new OpaqueScriptPropertiesInstance {
+	    .object = container->object,
+	    .value = container->object.getEngine ().getRunningModule ()->value,
+	    .defaults = std::move (defaults),
+	}
     );
 
     return result;
@@ -85,14 +159,32 @@ JSValue scriptpropertiescreator_finish (JSContext* ctx, JSValueConst this_val, i
 
 void scriptpropertiescreator_finalizer (JSRuntime* rt, JSValueConst val) {
     JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptProperties*> (JS_GetAnyOpaque (val, &classId));
 
-    delete static_cast<OpaqueScriptProperties*> (JS_GetAnyOpaque (val, &classId));
+    if (container == nullptr) {
+	return;
+    }
+
+    for (const auto& [name, value] : container->defaults) {
+	JS_FreeValueRT (rt, value);
+    }
+
+    delete container;
 }
 
 void scriptproperties_finalizer (JSRuntime* rt, JSValueConst val) {
     JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptPropertiesInstance*> (JS_GetAnyOpaque (val, &classId));
 
-    delete static_cast<OpaqueScriptPropertiesInstance*> (JS_GetAnyOpaque (val, &classId));
+    if (container == nullptr) {
+	return;
+    }
+
+    for (const auto& [name, value] : container->defaults) {
+	JS_FreeValueRT (rt, value);
+    }
+
+    delete container;
 }
 
 JSValue
@@ -106,7 +198,7 @@ scriptpropertiescreator_create (JSContext* ctx, JSValueConst this_val, int argc,
     JSValue creator = JS_NewObjectClass (ctx, instance->second.getCreatorClassId ());
 
     // setup the current script properties creator
-    JS_SetOpaque (creator, new OpaqueScriptProperties { .object = instance->second });
+    JS_SetOpaque (creator, new OpaqueScriptProperties { .object = instance->second, .defaults = {} });
 
     return creator;
 }
@@ -143,24 +235,51 @@ ScriptPropertiesObject::ScriptPropertiesObject (ScriptEngine& engine, Render::Wa
     // set properties
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_creatorPrototype, "addSlider",
-	JS_NewCFunction (this->m_engine.getContext (), scriptpropertiescreator_add, "addSlider", 0), JS_PROP_ENUMERABLE
+	JS_NewCFunctionMagic (
+	    this->m_engine.getContext (), scriptpropertiescreator_add, "addSlider", 1, JS_CFUNC_generic_magic,
+	    static_cast<int> (ScriptPropertyType::Slider)
+	),
+	JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_creatorPrototype, "addCheckbox",
-	JS_NewCFunction (this->m_engine.getContext (), scriptpropertiescreator_add, "addCheckbox", 0),
+	JS_NewCFunctionMagic (
+	    this->m_engine.getContext (), scriptpropertiescreator_add, "addCheckbox", 1, JS_CFUNC_generic_magic,
+	    static_cast<int> (ScriptPropertyType::Checkbox)
+	),
 	JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_creatorPrototype, "addText",
-	JS_NewCFunction (this->m_engine.getContext (), scriptpropertiescreator_add, "addText", 0), JS_PROP_ENUMERABLE
+	JS_NewCFunctionMagic (
+	    this->m_engine.getContext (), scriptpropertiescreator_add, "addText", 1, JS_CFUNC_generic_magic,
+	    static_cast<int> (ScriptPropertyType::Text)
+	),
+	JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_creatorPrototype, "addCombo",
-	JS_NewCFunction (this->m_engine.getContext (), scriptpropertiescreator_add, "addCombo", 0), JS_PROP_ENUMERABLE
+	JS_NewCFunctionMagic (
+	    this->m_engine.getContext (), scriptpropertiescreator_add, "addCombo", 1, JS_CFUNC_generic_magic,
+	    static_cast<int> (ScriptPropertyType::Combo)
+	),
+	JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_creatorPrototype, "addColor",
-	JS_NewCFunction (this->m_engine.getContext (), scriptpropertiescreator_add, "addColor", 0), JS_PROP_ENUMERABLE
+	JS_NewCFunctionMagic (
+	    this->m_engine.getContext (), scriptpropertiescreator_add, "addColor", 1, JS_CFUNC_generic_magic,
+	    static_cast<int> (ScriptPropertyType::Color)
+	),
+	JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_creatorPrototype, "addFile",
+	JS_NewCFunctionMagic (
+	    this->m_engine.getContext (), scriptpropertiescreator_add, "addFile", 1, JS_CFUNC_generic_magic,
+	    static_cast<int> (ScriptPropertyType::File)
+	),
+	JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_creatorPrototype, "finish",
@@ -169,8 +288,8 @@ ScriptPropertiesObject::ScriptPropertiesObject (ScriptEngine& engine, Render::Wa
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_engine.getGlobalThis (), "createScriptProperties",
 	JS_NewCFunctionMagic (
-	    this->m_engine.getContext (), scriptpropertiescreator_create, "createScriptProperties", 0, JS_CFUNC_generic,
-	    m_instanceId
+	    this->m_engine.getContext (), scriptpropertiescreator_create, "createScriptProperties", 0,
+	    JS_CFUNC_generic_magic, m_instanceId
 	),
 	JS_PROP_ENUMERABLE
     );

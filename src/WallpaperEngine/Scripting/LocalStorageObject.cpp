@@ -59,6 +59,83 @@ JSValue ls_remove_item (JSContext* ctx, JSValueConst this_val, int argc, JSValue
     return JS_UNDEFINED;
 }
 
+// The real Wallpaper Engine `localStorage` API — verified against ~300 workshop scripts, none of
+// which call getItem/setItem/removeItem (the standard Web Storage names implemented above; kept
+// since they're harmless). get()/set()/remove() are what real scripts use, and set() commonly
+// stores whole objects/arrays (e.g. `localStorage.set(POSITION_KEY, {x, y})`), not just strings —
+// so values round-trip through JSON rather than being coerced to a bare string.
+//
+// Real scripts also pass an optional trailing "location" argument (`localStorage.LOCATION_SCREEN`
+// / the literal string `'LOCATION_GLOBAL'`), presumably scoping storage per-monitor vs.
+// per-wallpaper-instance when the same wallpaper runs on multiple screens at once. lwe's storage
+// backend is a single per-wallpaper JSON file with no per-screen concept, so that argument is
+// accepted (to avoid breaking the call) but has no effect — every screen running the same
+// wallpaper shares one store.
+JSValue ls_get (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 1) {
+	return JS_UNDEFINED;
+    }
+
+    auto* ls = ls_opaque (this_val);
+    const char* key = JS_ToCString (ctx, argv[0]);
+
+    if (!key) {
+	return JS_UNDEFINED;
+    }
+
+    ScopeGuard guard ([ctx, key] { JS_FreeCString (ctx, key); });
+
+    const std::string* value = ls->findItem (key);
+
+    if (!value) {
+	return JS_UNDEFINED;
+    }
+
+    JSValue parsed = JS_ParseJSON (ctx, value->c_str (), value->size (), "<localStorage>");
+
+    if (JS_IsException (parsed)) {
+	// Not (or no longer) valid JSON — clear the exception and hand back the raw string
+	// rather than propagating a parse error into an unrelated script.
+	JS_FreeValue (ctx, JS_GetException (ctx));
+	return JS_NewString (ctx, value->c_str ());
+    }
+
+    return parsed;
+}
+
+JSValue ls_set (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 2) {
+	return JS_UNDEFINED;
+    }
+
+    auto* ls = ls_opaque (this_val);
+    const char* key = JS_ToCString (ctx, argv[0]);
+
+    if (!key) {
+	return JS_UNDEFINED;
+    }
+
+    ScopeGuard guard ([ctx, key] { JS_FreeCString (ctx, key); });
+
+    JSValue json = JS_JSONStringify (ctx, argv[1], JS_UNDEFINED, JS_UNDEFINED);
+
+    if (JS_IsException (json)) {
+	JS_FreeValue (ctx, JS_GetException (ctx));
+	return JS_UNDEFINED;
+    }
+
+    const char* jsonStr = JS_ToCString (ctx, json);
+
+    if (jsonStr) {
+	ls->setItem (key, jsonStr);
+	JS_FreeCString (ctx, jsonStr);
+    }
+
+    JS_FreeValue (ctx, json);
+
+    return JS_UNDEFINED;
+}
+
 JSValue ls_clear (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     ls_opaque (this_val)->clear ();
     return JS_UNDEFINED;
@@ -118,6 +195,17 @@ LocalStorageObject::LocalStorageObject (ScriptEngine& engine, Render::Wallpapers
                                JS_NewCFunction (ctx, ls_set_item, "setItem", 2), JS_PROP_ENUMERABLE);
     JS_DefinePropertyValueStr (ctx, this->m_instance, "removeItem",
                                JS_NewCFunction (ctx, ls_remove_item, "removeItem", 1), JS_PROP_ENUMERABLE);
+    // Real WE API — see the comment on ls_get()/ls_set() above.
+    JS_DefinePropertyValueStr (ctx, this->m_instance, "get", JS_NewCFunction (ctx, ls_get, "get", 1),
+                               JS_PROP_ENUMERABLE);
+    JS_DefinePropertyValueStr (ctx, this->m_instance, "set", JS_NewCFunction (ctx, ls_set, "set", 2),
+                               JS_PROP_ENUMERABLE);
+    JS_DefinePropertyValueStr (ctx, this->m_instance, "remove",
+                               JS_NewCFunction (ctx, ls_remove_item, "remove", 1), JS_PROP_ENUMERABLE);
+    JS_DefinePropertyValueStr (ctx, this->m_instance, "LOCATION_SCREEN",
+                               JS_NewString (ctx, "LOCATION_SCREEN"), JS_PROP_ENUMERABLE);
+    JS_DefinePropertyValueStr (ctx, this->m_instance, "LOCATION_GLOBAL",
+                               JS_NewString (ctx, "LOCATION_GLOBAL"), JS_PROP_ENUMERABLE);
     JS_DefinePropertyValueStr (ctx, this->m_instance, "clear",
                                JS_NewCFunction (ctx, ls_clear, "clear", 0), JS_PROP_ENUMERABLE);
     JS_DefinePropertyValueStr (ctx, this->m_instance, "key",

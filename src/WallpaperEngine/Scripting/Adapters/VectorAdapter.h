@@ -20,6 +20,15 @@ public:
 
     void free (uint32_t vectorId);
 
+    /**
+     * Releases this adapter's own reference to its prototype object. Must be called before
+     * JS_FreeContext()/JS_FreeRuntime() — the runtime's own teardown GC pass still needs to
+     * finalize any surviving vector instances (calling back into free() above), so the adapter
+     * itself must stay alive (not destructed) until after that runs; only the JS-side reference
+     * is released here.
+     */
+    void releaseBeforeRuntimeShutdown ();
+
 private:
     JSValue m_prototype;
     uint32_t m_instanceId;

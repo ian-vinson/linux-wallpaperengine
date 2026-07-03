@@ -1,5 +1,6 @@
 #include "ScriptableObjectAdapter.h"
 
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 
@@ -19,6 +20,41 @@ struct OpaqueScriptableObjectAdapter {
     WallpaperEngine::Scripting::ScriptableObject& object;
 };
 
+// no-op stand-in for ITextureAnimation.play()/stop()/pause() — see scriptableobject_get_texture_animation.
+JSValue scriptableobject_texture_animation_noop (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return JS_UNDEFINED;
+}
+
+// thisLayer.getTextureAnimation(): real Wallpaper Engine returns an ITextureAnimation controller
+// ({rate, play(), stop(), pause(), setFrame()}) that drives sprite-sheet playback. lwe's frame
+// selection (CPass.cpp) picks the current frame from the scene's single global render clock
+// modulo the texture's total animation duration — there is no per-object rate/pause/frame state
+// anywhere in the rendering pipeline to hook into, and wiring one in would mean changing that
+// shared timing logic for every renderable object, not just this API. So this returns an inert
+// stub object: `.rate` is a plain read/write number with no effect on playback, and
+// play/stop/pause/setFrame are no-ops. This is enough to stop `getTextureAnimation().stop()`-style
+// calls from throwing "not a function" and crashing scripts that use them, but does not actually
+// pause, seek, or change the speed of the rendered animation.
+JSValue scriptableobject_get_texture_animation (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSValue anim = JS_NewObject (ctx);
+
+    JS_SetPropertyStr (ctx, anim, "rate", JS_NewFloat64 (ctx, 1.0));
+    JS_SetPropertyStr (
+	ctx, anim, "play", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "play", 0)
+    );
+    JS_SetPropertyStr (
+	ctx, anim, "stop", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "stop", 0)
+    );
+    JS_SetPropertyStr (
+	ctx, anim, "pause", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "pause", 0)
+    );
+    JS_SetPropertyStr (
+	ctx, anim, "setFrame", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "setFrame", 1)
+    );
+
+    return anim;
+}
+
 JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst receiver) {
     JSClassID classId = 0;
 
@@ -35,6 +71,20 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     }
 
     ScopeGuard guard ([=] { JS_FreeCString (ctx, name); });
+
+    if (strcmp (name, "getTextureAnimation") == 0) {
+	return JS_NewCFunction (ctx, scriptableobject_get_texture_animation, "getTextureAnimation", 0);
+    }
+
+    // Read-only scene.json metadata — not backed by a scriptable DynamicValue like
+    // origin/scale/angles/visible/etc. are, so getProperty() below would never find them.
+    // Needed by scripts that filter thisScene.enumerateLayers()/getLayer() results by name or id.
+    if (strcmp (name, "name") == 0) {
+	return JS_NewString (ctx, container->object.getObject ().name.c_str ());
+    }
+    if (strcmp (name, "id") == 0) {
+	return JS_NewInt32 (ctx, container->object.getId ());
+    }
 
     try {
 	// find the property inside, otherwise return undefined
@@ -75,7 +125,14 @@ int scriptableobject_property_set (
 }
 
 ScriptableObjectAdapter::ScriptableObjectAdapter (ScriptEngine& engine, std::string name) :
-    ObjectAdapter (engine), m_exoticMethods (), m_name (std::move (name)) {
+    ObjectAdapter (engine),
+    m_exoticMethods (
+	{
+	    .get_property = scriptableobject_property_get,
+	    .set_property = scriptableobject_property_set,
+	}
+    ),
+    m_name (std::move (name)) {
     this->registerType (
 	{
 	    .class_name = m_name.c_str (),
@@ -96,4 +153,15 @@ JSValue ScriptableObjectAdapter::instantiate (ScriptableObject& object) {
 
 JSValue ScriptableObjectAdapter::instantiate (DynamicValue& value) {
     throw std::runtime_error ("Cannot create a ScriptableObject instance from a DynamicValue");
+}
+
+WallpaperEngine::Scripting::ScriptableObject* ScriptableObjectAdapter::extract (JSValueConst value) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (value, &classId));
+
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
+	return nullptr;
+    }
+
+    return &container->object;
 }

@@ -3,6 +3,7 @@
 #include "Adapters/ScriptableObjectAdapter.h"
 #include "Modules/ColorModule.h"
 #include "Modules/MathModule.h"
+#include "Modules/VectorModule.h"
 #include "Modules/ScriptModule.h"
 #include "ScriptPropertiesObject.h"
 #include "ScriptableObject.h"
@@ -230,9 +231,11 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
 
     auto wemath = std::make_unique<Modules::MathModule> (*this);
     auto wecolor = std::make_unique<Modules::ColorModule> (*this);
+    auto wevector = std::make_unique<Modules::VectorModule> (*this);
 
     this->m_modules.emplace (wemath->getName (), std::move (wemath));
     this->m_modules.emplace (wecolor->getName (), std::move (wecolor));
+    this->m_modules.emplace (wevector->getName (), std::move (wevector));
 
     JS_SetModuleLoaderFunc (this->m_runtime, nullptr, scriptengine_module_loader, this);
     // setup scene objects and other things
@@ -268,10 +271,17 @@ ScriptEngine::~ScriptEngine () {
 
     JS_FreeValue (this->m_context, this->m_globalThis);
 
-    this->m_adapters.vec4.reset ();
-    this->m_adapters.vec3.reset ();
-    this->m_adapters.vec2.reset ();
-    this->m_adapters.object.reset ();
+    // Release each vector adapter's own reference to its prototype object now, but do NOT
+    // destroy the adapters themselves yet (see note below).
+    this->m_adapters.vec4->releaseBeforeRuntimeShutdown ();
+    this->m_adapters.vec3->releaseBeforeRuntimeShutdown ();
+    this->m_adapters.vec2->releaseBeforeRuntimeShutdown ();
+
+    // Note: m_adapters (vec2/vec3/vec4/object) is intentionally NOT reset here. JS_FreeRuntime()
+    // below runs a final GC pass that finalizes any still-alive Vec2/Vec3/Vec4/ILayer JS objects,
+    // and those finalizers call back into the corresponding adapter (e.g.
+    // VectorAdapter::free()). The adapters must stay alive until after JS_FreeRuntime() returns;
+    // they are torn down automatically afterwards as ScriptEngine's members are destructed.
 
     this->m_consoleObject.reset ();
     this->m_engineObject.reset ();
@@ -299,6 +309,20 @@ static void logJSException (JSContext* ctx, const char* context) {
 	    sLog.error ("ScriptEngine [", context, "]: ", str);
 	    JS_FreeCString (ctx, str);
 	}
+
+	JSValue stack = JS_GetPropertyStr (ctx, exc, "stack");
+
+	if (JS_IsString (stack)) {
+	    const char* stackStr = JS_ToCString (ctx, stack);
+
+	    if (stackStr && stackStr[0] != '\0') {
+		sLog.error ("ScriptEngine [", context, "]: ", stackStr);
+	    }
+
+	    JS_FreeCString (ctx, stackStr);
+	}
+
+	JS_FreeValue (ctx, stack);
     }
     JS_FreeValue (ctx, exc);
 }
@@ -624,56 +648,149 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
 	return;
     }
 
-    // load the script and store it
-    JSValue module = JS_Eval (this->m_context, source->c_str (), source->size (), key.c_str (), JS_EVAL_TYPE_MODULE);
+    // Compile the module without running it (JS_EVAL_FLAG_COMPILE_ONLY) so we keep a handle to
+    // its JSModuleDef. JS_Eval's own return value for JS_EVAL_TYPE_MODULE is just a promise that
+    // tracks evaluation completion, not the module's exports — init()/update() must be looked up
+    // on the namespace object obtained separately via JS_GetModuleNamespace() below.
+    JSValue moduleFunc = JS_Eval (
+	this->m_context, source->c_str (), source->size (), key.c_str (),
+	JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY
+    );
+
+    if (JS_IsException (moduleFunc)) {
+	JS_FreeValue (this->m_context, moduleFunc);
+	return;
+    }
+
+    JSModuleDef* moduleDef = static_cast<JSModuleDef*> (JS_VALUE_GET_PTR (moduleFunc));
+
+    // Scripts commonly call APIs like createScriptProperties()...finish() directly at module top
+    // level (e.g. `export var scriptProperties = createScriptProperties()...finish();`), which
+    // need getRunningModule() to already resolve to this script's DynamicValue/object while the
+    // module body is still running. But JS_GetModuleNamespace() cannot be called yet: the export
+    // bindings it reads are only wired up by js_create_module_function()/js_link_module(), which
+    // JS_EvalFunction() itself runs as its first steps (calling it any earlier segfaults). So
+    // point getRunningModule() at a temporary, stack-local entry (namespace left JS_UNDEFINED —
+    // finish() only needs .value/.object) for the duration of the eval below, then re-point it at
+    // the real, heap-stable map entry once the namespace actually exists.
+    LoadedModule pendingModule { .value = currentValue, .module = JS_UNDEFINED, .object = object };
+    this->m_runningModule = &pendingModule;
+
+    // JS_EvalFunction consumes moduleFunc and runs the module body (synchronously, since none of
+    // these scripts use top-level await); its return value is just the completion promise. A
+    // top-level throw in the module body rejects this promise rather than making JS_IsException()
+    // true here, so that has to be checked too or evaluation failures pass by silently.
+    JSValue evalResult = JS_EvalFunction (this->m_context, moduleFunc);
+
+    if (JS_PromiseState (this->m_context, evalResult) == JS_PROMISE_REJECTED) {
+	JSValue reason = JS_PromiseResult (this->m_context, evalResult);
+	const char* str = JS_ToCString (this->m_context, reason);
+	sLog.error ("ScriptEngine [", key, "]: ", str ? str : "<unknown error>");
+	JS_FreeCString (this->m_context, str);
+	JS_FreeValue (this->m_context, reason);
+	JS_FreeValue (this->m_context, evalResult);
+	this->m_runningModule = nullptr;
+	return;
+    }
+
+    if (JS_IsException (evalResult)) {
+	JS_FreeValue (this->m_context, evalResult);
+	this->m_runningModule = nullptr;
+	return;
+    }
+
+    JS_FreeValue (this->m_context, evalResult);
+
+    JSValue module = JS_GetModuleNamespace (this->m_context, moduleDef);
 
     auto inserted = this->m_scriptModules.emplace (
 	key,
 	LoadedModule {
 	    .value = currentValue,
 	    .module = module,
+	    .object = object,
 	}
     );
 
     if (!inserted.second) {
+	JS_FreeValue (this->m_context, module);
+	this->m_runningModule = nullptr;
 	return;
     }
-
-    JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", this->m_adapters.object->instantiate (object));
 
     // script properties do not need update as they're connected directly to the source data
     this->m_runningModule = &inserted.first->second;
 
-    // Call init() if the script exports it — it sets up initial state (e.g. transition timer,
-    // shared palette values) and returns the correct starting value.  Fall back to update() for
-    // scripts that don't export init.
-    JSValue initArgs[] = { this->dynamicToJs (currentValue) };
-    JSValue initResult = this->call (module, 1, initArgs, "init");
+    // Deferred to runPendingInits() — see its doc comment. Don't call init()/update() here: a
+    // script's init() commonly does thisScene.getLayer("someOtherObject"), which must not run
+    // before every object in the scene has been constructed.
+    this->m_pendingInitKeys.push_back (key);
+}
 
-    ScopeGuard initGuard ([this, initArgs, initResult] () {
-	JS_FreeValue (this->m_context, initResult);
-	JS_FreeValue (this->m_context, initArgs[0]);
-    });
+void ScriptEngine::runPendingInits () {
+    // Snapshot-and-clear rather than iterate m_pendingInitKeys directly: an init()/update() call
+    // below can itself queue new scripts (e.g. a dynamically created layer), which would append
+    // to m_pendingInitKeys while this loop is running. The outer while re-drains anything queued
+    // during the pass just completed, so those still get primed instead of left stranded.
+    while (!this->m_pendingInitKeys.empty ()) {
+	const auto keys = std::move (this->m_pendingInitKeys);
+	this->m_pendingInitKeys.clear ();
 
-    if (!JS_IsException (initResult) && !JS_IsUndefined (initResult)) {
-	jsToDynamicValue (this->m_context, initResult, currentValue);
-	return;
+	for (const auto& key : keys) {
+	    const auto it = this->m_scriptModules.find (key);
+
+	    if (it == this->m_scriptModules.end ()) {
+		continue;
+	    }
+
+	    LoadedModule& loaded = it->second;
+	    DynamicValue& currentValue = loaded.value;
+	    JSValue module = loaded.module;
+
+	    this->m_runningModule = &loaded;
+
+	    JS_SetPropertyStr (
+		this->m_context, this->m_globalThis, "thisLayer", this->m_adapters.object->instantiate (loaded.object)
+	    );
+
+	    // Call init() if the script exports it — it sets up initial state (e.g. transition
+	    // timer, shared palette values) and returns the correct starting value. Fall back to
+	    // update() for scripts that don't export init.
+	    JSValue initArgs[] = { this->dynamicToJs (currentValue) };
+	    JSValue initResult = this->call (module, 1, initArgs, "init");
+
+	    ScopeGuard initGuard ([this, initArgs, initResult] () {
+		JS_FreeValue (this->m_context, initResult);
+		JS_FreeValue (this->m_context, initArgs[0]);
+	    });
+
+	    if (JS_IsException (initResult)) {
+		logJSException (this->m_context, key.c_str ());
+		continue;
+	    }
+
+	    if (!JS_IsUndefined (initResult)) {
+		jsToDynamicValue (this->m_context, initResult, currentValue);
+		continue;
+	    }
+
+	    // No init() exported — fall back to a first update() call to prime the value.
+	    JSValue args[] = { this->dynamicToJs (currentValue) };
+	    JSValue result = this->call (module, 1, args, "update");
+
+	    ScopeGuard guard2 ([this, args, result] () {
+		JS_FreeValue (this->m_context, result);
+		JS_FreeValue (this->m_context, args[0]);
+	    });
+
+	    if (JS_IsException (result)) {
+		logJSException (this->m_context, key.c_str ());
+		continue;
+	    }
+
+	    jsToDynamicValue (this->m_context, result, currentValue);
+	}
     }
-
-    // No init() exported — fall back to a first update() call to prime the value.
-    JSValue args[] = { this->dynamicToJs (currentValue) };
-    JSValue result = this->call (module, 1, args, "update");
-
-    ScopeGuard guard2 ([this, args, result] () {
-	JS_FreeValue (this->m_context, result);
-	JS_FreeValue (this->m_context, args[0]);
-    });
-
-    if (JS_IsException (result)) {
-	return;
-    }
-
-    jsToDynamicValue (this->m_context, result, currentValue);
 }
 
 void ScriptEngine::tick () {
@@ -686,6 +803,13 @@ void ScriptEngine::tick () {
     for (auto& module : this->m_scriptModules | std::views::values) {
 	this->m_runningModule = &module;
 
+	// thisLayer must be rebound before every call — each property script in m_scriptModules
+	// can belong to a different object, and without this every update() sees whichever
+	// object's thisLayer happened to be set last (registration order), not its own.
+	JS_SetPropertyStr (
+	    this->m_context, this->m_globalThis, "thisLayer", this->m_adapters.object->instantiate (module.object)
+	);
+
 	JSValue args[] = { this->dynamicToJs (module.value) };
 	JSValue result = this->call (module.module, 1, args, "update");
 	ScopeGuard guard ([result, args, this] () {
@@ -695,6 +819,78 @@ void ScriptEngine::tick () {
 
 	if (!JS_IsException (result) && !JS_IsUndefined (result)) {
 	    jsToDynamicValue (this->m_context, result, module.value);
+	}
+    }
+
+    this->dispatchCursorEvents ();
+}
+
+JSValue ScriptEngine::buildCursorEvent (const glm::vec3& worldPosition, const glm::vec2& screenPosition, bool leftDown) {
+    DynamicValue worldValue (worldPosition);
+    DynamicValue screenValue (screenPosition);
+
+    JSValue event = JS_NewObject (this->m_context);
+    JS_SetPropertyStr (
+	this->m_context, event, "worldPosition", this->m_adapters.vec3->instantiate (worldValue, true)
+    );
+    JS_SetPropertyStr (
+	this->m_context, event, "screenPosition", this->m_adapters.vec2->instantiate (screenValue, true)
+    );
+    JS_SetPropertyStr (this->m_context, event, "leftDown", JS_NewBool (this->m_context, leftDown));
+
+    return event;
+}
+
+void ScriptEngine::dispatchCursorEvent (
+    LoadedModule& module, const char* name, const glm::vec3& worldPosition, const glm::vec2& screenPosition,
+    bool leftDown
+) {
+    JS_SetPropertyStr (
+	this->m_context, this->m_globalThis, "thisLayer", this->m_adapters.object->instantiate (module.object)
+    );
+
+    JSValue event = this->buildCursorEvent (worldPosition, screenPosition, leftDown);
+    JSValue args[] = { event };
+    JSValue result = this->call (module.module, 1, args, name);
+
+    if (JS_IsException (result)) {
+	logJSException (this->m_context, name);
+    }
+
+    JS_FreeValue (this->m_context, result);
+    JS_FreeValue (this->m_context, event);
+}
+
+void ScriptEngine::dispatchCursorEvents () {
+    const bool leftDown = this->m_scene.isCursorLeftDown ();
+    const glm::vec3 worldPosition = this->m_scene.getCursorWorldPosition ();
+    const glm::vec2 screenPosition = this->m_scene.getCursorScreenPosition ();
+
+    const bool pressedEdge = leftDown && !this->m_cursorLeftDownLast;
+    const bool releasedEdge = !leftDown && this->m_cursorLeftDownLast;
+    const bool moved
+	= worldPosition != this->m_cursorWorldPositionLast || screenPosition != this->m_cursorScreenPositionLast;
+
+    this->m_cursorLeftDownLast = leftDown;
+    this->m_cursorWorldPositionLast = worldPosition;
+    this->m_cursorScreenPositionLast = screenPosition;
+
+    if (!pressedEdge && !releasedEdge && !moved) {
+	return;
+    }
+
+    for (auto& module : this->m_scriptModules | std::views::values) {
+	this->m_runningModule = &module;
+
+	if (pressedEdge) {
+	    this->dispatchCursorEvent (module, "cursorDown", worldPosition, screenPosition, leftDown);
+	}
+	if (moved) {
+	    this->dispatchCursorEvent (module, "cursorMove", worldPosition, screenPosition, leftDown);
+	}
+	if (releasedEdge) {
+	    this->dispatchCursorEvent (module, "cursorUp", worldPosition, screenPosition, leftDown);
+	    this->dispatchCursorEvent (module, "cursorClick", worldPosition, screenPosition, leftDown);
 	}
     }
 }

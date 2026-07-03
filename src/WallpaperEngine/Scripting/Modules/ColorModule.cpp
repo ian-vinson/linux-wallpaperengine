@@ -10,16 +10,6 @@ using namespace WallpaperEngine::Scripting::Modules;
 static uint32_t ColorModuleInstanceId = 0;
 std::map<uint32_t, ColorModule&> colorModules;
 
-int wecolor_init (JSContext* ctx, JSModuleDef* m) {
-
-    JS_AddModuleExport (ctx, m, "rgb2hsv");
-    JS_AddModuleExport (ctx, m, "hsv2rgb");
-    JS_AddModuleExport (ctx, m, "normalizeColor");
-    JS_AddModuleExport (ctx, m, "expandColor");
-
-    return 0;
-}
-
 JSValue wecolor_rgb2hsv (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc != 1) {
 	return JS_EXCEPTION;
@@ -227,40 +217,48 @@ JSValue wecolor_expandcolor (JSContext* ctx, JSValueConst this_val, int argc, JS
     return value;
 }
 
+// Called lazily by QuickJS the first time this module is evaluated (not at JS_NewCModule time),
+// so this is where the actual export VALUES must be bound — JS_SetModuleExport() only succeeds
+// once the corresponding JS_AddModuleExport() name declaration exists, and those are registered
+// eagerly in the constructor below, immediately after JS_NewCModule().
+int wecolor_init (JSContext* ctx, JSModuleDef* m) {
+    for (const auto& [id, mod] : colorModules) {
+	if (mod.getDefinition () != m) {
+	    continue;
+	}
+
+	JS_SetModuleExport (
+	    ctx, m, "rgb2hsv", JS_NewCFunctionMagic (ctx, wecolor_rgb2hsv, "rgb2hsv", 1, JS_CFUNC_generic_magic, id)
+	);
+	JS_SetModuleExport (
+	    ctx, m, "hsv2rgb", JS_NewCFunctionMagic (ctx, wecolor_hsv2rgb, "hsv2rgb", 1, JS_CFUNC_generic_magic, id)
+	);
+	JS_SetModuleExport (
+	    ctx, m, "normalizeColor",
+	    JS_NewCFunctionMagic (ctx, wecolor_normalizecolor, "normalizeColor", 1, JS_CFUNC_generic_magic, id)
+	);
+	JS_SetModuleExport (
+	    ctx, m, "expandColor",
+	    JS_NewCFunctionMagic (ctx, wecolor_expandcolor, "expandColor", 1, JS_CFUNC_generic_magic, id)
+	);
+
+	break;
+    }
+
+    return 0;
+}
+
 ColorModule::ColorModule (ScriptEngine& engine) : ScriptModule (engine, "WEColor", wecolor_init) {
     this->m_instanceId = ++ColorModuleInstanceId;
 
-    JS_SetModuleExport (
-	this->getEngine ().getContext (), this->getDefinition (), "rgb2hsv",
-	JS_NewCFunctionMagic (
-	    this->getEngine ().getContext (), wecolor_rgb2hsv, "rgb2hsv", 1, JS_CFUNC_generic_magic, this->m_instanceId
-	)
-    );
-
-    JS_SetModuleExport (
-	this->getEngine ().getContext (), this->getDefinition (), "hsv2rgb",
-	JS_NewCFunctionMagic (
-	    this->getEngine ().getContext (), wecolor_hsv2rgb, "hsv2rgb", 1, JS_CFUNC_generic_magic, this->m_instanceId
-	)
-    );
-
-    JS_SetModuleExport (
-	this->getEngine ().getContext (), this->getDefinition (), "normalizeColor",
-	JS_NewCFunctionMagic (
-	    this->getEngine ().getContext (), wecolor_normalizecolor, "normalizeColor", 1, JS_CFUNC_generic_magic,
-	    this->m_instanceId
-	)
-    );
-
-    JS_SetModuleExport (
-	this->getEngine ().getContext (), this->getDefinition (), "expandColor",
-	JS_NewCFunctionMagic (
-	    this->getEngine ().getContext (), wecolor_expandcolor, "expandColor", 1, JS_CFUNC_generic_magic,
-	    this->m_instanceId
-	)
-    );
-
     colorModules.emplace (this->m_instanceId, *this);
+
+    // Declare the export names now, eagerly — QuickJS needs these known during module linking,
+    // well before wecolor_init() is invoked lazily at evaluation time to bind the actual values.
+    JS_AddModuleExport (this->getEngine ().getContext (), this->getDefinition (), "rgb2hsv");
+    JS_AddModuleExport (this->getEngine ().getContext (), this->getDefinition (), "hsv2rgb");
+    JS_AddModuleExport (this->getEngine ().getContext (), this->getDefinition (), "normalizeColor");
+    JS_AddModuleExport (this->getEngine ().getContext (), this->getDefinition (), "expandColor");
 }
 
 ColorModule::~ColorModule () { colorModules.erase (this->m_instanceId); }

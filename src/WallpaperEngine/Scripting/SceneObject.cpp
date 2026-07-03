@@ -182,9 +182,126 @@ JSValue get_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst
 
 	    return container->getEngine ().getAdapters ().object->instantiate (*object->as<ScriptableObject> ());
 	}
+
+	// No layer with that name (yet, or ever) — match the numeric-id lookup above and WE's own
+	// documented behavior: scripts commonly guard with `if (layer == null) return;`, so this
+	// must resolve to undefined/null rather than throw a bare, unset JS_EXCEPTION (which
+	// propagates as an untraceable "[uninitialized]" error and aborts the whole caller).
+	return JS_UNDEFINED;
     }
 
     return JS_EXCEPTION;
+}
+
+// thisScene.getLayerByID(id): same lookup as get_layer()'s numeric-id branch, but coerces its
+// argument to a number regardless of how it arrives — generated "attachment" scripts call this
+// with a template-substituted numeric-looking *string* (e.g. getLayerByID('123')), which would
+// otherwise fall through to a by-name search for an object literally named "123".
+JSValue scene_get_layer_by_id (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc != 1) {
+	return JS_EXCEPTION;
+    }
+
+    auto* container = get_opaque (this_val);
+
+    int id = 0;
+
+    if (JS_ToInt32 (ctx, &id, argv[0]) < 0) {
+	return JS_UNDEFINED;
+    }
+
+    auto* object = container->getScene ().getObject (id);
+
+    if (object == nullptr || !object->is<ScriptableObject> ()) {
+	return JS_UNDEFINED;
+    }
+
+    return container->getEngine ().getAdapters ().object->instantiate (
+	const_cast<ScriptableObject&> (*object->as<ScriptableObject> ())
+    );
+}
+
+// thisScene.enumerateLayers(): every layer in the scene, in render order, as the same ILayer
+// proxies getLayer()/getLayerByID() return.
+JSValue scene_enumerate_layers (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    auto* container = get_opaque (this_val);
+
+    JSValue array = JS_NewArray (ctx);
+    uint32_t index = 0;
+
+    for (auto object : container->getScene ().getObjectsByRenderOrder ()) {
+	if (!object->is<ScriptableObject> ()) {
+	    continue;
+	}
+
+	JSValue layer
+	    = container->getEngine ().getAdapters ().object->instantiate (*object->as<ScriptableObject> ());
+
+	JS_SetPropertyUint32 (ctx, array, index++, layer);
+    }
+
+    return array;
+}
+
+JSValue scene_create_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 1 || !JS_IsString (argv[0])) {
+	return JS_EXCEPTION;
+    }
+
+    auto* container = get_opaque (this_val);
+    const char* modelPath = JS_ToCString (ctx, argv[0]);
+
+    if (modelPath == nullptr) {
+	return JS_EXCEPTION;
+    }
+
+    ScopeGuard guard ([=] { JS_FreeCString (ctx, modelPath); });
+
+    WallpaperEngine::Render::CObject* object = container->getMutableScene ().createLayer (modelPath);
+
+    if (object == nullptr || !object->is<ScriptableObject> ()) {
+	return JS_UNDEFINED;
+    }
+
+    return container->getEngine ().getAdapters ().object->instantiate (*object->as<ScriptableObject> ());
+}
+
+JSValue scene_get_layer_index (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 1) {
+	return JS_EXCEPTION;
+    }
+
+    auto* container = get_opaque (this_val);
+    auto* scriptable = WallpaperEngine::Scripting::Adapters::ScriptableObjectAdapter::extract (argv[0]);
+
+    if (scriptable == nullptr) {
+	return JS_EXCEPTION;
+    }
+
+    return JS_NewInt32 (ctx, container->getScene ().getRenderOrderIndex (*scriptable));
+}
+
+JSValue scene_sort_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc < 2) {
+	return JS_EXCEPTION;
+    }
+
+    auto* container = get_opaque (this_val);
+    auto* scriptable = WallpaperEngine::Scripting::Adapters::ScriptableObjectAdapter::extract (argv[0]);
+
+    if (scriptable == nullptr) {
+	return JS_EXCEPTION;
+    }
+
+    int index = 0;
+
+    if (JS_ToInt32 (ctx, &index, argv[1]) < 0) {
+	return JS_EXCEPTION;
+    }
+
+    container->getMutableScene ().setRenderOrderIndex (*scriptable, index);
+
+    return JS_UNDEFINED;
 }
 
 JSValue scene_set_value (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) { return JS_EXCEPTION; }
@@ -304,7 +421,27 @@ SceneObject::SceneObject (ScriptEngine& engine, Render::Wallpapers::CScene& scen
 	this->m_engine.getContext (), this->m_instance, "getLayer",
 	JS_NewCFunction (this->m_engine.getContext (), get_layer, "getLayer", 1), JS_PROP_ENUMERABLE
     );
-    // TODO: ADD REST OF THE METHODS
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "getLayerByID",
+	JS_NewCFunction (this->m_engine.getContext (), scene_get_layer_by_id, "getLayerByID", 1), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "enumerateLayers",
+	JS_NewCFunction (this->m_engine.getContext (), scene_enumerate_layers, "enumerateLayers", 0),
+	JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "createLayer",
+	JS_NewCFunction (this->m_engine.getContext (), scene_create_layer, "createLayer", 1), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "getLayerIndex",
+	JS_NewCFunction (this->m_engine.getContext (), scene_get_layer_index, "getLayerIndex", 1), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "sortLayer",
+	JS_NewCFunction (this->m_engine.getContext (), scene_sort_layer, "sortLayer", 2), JS_PROP_ENUMERABLE
+    );
 }
 
 SceneObject::~SceneObject () { JS_FreeValue (this->m_engine.getContext (), this->m_instance); }

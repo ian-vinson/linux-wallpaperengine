@@ -16,6 +16,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "WallpaperEngine/Data/Model/DynamicValue.h"
 #include "WallpaperEngine/Data/Model/Types.h"
@@ -48,6 +49,7 @@ public:
     struct LoadedModule {
 	DynamicValue& value;
 	JSValue module;
+	ScriptableObject& object;
     };
     struct JSObjectAdapters {
 	std::unique_ptr<Adapters::VectorAdapter<4>> vec4;
@@ -76,6 +78,23 @@ public:
      * @return The modified value from update(), or a copy of currentValue on error
      */
     void queueScript (const std::string& key, DynamicValue& currentValue, ScriptableObject& object);
+
+    /**
+     * Runs the deferred init()/update() priming call for every property script registered via
+     * queueScript() since the last call to this method, in the order they were registered.
+     *
+     * queueScript() only compiles and registers a script — it does not run init()/update() —
+     * specifically so that callers can construct every object in a scene first, then call this
+     * once all of them exist. Scripts routinely resolve other layers by name via
+     * thisScene.getLayer("someName") inside init(), and that only works if the referenced object
+     * has already been constructed; running init() immediately per-object (interleaved with
+     * construction) would make that fail for any name declared later in scene.json.
+     *
+     * Safe to call again if a script's own init()/update() ends up registering further scripts
+     * (e.g. a dynamically created layer) — any newly-queued keys queued during a call are picked
+     * up by that same call rather than left stranded.
+     */
+    void runPendingInits ();
 
     /**
      * Runs a frame tick in the javascript engine. Dispatches any pending events,
@@ -150,6 +169,14 @@ private:
     // Installs globalThis.__layers and related helpers. Called lazily.
     void ensureLayerRegistry ();
 
+    // Cursor event dispatch (cursorDown/cursorUp/cursorMove/cursorClick), called once per tick().
+    void dispatchCursorEvents ();
+    JSValue buildCursorEvent (const glm::vec3& worldPosition, const glm::vec2& screenPosition, bool leftDown);
+    void dispatchCursorEvent (
+	LoadedModule& module, const char* name, const glm::vec3& worldPosition, const glm::vec2& screenPosition,
+	bool leftDown
+    );
+
     JSRuntime* m_runtime = nullptr;
     JSContext* m_context = nullptr;
     JSValue m_globalThis;
@@ -164,6 +191,11 @@ private:
     std::map<std::string, std::unique_ptr<Modules::ScriptModule>> m_modules = {};
     std::map<std::string, LoadedModule> m_scriptModules = {};
 
+    // Keys registered by queueScript() awaiting their deferred init()/update() priming call, in
+    // registration order (m_scriptModules is a std::map, keyed and thus ordered by name, not
+    // insertion order — this is what lets runPendingInits() preserve scene.json object order).
+    std::vector<std::string> m_pendingInitKeys;
+
     LoadedModule* m_runningModule = nullptr;
 
     ScriptLayerHandle m_nextLayerId = 1;
@@ -173,6 +205,10 @@ private:
     Media::MediaSource& m_mediaSource;
     std::function<void ()> m_unregisterMediaUpdateCallback;
     std::function<void ()> m_unregisterAlbumArtUpdateCallback;
+
+    bool m_cursorLeftDownLast = false;
+    glm::vec3 m_cursorWorldPositionLast = {};
+    glm::vec2 m_cursorScreenPositionLast = {};
 
     JSObjectAdapters m_adapters;
 };

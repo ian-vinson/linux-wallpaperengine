@@ -11,7 +11,11 @@
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
 
+#include <glm/glm.hpp>
 #include <ranges>
+
+#include "WallpaperEngine/Input/InputContext.h"
+#include "WallpaperEngine/Input/MouseInput.h"
 
 extern float g_Time;
 extern float g_TimeLast;
@@ -113,6 +117,14 @@ CScene::CScene (
     for (const auto& object : scene->objects) {
 	this->addObjectToRenderOrder (*object);
     }
+
+    // Every object now exists AND is registered in render order — safe to run their scripts'
+    // deferred init()/update() priming calls. Must happen after both loops above, not per-object
+    // inside either: scripts commonly resolve other layers by name via
+    // thisScene.getLayer("someName") in init(), and that lookup searches
+    // getObjectsByRenderOrder() (SceneObject.cpp's get_layer), not the construction-order object
+    // map — so this has to wait for the render-order loop too, not just construction.
+    this->m_scriptEngine->runPendingInits ();
 
     // create extra framebuffers for the bloom effect
     this->_rt_4FrameBuffer = this->create (
@@ -317,8 +329,98 @@ void CScene::addObjectToRenderOrder (const Object& object) {
     }
 }
 
+Render::CObject* CScene::createLayer (const std::string& model) {
+    const int id = this->m_nextDynamicObjectId--;
+
+    const JSON definition = {
+	{ "id", id },
+	{ "name", "dynamic_layer_" + std::to_string (-id) },
+	{ "image", model },
+	{ "visible", true },
+    };
+
+    ObjectUniquePtr objectData;
+
+    try {
+	objectData = ObjectParser::parse (definition, this->getScene ().project);
+    } catch (const std::exception& e) {
+	sLog.error ("CScene::createLayer: failed to parse model '", model, "': ", e.what ());
+	return nullptr;
+    }
+
+    if (objectData == nullptr) {
+	return nullptr;
+    }
+
+    Render::CObject* object = this->createObject (*objectData);
+
+    if (object == nullptr) {
+	return nullptr;
+    }
+
+    this->m_dynamicObjectsData.push_back (std::move (objectData));
+    this->m_objectsByRenderOrder.push_back (object);
+
+    return object;
+}
+
+int CScene::getRenderOrderIndex (const CObject& object) const {
+    const auto it = std::ranges::find (this->m_objectsByRenderOrder, &object);
+
+    if (it == this->m_objectsByRenderOrder.end ()) {
+	return -1;
+    }
+
+    return static_cast<int> (std::distance (this->m_objectsByRenderOrder.begin (), it));
+}
+
+void CScene::setRenderOrderIndex (CObject& object, int index) {
+    const auto it = std::ranges::find (this->m_objectsByRenderOrder, &object);
+
+    if (it == this->m_objectsByRenderOrder.end ()) {
+	return;
+    }
+
+    this->m_objectsByRenderOrder.erase (it);
+
+    index = std::clamp (index, 0, static_cast<int> (this->m_objectsByRenderOrder.size ()));
+    this->m_objectsByRenderOrder.insert (this->m_objectsByRenderOrder.begin () + index, &object);
+}
+
 ScriptEngine& CScene::getScriptEngine () const { return *this->m_scriptEngine; }
 Camera& CScene::getCamera () const { return *this->m_camera; }
+
+glm::vec3 CScene::getCursorWorldPosition () const {
+    const glm::mat4 mvp = this->m_camera->getProjection () * this->m_camera->getLookAt ();
+    const glm::mat4 inverseMvp = glm::inverse (mvp);
+
+    // m_mousePositionNormalized is already 0..1 in OpenGL convention (0=bottom/left, 1=top/right),
+    // matching the GL-centered, Y-up space the projection/lookAt matrices operate in.
+    glm::vec4 clip (
+	this->m_mousePositionNormalized.x * 2.0f - 1.0f, this->m_mousePositionNormalized.y * 2.0f - 1.0f, 0.0f, 1.0f
+    );
+
+    glm::vec4 world = inverseMvp * clip;
+
+    if (world.w != 0.0f) {
+	world /= world.w;
+    }
+
+    const float width = this->m_camera->getWidth ();
+    const float height = this->m_camera->getHeight ();
+
+    // GL-centered (Y-up) -> WE-space (top-left origin, Y-down), same convention as
+    // Camera::applyObjectCamera and CImage::updateScenePosition.
+    return { world.x + width / 2.0f, height / 2.0f - world.y, 0.0f };
+}
+
+glm::vec2 CScene::getCursorScreenPosition () const {
+    return { this->m_mousePosition.x * this->m_camera->getWidth (), this->m_mousePosition.y * this->m_camera->getHeight () };
+}
+
+bool CScene::isCursorLeftDown () const {
+    return this->getContext ().getInputContext ().getMouseInput ().leftClick () == Input::MouseClickStatus::Clicked;
+}
 
 void CScene::renderFrame (const glm::ivec4& viewport) {
     // ensure the virtual mouse position is up to date

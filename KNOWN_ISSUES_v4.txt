@@ -1,0 +1,478 @@
+MURAL — LWE COMPATIBILITY ISSUES TRACKER
+==========================================
+Last updated: 2026-06-28 (session 4 — wallpaper scan complete, priority order added)
+Mural version: 0.2.0 (GUI) / 0.3.0-alpha (lwe fork in progress)
+lwe fork: https://github.com/ian-vinson/linux-wallpaperengine
+lwe upstream: https://github.com/Almamu/linux-wallpaperengine
+
+Status key:
+  FIXED    — committed and pushed to main on fork
+  PARTIAL  — progress made, further work needed
+  PENDING  — not yet started
+  WONTFIX  — confirmed not a bug or not applicable
+
+===================================================================
+PRIORITIZED FIX ORDER — EASY FIRST, HARD LAST
+===================================================================
+
+TIER 1 — ONE-LINERS / ASSET DROPS (< 1 hour each)
+  1.  ISSUE-05   particle/halo stubs missing
+  2.  NEW-27     solidlayer_instance.json (non-_4 variant) missing from assets
+  3.  NEW-08b    solidlayer_instance_4.json missing from assets
+  4.  ISSUE-09   MDLV0019 puppet model version rejected (one-line fix)
+  5.  NEW-22     disablepropagation field — parse and ignore
+  6.  NEW-23     solid field on non-image objects — parse and ignore
+  7.  NEW-15     ledsource field — parse and ignore
+  8.  NEW-16     config.passthrough on composelayer — parse and ignore
+  9.  NEW-17     fullscreenlayer with no size field — fallback to viewport dims
+  10. NEW-20     g_TexelSize uniform — verify/add to effect shader injection
+
+TIER 2 — PARSER FIXES (few hours each, contained scope)
+  11. ISSUE-04   PackageParser self-validating unpadded-first detection
+  12. NEW-13     HLSL aliases in shader preprocessor (lerp/frac/saturate)
+  13. NEW-18     texSample2DLod — verify in compat headers
+  14. NEW-19     common_vertex/fragment/perspective.h — verify exist in assets
+  15. NEW-12     User property dict bindings on ALL field types
+  16. NEW-26     visible.user as nested condition dict (combo value matching)
+  17. NEW-11     instanceoverride on particle objects
+  18. NEW-14     usertextures field + $mediaThumbnail fallback
+  19. NEW-28     instance field on image objects
+
+TIER 3 — RENDERING FIXES (significant work, high impact)
+  20. NEW-08     autosize: true in model JSONs (grey screen fix)
+  21. NEW-05     TEXV0005 texture decoder (placeholder fix)
+  22. NEW-06     Point light objects (CPointLight stub)
+  23. ISSUE-08   VolumeLight quad billboard objects
+  24. NEW-01     Paper Effect blend mode mapping
+  25. NEW-09     Scalar→vecN broadcast for user property→shader uniform
+
+TIER 4 — ORTHOGRAPHIC PROJECTION (Issue-10 and related)
+  26. ISSUE-10   perspectiveoverridefov ignored when orthogonalprojection set
+  27. NEW-33     orthogonalprojection.auto=true derives from texture/size
+  28. NEW-03     ComputeSpriteFrame missing in particle shader
+
+TIER 5 — SCENESCRIPT ENGINE (multi-week, highest long-term value)
+  29. NEW-29     export function update(value) — per-frame hook
+  30. NEW-30     engine.timeOfDay, engine.setInterval, engine.frametime
+  31. NEW-24     createScriptProperties() API
+  32. NEW-25     localStorage SceneScript persistent storage
+  33. NEW-31     thisScene.getLayer() proxy + layer method API
+  34. NEW-21     Script-driven constantshadervalues (shader uniform from script)
+  35. NEW-32     mediaPropertiesChanged/mediaThumbnailChanged export hooks
+
+TIER 6 — WEB WALLPAPER CEF (separate subsystem)
+  36. NEW-07a    wallpaperPropertyListener.applyUserProperties injection
+  37. NEW-07b    CEF viewport sized to display resolution
+  38. NEW-07c    wallpaperRegisterAudioListener injection
+
+===================================================================
+PHASE 1 — CRASH FIXES
+===================================================================
+
+ISSUE-01: json.exception.type_error.302 in ObjectParser::parseText   [FIXED]
+  Commit: d8c15dc
+
+ISSUE-02: solidlayer.json missing model file crash                    [FIXED]
+  Commit: 0ccc6c8
+
+ISSUE-03: Unknown property types crash (usershortcut, uwu, etc.)     [FIXED]
+  Commit: 0b56892
+  Note: Properties with no "type" field at all must also be handled.
+
+ISSUE-04: PKG binary package format — multi-version support          [PARTIAL]
+  CONFIRMED FORMAT TABLE (from reverse engineering across 15+ wallpapers):
+    PKGV0001: unpadded, relative offsets  (Senran Kagura GIF, 4 entries)
+    PKGV0005: unpadded, relative offsets  (Sky of Zelda 1977866140, 42 entries)
+    PKGV0008: unpadded, relative offsets  (Scarlet Witch, 60 entries)
+    PKGV0013: unpadded, relative offsets  (Music Cat 2149068390, 18 entries)
+    PKGV0018: unpadded, relative offsets  (Maxwell Cat 2916644233, 42 entries)
+    PKGV0020: unpadded, relative offsets  (Gengar 2 3244466773, 100 entries)
+    PKGV0021: TWO VARIANTS — self-validation required:
+              PADDED:   4-byte aligned names, absolute offsets
+              UNPADDED: packed, relative offsets (Shiina Mashiro, Gwen Stacy)
+    PKGV0022: unpadded, relative offsets  (Cyberpunk Lucy, 155 entries)
+    PKGV0024: unpadded, relative offsets  (Ocarina, 873 entries)
+
+  CONCLUSION: Unpadded spans PKGV0001–0024. PKGV0021-padded is the ONLY exception.
+
+  FIX — self-validating detection:
+    1. Parse using UNPADDED format.
+    2. Check: data_start + last_rel_offset + last_size == file_size
+    3. If yes → unpadded correct.
+    4. If no → re-parse PADDED. If neither validates → warn, use padded.
+
+  VALIDATION CHECKSUMS:
+    PKGV0001 Senran Kagura:              4 entries, data_start=148,    18,457,805 bytes
+    PKGV0005 Sky of Zelda (1977866140): 42 entries, data_start=2274,   9,720,056 bytes
+    PKGV0008 Scarlet Witch:             60 entries, data_start=3477,  18,029,227 bytes
+    PKGV0013 Music Cat (2149068390):    18 entries, data_start=856,    1,242,631 bytes
+    PKGV0013 TechnoBeat (2249718613):   30 entries, data_start=1481,   1,931,770 bytes
+    PKGV0018 Maxwell Cat (2916644233):  42 entries, data_start=2231,  22,663,174 bytes
+    PKGV0020 Gengar 2 (3244466773):    100 entries, data_start=5268,   5,299,395 bytes
+    PKGV0021u Shiina Mashiro:          113 entries, data_start=2533,  59,807,637 bytes
+    PKGV0021u Gwen Stacy (3002198572):  57 entries, data_start=2533,   7,015,369 bytes
+    PKGV0022 Cyberpunk Lucy:           155 entries,                   32,773,007 bytes
+    PKGV0024 Ocarina (3737268876):     873 entries, data_start=42874, 95,707,948 bytes
+  File: src/WallpaperEngine/Assets/PackageParser.cpp
+
+ISSUE-05: Particle asset stubs missing                               [PENDING / TIER 1]
+  Missing from lwe bundled assets:
+    particle/halo_2 through particle/halo_6 — copy particle/halo as stubs
+    particle/normal_ring_smooth — 128x128 RGBA flat normal (R=128,G=128,B=255,A=255)
+    particle/light/light_shafts_5 — radial gradient stub or copy light_shafts variant
+
+ISSUE-24: "uwu" property type crash                                  [FIXED]
+  Covered by ISSUE-03 fix.
+
+===================================================================
+PHASE 2 — VISUAL / RENDERING FIXES
+===================================================================
+
+ISSUE-07: Camera path animation objects                              [PARTIAL]
+  Commits: 1b0dcc6, e87abc5
+  REMAINING: Zoom keyframe bezier interpolation per frame.
+
+ISSUE-08: VolumeLight objects                                        [PENDING / TIER 3]
+  Two shape="quad" objects (torch lights) in Cyberpunk Lucy.
+  Five volumetric point lights with density/exponent fields in Ocarina.
+  Fix: Recognize "shape" field → billboard light shaft render object.
+
+ISSUE-09: MDLV0013/0019 puppet model format                         [PENDING / TIER 1]
+  MDLV0019: Gwen Stacy puppet — likely one-line version acceptance in ModelParser.
+  MDLV0013: Not yet confirmed on any tested wallpaper.
+  MDLV0016: Maxwell Cat (Dingus) 3D model — verify parser handles this version.
+  File: src/WallpaperEngine/Assets/Tex/
+
+ISSUE-10: perspectiveoverridefov misapplied on orthographic scenes  [PENDING / TIER 4]
+  CONFIRMED on 5+ wallpapers: Shiina Mashiro, Neon Cafe, Stardew Valley,
+    Windows 7 Remastered, Bunk, JDM Anime, Mono No Aware (giant cat).
+  Root cause: lwe applies perspectiveoverridefov even when
+    orthogonalprojection is set. When both are present, the scene is 2D
+    orthographic — perspectiveoverridefov should be IGNORED.
+  Symptom pattern:
+    - clearcolor visible (grey/navy) instead of GL black → lwe is rendering
+    - Positioned objects at wrong scale/location
+    - Objects at high parallaxDepth massively magnified (Mono No Aware cat)
+    - "stuck in top-right corner" on wide scenes
+  Fix: In CScene.cpp, check for orthogonalprojection block. If present,
+    set orthographic projection using those dimensions and skip
+    perspectiveoverridefov entirely.
+  File: src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+  Test wallpapers (all have orthogonalprojection + perspectiveoverridefov):
+    Gengar (3300031038): {2560×1440}, pFOV=30
+    Shiina Mashiro (3351163962): {3840×2160}, pFOV=30
+    Windows 7 Remastered (3514379430): {1920×1080}, pFOV=90
+    JDM Anime (3430675494): {1920×1080}, pFOV=95
+    Stardew Valley: {640×360}, pFOV=95
+
+ISSUE-11: GLSL vec4 x vec2 shader type mismatch                     [FIXED]
+  Commit: ea34d26
+
+ISSUE-20: ES6+ JavaScript                                           [FIXED]
+  Commit: b5cf9db
+
+ISSUE-21: getColor4() returns alpha=0                               [FIXED]
+  Commit: 5268094
+
+===================================================================
+NEW ISSUES — DISCOVERED DURING WALLPAPER SCAN (Sessions 3–4)
+===================================================================
+
+NEW-01: Paper Effect overlay rendering opaque white                  [PENDING / TIER 3]
+  Wallpaper: Gengar (3300031038)
+  blend=2 with white color renders opaque instead of overlay blend mode.
+  Fix: Read blend mode from materials/Paper Effect.json, map to correct
+    lwe BlendingMode in CPass.cpp.
+
+NEW-02: Pure transform group/anchor objects log as error             [PARTIAL]
+  Fix: Demote log from error to debug for objects with no type field
+    and for objects with only "light": "point" discriminator.
+
+NEW-03: ComputeSpriteFrame missing in particle shader               [PENDING / TIER 4]
+  Wallpaper: Zelda BotW (1207182909)
+  Error: 'ComputeSpriteFrame' : no matching overloaded function found
+  Fix: Add to particle shader compat layer.
+
+NEW-05: TEXV0005 texture format not supported                       [PENDING / TIER 3]
+  ALL modern WE workshop wallpapers use TEXV0005. Shows notepad placeholder.
+  Binary layout:
+    Bytes 0-7:  "TEXV0005"
+    Byte  8:    0x00
+    Bytes 9-15: "TEXI000" (sub-header)
+    Bytes 44+:  "TEXB0004" (body block, contains compressed pixel data)
+  Pure-TEXV test cases (zero other issues):
+    Sky of Zelda (1977866140) — simplest possible test
+    Scarlet Witch — audio-reactive effects on top
+  File: src/WallpaperEngine/Assets/Tex/
+
+NEW-06: Point light objects not implemented                         [PENDING / TIER 3]
+  Discriminated by "light": "point" with intensity, radius, color fields.
+  Three in Maxwell Cat scene (ids 61, 21, 62).
+  Fix: Parse as CPointLight stub; demote unknown-type log (NEW-02).
+
+NEW-07: Web wallpaper WE JavaScript APIs not injected into CEF      [PENDING / TIER 6]
+  NEW-07a: wallpaperPropertyListener.applyUserProperties
+    Simplest fix — Real-Time World Map (3100731584) only needs this.
+  NEW-07b: CEF viewport sized to display resolution
+    Heckdivers (3235505289) renders correctly but at ~800×600 in corner.
+    Fix: Pass monitor resolution to CEF view initialization.
+  NEW-07c: wallpaperRegisterAudioListener(callback)
+    128-float array callback per frame for audio-reactive web wallpapers.
+  Anti-piracy note: Some web wallpapers (Perfect Wallpaper 884307090)
+    check for WE identity APIs and redirect to error.html when absent.
+  Ref: https://docs.wallpaperengine.io/en/web/
+
+NEW-08: autosize: true in image model JSONs causes grey screen      [PENDING / TIER 3]
+  ALL modern 2D scene wallpapers use this. Grey screen without it.
+  "autosize": true in model JSON → size quad from texture pixel dimensions.
+  "cropoffset": "x y" → UV origin offset in pixels.
+  Also add bundled assets:
+    materials/util/solidlayer_instance.json   (NEW-27, Pixels wallpaper)
+    materials/util/solidlayer_instance_4.json (NEW-08b, Stardew/Subaru)
+  File: model JSON parser + image layer mesh generation.
+
+NEW-09: Scalar user property bound to vecN shader uniform ignored   [PENDING / TIER 3]
+  Wallpaper: Music Cat (2149068390)
+  Float slider → vec2 uniform: broadcast scalar to all components.
+  Rule: scalar→vec2="v v", scalar→vec3="v v v", scalar→vec4="v v v v"
+  File: user property → shader constant value resolver.
+
+NEW-11: instanceoverride on particle objects                        [PENDING / TIER 2]
+  Four particles in Maxwell Cat use it. Patches specific node by id.
+  Fix: After parsing particle JSON, apply instanceoverride by matching
+    id field in emitter/initializer/operator arrays.
+  File: ParticleParser.cpp
+
+NEW-12: User property dict bindings on all field types              [PENDING / TIER 2]
+  Pattern: {"user": "propertyKey", "value": defaultValue}
+  Confirmed fields that use this:
+    visible (Maxwell Cat, Stardew, Windows 7, JDM, Blue Archive)
+    volume on sound objects (Zelda BotW, Windows 7, Mono No Aware)
+    text on text layers (Windows 7 notepad, JDM song title)
+    color on image/text layers (Pixels, Blue Archive font color)
+    alpha on image layers
+    scale, origin on objects
+    general.cameraparallax — scene-level field, not just object fields
+  Fix: When any field value is a dict with "user" and "value" keys,
+    resolve against current property values, fall back to "value" default.
+  Sound volume failure pattern: resolves to 0 → audio starts then cuts
+    out at ~1 second (confirmed Zelda BotW, Windows 7 startup sound).
+  File: ObjectParser.cpp + wherever general fields are parsed.
+
+NEW-13: HLSL/DirectX function aliases in shader preprocessor        [PENDING / TIER 2]
+  lerp(a,b,t)  → mix(a,b,t)
+  frac(x)      → fract(x)
+  saturate(x)  → clamp(x,0.0,1.0)
+  Confirmed in Maxwell Cat VHS and gradient_color shaders.
+  File: src/WallpaperEngine/Render/Shaders/Compiler/CShaderPreprocessor.cpp
+
+NEW-14: usertextures field on effect passes                         [PENDING / TIER 2]
+  string: slot overridden by user-property image
+  system: {"name":"$mediaThumbnail","type":"system"} → MPRIS album art
+  system: {"name":"$mediaPreviousThumbnail","type":"system"}
+  Fix: Parse without crash; fall back to textures[i] when no user image.
+
+NEW-15: ledsource field on image objects                            [PENDING / TIER 1]
+  bool, hardware LED lighting hint. Safe to ignore, must parse.
+
+NEW-16: config: {"passthrough":true} on composelayer                [PENDING / TIER 1]
+  No-op compositing pass. Parse and ignore.
+
+NEW-17: fullscreenlayer with no size field                          [PENDING / TIER 1]
+  Use viewport dimensions as fallback when size field absent.
+
+NEW-18: texSample2DLod — verify in compat headers                   [PENDING / TIER 2]
+  Maps to texture2DLod(sampler, uv, lod). Check common.h.
+
+NEW-19: common_vertex/fragment/perspective.h — verify exist          [PENDING / TIER 2]
+  Workshop shaders include these. Must be in lwe bundled shader assets.
+
+NEW-21: Script-driven constantshadervalues                          [PENDING / TIER 5]
+  Shader uniform fed by SceneScript update() return value every frame.
+  76 such entries in Stardew Valley alone (u_sun_position sky gradient).
+  Pattern: {"script": "export function update() { return new Vec2(...) }",
+            "value": "0 183"}
+  Fix: After each SceneScript update() call, write return value to the
+    bound shader uniform.
+
+NEW-22: disablepropagation field                                    [PENDING / TIER 1]
+  Present on ALL 707 objects in Stardew, ALL objects in Pixels wallpaper.
+  bool, controls property propagation down hierarchy. Default=false=safe.
+  Parse without crash. Ignore for now.
+
+NEW-23: solid field on text and group objects                       [PENDING / TIER 1]
+  Previously only on image objects. Now on text + typeless groups.
+  Parse without crash.
+
+NEW-24: createScriptProperties() WE SceneScript API                 [PENDING / TIER 5]
+  143 objects in Stardew Valley use it. ReferenceError if missing.
+  Pattern: createScriptProperties().addSlider({...}).addCheckbox({...}).finish()
+  Returns object read as scriptProperties.propName.
+  Confirmed in: Stardew, Pixels, JDM, Steam Summer Sale, Blue Archive.
+
+NEW-25: localStorage WE SceneScript API                             [PENDING / TIER 5]
+  localStorage.get("key") / localStorage.set("key", value)
+  WE-scoped persistent storage, NOT window.localStorage.
+  Missing = TypeError in init() = engine.setInterval never called
+  = day/night update loop never starts in Stardew Valley.
+
+NEW-26: visible.user as nested condition dict                       [PENDING / TIER 2]
+  New variant of NEW-12 seen in Pixels wallpaper:
+    "visible": {"user": {"name": "notepadalignment", "condition": "0"}, "value": true}
+  Object visible only when named combo property equals condition value.
+  Three alignment variants (0/1/2) gate Left/Center/Right text objects.
+  Fix: When visible.user is a dict (not a string), evaluate
+    properties[user.name].value == user.condition.
+
+NEW-27: solidlayer_instance.json (non-_4 variant) missing           [PENDING / TIER 1]
+  Referenced by Album Cover and Calendar Window in Pixels wallpaper.
+  Different from solidlayer_instance_4.json (WE 2.8 dynamic models).
+  Add both to lwe bundled assets.
+
+NEW-28: instance field on image objects                             [PENDING / TIER 2]
+  Seen in Pixels and JDM wallpapers. On solidlayer_instance objects:
+    "instance": {"combos":{"version":2}, "id":102,
+                 "textures":["util/white"],
+                 "usertextures":[{"name":"$mediaThumbnail","type":"system"}]}
+  Overrides texture slot with media thumbnail. Without it: white square.
+  Fix: Parse instance field; apply texture/combo overrides from it.
+
+NEW-29: export function update(value) — per-frame SceneScript hook  [PENDING / TIER 5]
+  Called every frame with the current field value; return value applied
+  to the bound field. This is how ALL clocks/dates/counters animate.
+  Fixes: every wallpaper with a live clock (Bunk, Pixels, JDM Anime,
+    Floating Cat, Stardew Valley, Steam Summer Sale, Blue Archive, etc.)
+  Highest single-fix return across all SceneScript gaps.
+
+NEW-30: engine object SceneScript APIs                              [PENDING / TIER 5]
+  engine.timeOfDay     — float 0.0-1.0, current time of day
+  engine.setInterval(fn, ms) — drives day/night update loop
+  engine.setTimeout(fn, ms)  — drives typing animations
+  engine.frametime     — delta time for frame-rate-independent animation
+  engine.isScreensaver — bool branch in some scripts
+  engine.registerAudioBuffers() — feeds audio data to visualizers
+
+NEW-31: thisScene.getLayer() + layer method API                     [PENDING / TIER 5]
+  thisScene.getLayer("name") returns a layer proxy object.
+  Layer proxy methods needed:
+    .origin (readable/writable vec3)
+    .text (readable, used by hidden "timezone value" text layers)
+    .play() (sound layers)
+    .getAnimation().play() (animation layers)
+  Confirmed use in: Pixels (timezone offsets), JDM (vinyl spin),
+    Stardew Valley (sun position), Windows 7 (layer queries).
+
+NEW-32: Media integration SceneScript export hooks                  [PENDING / TIER 5]
+  mediaPropertiesChanged(event) — fires on track change, provides
+    artist, title, album metadata
+  mediaThumbnailChanged(event) — fires when album art updates
+  mediaPlaybackChanged(event)  — fires on play/pause/stop
+  mediaTimelineChanged(event)  — fires on seek/position update
+  Wallpapers affected: JDM Anime, Pixels, Bunk, Steam Summer Sale,
+    Blue Archive Yuuka, Floating Cat, any with $mediaThumbnail.
+
+NEW-33: orthogonalprojection.auto=true                             [PENDING / TIER 4]
+  Seen in Senran Kagura GIF template and other simple scene wallpapers.
+  "orthogonalprojection": {"auto": true} — derive projection from
+    texture dimensions rather than explicit width/height.
+  Without it: scene renders in bottom-left corner at wrong scale.
+
+NEW-34/35: GIF/sprite animation playback modes                      [PENDING]
+  Senran Kagura GIF template: model has playback/loop fields for GIF
+    sprite animation. Separate from video (mpv) and particle systems.
+
+===================================================================
+PHASE 3 — NEW FLAGS FOR MURAL
+===================================================================
+
+ISSUE-12: --speed <float> global animation speed multiplier          [PENDING]
+ISSUE-13: --offset-x / --offset-y position flags                    [PENDING]
+ISSUE-19: --mpv-speed passed to mpv subprocess for video wallpapers  [PENDING]
+
+===================================================================
+PHASE 4 — QUALITY FLAGS
+===================================================================
+
+ISSUE-14 through ISSUE-18: AA, shadows, reflections, post-processing,
+  texture resolution scaling.                                        [PENDING]
+
+===================================================================
+MINOR / WARNINGS
+===================================================================
+
+ISSUE-22: GLFW error 65548 on Wayland --window mode                 [PENDING]
+ISSUE-23: "Stop requested by driver" premature termination           [PENDING]
+ISSUE-06: --assets-dir doesn't auto-detect /assets subdir           [PARTIAL]
+
+===================================================================
+COMMITS ON FORK (chronological)
+===================================================================
+
+0b56892  fix: skip unknown property types gracefully (Issues 03, 24)
+d8c15dc  fix: defensive type coercion in ObjectParser::parseText (Issue 01)
+0ccc6c8  fix: solidlayer.json missing model crash (Issue 02)
+[pkg]    fix: PKGV version validation + graceful fallback (Issue 04 partial)
+1b0dcc6  feat: static camera object parsing + applyObjectCamera (Issue 07)
+e87abc5  fix: correct camera coordinate XY negation (Issue 07 bugfix)
+ea34d26  fix: GLSL vec4 x vec2 via second-pass swizzle (Issue 11)
+b5cf9db  fix: ES6 import stripping + globalThis module exposure (Issue 20)
+5268094  fix: getColor4() returns vec4(color.rgb, alpha) (Issue 21)
+
+===================================================================
+TEST WALLPAPER MATRIX
+===================================================================
+
+Wallpaper                     | ID         | Primary Issues                | Status
+------------------------------|------------|-------------------------------|--------
+Cat (simple scene)            | 2891436791 | baseline                      | RENDERS
+Fishing frogs (video 4K)      | 3737237256 | baseline                      | RENDERS
+GTA 6 Girl (video)            | 3314492008 | Issue 01                      | RENDERS
+Gengar 100+ Palettes          | 3300031038 | 20✓ 21✓ NEW-01 10?            | PARTIAL
+Chainsaw Man Reze             | 3577990983 | 03✓ 11✓ NEW-12(visible)       | PARTIAL
+Cyberpunk Lucy                | 3521337568 | 04 07 08 NEW-02               | GREY
+Zelda BotW                    | 1207182909 | NEW-03 NEW-12(volume)         | PARTIAL
+Ocarina of Time               | 3737268876 | 04 07 NEW-04                  | UNTESTED
+Maxwell Cat (Dingus)          | 2916644233 | 04(0018) 05 NEW-06            | UNTESTED
+                              |            | NEW-11 NEW-12 NEW-13          |
+Bongo Cat (web)               | 1520828134 | NEW-07                        | STATIC ONLY
+Time Lapse clock (web)        | 2149375990 | NEW-07                        | STATIC ONLY
+Perfect Wallpaper (web)       | 884307090  | NEW-07 + DRM tripwire         | STATIC ONLY
+Heckdivers (web/React)        | 3235505289 | NEW-07b (viewport only)       | NEAR WORKING
+Real-Time World Map (web)     | 3100731584 | NEW-07a (props only)          | BLANK
+Subaru (Hololive)             | 3448290956 | 04 10 NEW-05 NEW-08           | GREY
+Shiina Mashiro                | 3351163962 | 04(0021u) 10 NEW-08           | GREY
+Music Cat                     | 2149068390 | 04(0013) NEW-09               | PARTIAL
+Neon Cafe lofi                | (various)  | 04 10 NEW-05 NEW-08           | PLACEHOLDER
+Gwen Stacy                    | 3002198572 | 04(0021u) 09 NEW-05 NEW-08    | BROKEN
+Sky of Zelda                  | 1977866140 | 04(0005) NEW-05 NEW-08        | GREY
+Scarlet Witch                 | (none)     | 04(0008) NEW-05 NEW-08        | GREY
+TechnoBeat                    | 2249718613 | 04(0013) NEW-05 NEW-08        | GREY
+Senran Kagura GIF             | (none)     | 04(0001) NEW-05 NEW-08 NEW-33 | CORNER
+Windows 7 Remastered          | 3514379430 | 10 NEW-08 NEW-12(all types)   | GREY
+JDM Anime (vinyl/MPRIS)       | 3430675494 | 10 NEW-08 NEW-12 NEW-28       | OFF-SCREEN
+Stardew Valley Day/Night      | various    | 10 NEW-05 NEW-08 NEW-21+      | GREY
+Anime Bunk (bedroom)          | 2134765860 | 10 NEW-08 NEW-29 NEW-30       | GREY
+Steam Summer Sale 2023        | 3000562427 | NEW-29 NEW-30 NEW-32          | STATIC
+Floating Cat                  | 3367988661 | NEW-12(visible) NEW-29        | NO CLOCK
+Pixels (fake OS desktop)      | 3122339805 | 10 NEW-08 NEW-12 NEW-26 NEW-29| GREY
+Mono No Aware (giant cat)     | 3416122407 | 10(parallaxDepth mag)         | GIANT CAT
+Blue Archive Yuuka (4K)       | 3253330537 | 10 NEW-05 NEW-08 NEW-12       | GREY
+Chinese Lofi Dragon           | 3233141951 | NEW-30(SceneScript music sel) | ALL SONGS
+Zelda Ambient Music           | 1339064732 | NEW-12(volume on sound)       | CUTS OUT
+
+===================================================================
+PKG FORMAT REFERENCE
+===================================================================
+
+HEADER (all versions, always 16 bytes):
+  [uint32 magic=8][char[8] version="PKGVnnnn"][uint32 entry_count]
+
+UNPADDED FORMAT (ALL versions except PKGV0021-padded):
+  [uint32 name_len][char* name][uint32 rel_offset][uint32 rel_size]
+  rel_offset: relative to data_start
+  data_start = 16 + sum(4 + name_len + 8) for all entries
+  Validation: data_start + last_rel_offset + last_size == file_size
+
+PADDED FORMAT (PKGV0021-padded ONLY):
+  [uint32 name_len][char* name][PADDING to 4-byte][uint32 abs_offset][uint32 abs_size]
+  abs_offset: absolute from file start
