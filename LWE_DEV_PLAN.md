@@ -1,15 +1,16 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (compile-stage silent-swallow fix done, uncommitted; new pattern-audit item #8 added)
+**Last updated:** 2026-07-04 (full 356-wallpaper regression confirmed clean post-all-changes — 355/356, identical to prior baseline, zero new errors)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
 
 ## Git Status (as of 2026-07-04)
 
-**linux-wallpaperengine** — pushed to `origin/main` through `2b2e726`;
-**one more fix uncommitted as of this update** (the #7 compile-stage
-silent-swallow fix in `ScriptEngine.cpp`, one line, needs its own commit +
-push):
+**linux-wallpaperengine** — pushed to `origin/main` through `f4a2283`,
+clean working tree, and now confirmed clean on the full 356-wallpaper
+regression too (see baseline entry below):
+- `f4a2283` docs: mark #7 done, add #8 (JS_EXCEPTION-without-JS_Throw audit)
+- `fbe1d8d` scripting: fix silent exception swallow on unresolvable module reference
 - `2b2e726` docs: update dev plan for live-reload + getLayerCount + silent-throw fix sessions
 - `d42356d` scripting: fix silent exception swallow on module linking failure
 - `3e27537` scripting: implement thisScene.getLayerCount()
@@ -59,6 +60,21 @@ isX() methods + getChildren/getParent) — 356 scene wallpapers, 355 clean
 prior run. The other two errors from the 07-03 ~18:30 run (3510729512,
 3450697231) do NOT reappear — both now clean. **No new errors introduced by
 any of this session's changes.** This is the current stable baseline.
+
+**Date:** 2026-07-04 11:24 (full regression, post-live-property-reload +
+getLayerCount() + both silent-throw logging fixes) — 356 scene wallpapers,
+355 clean (99%), 1 error, 0 crashes. Identical to the 07-04 07:10 baseline
+in every respect — same single error (3713073223's known pre-existing GLSL
+shader compile failure), no new errors anywhere. Confirms everything landed
+since the last full run (getLayerCount(), the two silent-throw logging
+additions) is genuinely clean at full corpus scale, not just on the
+6-wallpaper quick-check subset each individual fix was previously verified
+against. Notably: since the silent-throw fixes specifically ADD log output
+for failures that were previously invisible, a naive count drop here
+would've needed careful per-wallpaper investigation to distinguish
+"newly-surfaced pre-existing failure" from "genuine regression" — moot in
+this case since the count didn't change at all. **This is the current
+stable baseline.**
 
 **Known test-tooling quirk (pre-existing, not touched):** `batch_test.py`
 filters on `type == "scene"` (lowercase only), silently excluding wallpapers
@@ -155,7 +171,7 @@ construction loop AND the render-order loop in CScene.
 
 ---
 
-## Mural Integration Notes (live property reload) — FULLY WIRED 2026-07-04
+## Mural Integration Notes (live property reload) — FULLY WIRED AND LIVE-VERIFIED 2026-07-04
 
 Both sides of this contract are now implemented and verified:
 
@@ -199,16 +215,10 @@ they're not real scene properties).
 
 **Testing status**: Mural-side unit tests (9 new, 69 total passing) cover
 the payload-shape and signal-dispatch logic in isolation with a mocked
-subprocess. **No real end-to-end GUI→D-Bus→service→lwe test has been run** —
-both of Ian's monitors always have live wallpaper assignments, and
-`BackendRunner._start_process()`'s pre-spawn guard SIGKILLs any
-`linux-wallpaperengine` process it finds, making a live test genuinely risky
-to the actual desktop session rather than just inconvenient. Do this test
-manually, at a moment of your choosing, once you're comfortable briefly
-risking one monitor's wallpaper: change a real property via the GUI on your
-currently-active wallpaper and confirm via `journalctl --user -u
-mural-core.service -f` that `ReloadWallpaperProperties` fires and no new
-`lwe` PID appears (i.e. it wasn't restarted).
+subprocess. **End-to-end verified on real hardware 2026-07-04** — Ian
+confirmed manually that properties changeable via the Mural GUI now update
+live on screen with zero refresh/restart. This closes the last outstanding
+gap in the feature; nothing more to test here.
 
 - **`--properties-file` is reload-only — never read at startup.** A wallpaper
   launched with `--properties-file foo.json` still starts from plain
