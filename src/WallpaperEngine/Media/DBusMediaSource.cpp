@@ -296,7 +296,7 @@ void DBusMediaSource::detectPlayer () {
 	);
 
 	if (reply == nullptr) {
-	    return;
+	    continue;
 	}
 
 	Data::Utils::ScopeGuard guard2 ([reply] { dbus_message_unref (reply); });
