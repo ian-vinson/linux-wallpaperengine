@@ -243,6 +243,23 @@ JSValue scene_enumerate_layers (JSContext* ctx, JSValueConst this_val, int argc,
     return array;
 }
 
+// thisScene.getLayerCount(): total number of layers currently in the scene, in the same
+// collection enumerateLayers() iterates. Filtered to ScriptableObject-derived objects, same as
+// enumerateLayers() — getObjectsByRenderOrder() also holds non-layer internal render objects
+// (the bloom composite object, CSound audio objects) that scripts can never see via ILayer.
+JSValue scene_get_layer_count (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    auto* container = get_opaque (this_val);
+    uint32_t count = 0;
+
+    for (auto object : container->getScene ().getObjectsByRenderOrder ()) {
+	if (object->is<ScriptableObject> ()) {
+	    count++;
+	}
+    }
+
+    return JS_NewUint32 (ctx, count);
+}
+
 JSValue scene_create_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc < 1 || !JS_IsString (argv[0])) {
 	return JS_EXCEPTION;
@@ -428,6 +445,11 @@ SceneObject::SceneObject (ScriptEngine& engine, Render::Wallpapers::CScene& scen
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_instance, "enumerateLayers",
 	JS_NewCFunction (this->m_engine.getContext (), scene_enumerate_layers, "enumerateLayers", 0),
+	JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "getLayerCount",
+	JS_NewCFunction (this->m_engine.getContext (), scene_get_layer_count, "getLayerCount", 0),
 	JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
