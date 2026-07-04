@@ -1,15 +1,49 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-03 (end of session — 356 wallpapers tested, 356 clean)
+**Last updated:** 2026-07-04 (module-linking-failure silent-swallow gap fixed; sibling compile-stage gap found, not yet fixed; #5 scoped and deferred)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
 
-## Batch Test Baseline — CLEAN
+## Batch Test Baseline
 
-**Date:** 2026-07-03 16:36
-**Total scene wallpapers tested:** 356
-**Clean/Timeout:** 356 (100%)
-**Errors:** 0 / **Crashes:** 0
+**Date:** 2026-07-03 16:36 — 356 scene wallpapers, 356 clean (100%), 0 errors, 0 crashes
+
+**Date:** 2026-07-03 ~18:30 (post-applyUserProperties) — 356 scene wallpapers,
+353 clean (99%), 3 errors, 0 crashes. All 3 errors individually re-checked and
+confirmed pre-existing/unrelated to this change:
+- 3713073223 (Lost Landscape 3) — pure GLSL shader compile failure
+- 3510729512 (Blue Archive) — pre-existing `update()` TypeError reading `.x` of undefined
+- 3450697231 (Horror Anime Girl) — pre-existing script gaps (console read-only,
+  missing `getParent`/`getTransformMatrix`, malformed combo JSON)
+
+None reference `applyUserProperties`. Net: no regressions from this session's
+change; delta vs. the earlier 100% baseline is workshop collection growth
+surfacing pre-existing gaps, not new breakage.
+
+**Date:** 2026-07-03 ~21:xx (post-isScreensaver/isRunningInEditor/isWallpaper/
+isPortrait fix) — 355/356 clean, 0 crashes. Single error: 3713073223 (known
+pre-existing GLSL shader compile failure). No new failures. Verified via
+temporary fprintf tracing (reverted before commit) that 7/10 real-world
+callers of these APIs now execute past the previous TypeError, including
+Gengar (3300031038)'s `alpha_239` script running init() to completion for the
+first time. The remaining 3/10 are blocked by independent pre-existing gaps
+(see priority list #6 for `getChildren()`; two others sit on a field-less
+anchor object that the existing `isPureGroup` logic already treats as a
+non-scriptable placeholder — confirmed directly against `.pkg` bytes, not
+assumed).
+
+**Date:** 2026-07-04 07:10 (full regression, post-applyUserProperties +
+isX() methods + getChildren/getParent) — 356 scene wallpapers, 355 clean
+(99%), 1 error, 0 crashes. The single error is the same pre-existing
+3713073223 (Lost Landscape 3) GLSL shader compile failure documented in the
+prior run. The other two errors from the 07-03 ~18:30 run (3510729512,
+3450697231) do NOT reappear — both now clean. **No new errors introduced by
+any of this session's changes.** This is the current stable baseline.
+
+**Known test-tooling quirk (pre-existing, not touched):** `batch_test.py`
+filters on `type == "scene"` (lowercase only), silently excluding wallpapers
+whose `project.json` uses `"Scene"` (capitalized) — e.g. 3044659344 ran clean
+manually but doesn't appear in the batch's clean list for this reason.
 
 ---
 
@@ -42,6 +76,20 @@ leaves them per project convention. Run `git add -A && git commit` when ready.
 | ScriptableObjectAdapter.cpp | feat: ILayer.name and ILayer.id as read-only properties (needed for enumerateLayers filter patterns) |
 | ScriptEngine.cpp | fix: module eval promise rejection now surfaces as sLog.error instead of passing silently |
 | ScriptEngine.cpp | fix: exception logging in init()/update() call sites now includes stack traces |
+| ScriptEngine.{h,cpp} | feat: applyUserProperties(changedUserProperties) lifecycle hook — load-time only. Fires once per script module in runPendingInits(), before init()/update(), unconditionally (so it also reaches scripts that export neither). Object built from Project::properties via existing dynamicToJs(); no new conversion code needed since Property extends DynamicValue. |
+| EngineObject.cpp | fix: engine.isScreensaver()/isRunningInEditor() converted from getter-property (JS_DefinePropertyGetSet) to zero-arg callable methods, matching lib.sceneScript.d.ts's `isX(): Boolean` signature. The getter shape threw "TypeError: not a function" at any real-world call site (`engine.isScreensaver()`), silently killing the whole script module before init()/update() ever ran — invisible in batch tests due to a separate pre-existing gap where top-level module-eval throws are silently swallowed (ScriptEngine.cpp ~698-702, not fixed here). |
+| EngineObject.cpp | feat: engine.isWallpaper() — hardcoded true (lwe has no screensaver mode, so this is the honest answer, not a guess). |
+| EngineObject.cpp | feat: engine.isPortrait() — real check via scene height > width, not a stub. |
+| ScriptableObjectAdapter.cpp | feat: thisLayer.getChildren() — scans scene objects for Object::parent == this id, mirroring scene_enumerate_layers()'s iterate/filter/wrap shape (filters to ScriptableObject-derived candidates, skipping isPureGroup placeholders). Fixes 3248239912's init(), which called `thisLayer.getChildren()[2]` as its first statement and previously threw "not a function", killing the whole module before anything else ran. Verified via temporary trace against real scene data (6-element array, correct render order, correct indices matching the script's own variable assignments) — not just absence of the old error. |
+| ScriptableObjectAdapter.cpp | feat: thisLayer.getParent() — reverse of getChildren(): resolves Object::parent id back to a single CObject via the same getObjectsByRenderOrder() scan (avoids a const-correctness dead end — CScene::getObject(id) returns const CObject*, incompatible with instantiate()'s non-const ScriptableObject& requirement). Returns undefined if unparented or the parent isn't scriptable. No local wallpaper's own script calls getParent() directly, so verified via a temporary JS_Eval trace injected into ScriptEngine::tick() (reverted, zero lasting change outside this file) against 3248239912's real scene graph — confirmed correct id/name resolution across dozens of UI hierarchies, and cross-checked full symmetry: getLayerByID(1185).getChildren() returns exactly the two children whose own getParent() points back to 1185. |
+| ApplicationContext.{h,cpp} | feat: new opt-in `--properties-file <path>` CLI flag for Mural integration (part of live property reload — see priority #1). Omitting it is a zero-behavior-change no-op. |
+| main.cpp | feat: SIGUSR1 registered alongside existing SIGINT/SIGTERM signal handlers. |
+| WallpaperApplication.{h,cpp} | feat: `signal()` now branches by signal number instead of always stopping — SIGUSR1 sets an atomic reload-pending flag instead of setting keepRunning=false. New `checkPropertyReload()`, called at the top of every `render()` frame: consumes the flag via `exchange(false)`, re-reads `--properties-file`, diffs each Project's properties against `property->toString()`, applies real changes via the same `Property::update(..., UpdateSource::User)` call `--set-property` already uses, then correlates each background against `RenderContext::getWallpapers()` to find its live `CScene` and dispatches only the changed subset. Backward-compat confirmed on 3 real wallpapers run without the new flag — zero behavior change. |
+| ScriptEngine.{h,cpp} | feat: `notifyUserPropertiesChanged(changed)` — live counterpart to the load-time `applyUserProperties()` call, dispatches to all loaded script modules (not just pending-init ones) with only the changed properties, via a new `buildUserPropertiesObject(changed)` overload. Does not touch init()/update(). **Fully verified end-to-end** via a synthetic test wallpaper (see below) — all 4 tests pass: load-time full-set dispatch, live changed-only dispatch, rapid double-SIGUSR1 coalescing (exchange(false) correctly drains to exactly one dispatch), and malformed-JSON error path (logs and survives, later reload recovers normally). |
+| WallpaperApplication.cpp / ApplicationContext.cpp | fix: `--properties-file` format changed from flat `{"key":"value"}` to screen-scoped `{"screenKey":{"key":"value"}}`, so two different wallpapers on different monitors that happen to share a property name (e.g. both expose "speed") can't cross-contaminate. `checkPropertyReload()` now gates on `overrides.contains(screen)` before ever matching property names. Verified: single-screen scoped reload still passes the full 4-test matrix; a wrong screen key and the old flat format both correctly no-op with zero dispatches (structural non-collision confirmed by the gate itself, plus code review since a true two-real-monitor collision test wasn't safely possible in the sandbox). |
+| WallpaperApplication.{h,cpp} | fix: pre-existing (not introduced this session) key mismatch for `--screen-span` groups — `m_backgrounds` keys a span group as `"span:"+screens.front()`, but `RenderContext::getWallpapers()` registers the shared wallpaper under each real screen name individually, never under the `"span:"` key. This meant `checkPropertyReload()`'s final dispatch lookup could never succeed for any spanned wallpaper — properties still updated via `Property::update()`, but `applyUserProperties()` silently never fired. New `WallpaperApplication::resolveWallpaperLookupKey()` translates a `"span:X"` background key to one real screen name before querying `getWallpapers()` (confirmed via `prepareOutputs()` that every real-screen entry in a span group points at the identical shared `CWallpaper`, so any one member is a valid, non-approximate lookup). `m_backgrounds`/`getWallpapers()`'s own keying conventions were left untouched — this is a narrow translation fix, not a re-key. Verified via backward-compat re-test (non-span path fully unaffected — the helper is a no-op passthrough) and a full code-level trace of a concrete span example confirming the resolved key now actually exists in `getWallpapers()`; a live two-monitor test wasn't safely possible without disrupting the real running wallpaper session, same constraint as the prior session. **Does not change what Mural needs to write** — `"span:<firstScreen>"` remains the correct JSON key for spanned wallpapers. |
+| SceneObject.cpp | feat: `thisScene.getLayerCount()`. First pass returned the raw size of `getObjectsByRenderOrder()`, which overcounts relative to `enumerateLayers()` on any scene containing `CSound` objects (audio layers don't extend `ScriptableObject`, so `enumerateLayers()` correctly excludes them but the naive raw-size count didn't) — caught via a real-scene test (`dino_run`, 2 sound objects among ~32 layers: 36 vs the correct 34) rather than assumed. Fixed to filter on `is<ScriptableObject>()`, exactly matching `enumerateLayers()`'s own filter, so the two APIs are now guaranteed consistent by construction. (Initially suspected the bloom composite object as a second overcounting source too — traced with temporary diagnostics and confirmed that was wrong; the bloom object is a genuine `CImage`/`ScriptableObject`, so it was never actually excluded by either version.) |
+| ScriptEngine.cpp | fix: `queueScript()`'s `JS_IsException(evalResult)` branch was silently swallowing exceptions with zero logging, unlike its already-correct `JS_PROMISE_REJECTED` sibling branch right above it. Added one `logJSException()` call, matching the "log before free" ordering used at every other call site in the file. Empirically confirmed (via constructed test cases, not assumption) that this branch specifically catches **module linking failures** (a bad `import`/`export` reference resolved before the module body runs) — a runtime throw inside the module body instead settles as a rejected promise, which was already logging correctly both before and after this fix. Verified against a constructed bad-import case (`ScriptEngine [alpha_1]: SyntaxError: Could not find export...` now logs where it previously logged nothing) and a 6-wallpaper quick regression (zero new output on already-passing scripts). Found but did not fix a sibling gap in the same function — see priority #7. |
 
 ---
 
@@ -86,31 +134,213 @@ construction loop AND the render-order loop in CScene.
 
 ---
 
+## Mural Integration Notes (live property reload) — FULLY WIRED 2026-07-04
+
+Both sides of this contract are now implemented and verified:
+
+**lwe side** (this repo): `--properties-file` (screen-scoped JSON) +
+`SIGUSR1` → `checkPropertyReload()` → `Property::update()` +
+`ScriptEngine::notifyUserPropertiesChanged()`. See commit table above.
+
+**Mural side** (github.com/ian-vinson/mural), implemented same session:
+- `mural/utils/properties.py`: new `real_property_overrides()` +
+  `SYNTHETIC_OVERRIDE_KEYS = {"speed", "loop_mode", "scaling"}` — the single
+  shared filter distinguishing genuine `project.json` properties (eligible
+  for live reload) from Mural's own launch-time-only concepts. `runner.py`'s
+  `_build_command()` now uses this same function instead of its own inline
+  copy, so the two can't drift apart.
+- `mural/backend/runner.py`: `_build_command()` unconditionally appends
+  `--properties-file <path>` (fixed location:
+  `~/.config/mural/live_properties.json`). New `push_live_properties(path)`:
+  finds current assignment(s) for `path`, builds the screen-scoped payload
+  (span-aware — keys as `"span:<assignments[0].monitor>"` when
+  `screen_span` is set, matching lwe's confirmed convention), writes it,
+  sends `SIGUSR1` to the tracked subprocess PID. Returns `False` (never
+  raises) when lwe isn't running or the wallpaper isn't currently assigned
+  anywhere, so callers can cleanly fall back.
+- `mural/core/service.py`: new D-Bus method `ReloadWallpaperProperties(path)`,
+  mirrors `SetWallpaper`'s existing pattern, thin wrapper over
+  `runner.push_live_properties()`.
+- `mural/gui/mainwindow.py`: **only** `_on_prop_changed` was rewired — tries
+  `ReloadWallpaperProperties` first, falls back to the existing
+  `_reapply_current()` (full restart) on failure/exception. `_on_loop_changed`,
+  `_on_scaling_changed`, and `_on_props_reset` were deliberately left
+  untouched — `loop_mode`/`scaling` are launch-time CLI flags with no live
+  equivalent in lwe, and reset clears a mix of both categories.
+
+**Net effect**: tweaking a real scene property (rain, bloom, color, etc.) in
+the Properties panel on a wallpaper that's currently showing on a monitor no
+longer restarts the shared multi-monitor `lwe` process at all — it now
+updates in place via signal, with automatic fallback to the old
+restart-based behavior if anything about the live path fails. `loop_mode`
+and `scaling` changes still restart lwe exactly as before (unavoidable —
+they're not real scene properties).
+
+**Testing status**: Mural-side unit tests (9 new, 69 total passing) cover
+the payload-shape and signal-dispatch logic in isolation with a mocked
+subprocess. **No real end-to-end GUI→D-Bus→service→lwe test has been run** —
+both of Ian's monitors always have live wallpaper assignments, and
+`BackendRunner._start_process()`'s pre-spawn guard SIGKILLs any
+`linux-wallpaperengine` process it finds, making a live test genuinely risky
+to the actual desktop session rather than just inconvenient. Do this test
+manually, at a moment of your choosing, once you're comfortable briefly
+risking one monitor's wallpaper: change a real property via the GUI on your
+currently-active wallpaper and confirm via `journalctl --user -u
+mural-core.service -f` that `ReloadWallpaperProperties` fires and no new
+`lwe` PID appears (i.e. it wasn't restarted).
+
+- **`--properties-file` is reload-only — never read at startup.** A wallpaper
+  launched with `--properties-file foo.json` still starts from plain
+  `project.json` defaults (or `--set-property` CLI overrides, if also
+  passed); the file's contents only take effect on the first `SIGUSR1`.
+  Mural's launch-time `--set-property` behavior (unchanged, still built from
+  `load_overrides()` directly in `_build_command()`) already covers the
+  initial-launch case correctly — no gap here, just worth remembering why.
+- **Property-driven scripts are declared as inline JS source, not a
+  filename reference.** The real-world ground-truth pattern (from
+  2249718613's `camerashake` property) is
+  `"propname": {"script": "<literal JS source>", "value": <default>}` inside
+  `project.json`'s `general.properties` block — `DynamicValueParser` feeds
+  that string straight to `JS_Eval`. Not directly relevant to Mural (which
+  only needs to write plain `{"propname": "value"}` overrides), but useful
+  context if any future tooling needs to author or inspect these scripts
+  directly.
+- **`applyUserProperties()` dispatch is global, not scoped to the
+  script's own bound property.** `notifyUserPropertiesChanged()` calls every
+  loaded script module regardless of which property (if any) that specific
+  script is itself bound to — a script can react to a completely different
+  property changing elsewhere in the same project. This matches the
+  `changedUserProperties` object semantics scripts already expect
+  (`hasOwnProperty` checks against arbitrary keys), so no action needed, just
+  worth knowing when reasoning about which scripts will fire on a given
+  reload.
+- **`--properties-file` format is screen-scoped, not flat.** As of
+  2026-07-04 the JSON must be `{"screenKey": {"propname": "value"}}`, not a
+  flat `{"propname": "value"}` — the flat format silently no-ops now
+  (correctly, but silently — no error is logged for using the old shape).
+  For an ordinary single-monitor `--screen-root DP-3` background, the key
+  is exactly `"DP-3"`. **For a `--screen-span` group, the key is
+  `"span:" + <first monitor name in the span, in the same order passed to
+  --screen-span>`** — e.g. `--screen-span DP-3,HDMI-1` needs key `"span:DP-3"`,
+  not `"span:HDMI-1"` and not a comma-joined key. `push_live_properties()`
+  implements this correctly using `assignments[0].monitor`.
+
+---
+
 ## Priority Order (next sessions)
 
-### #1 — applyUserProperties(changedProps) lifecycle hook
-Called when user changes wallpaper properties. Many wallpapers use for
-property-change reactions (day/night switches, color changes, etc.).
-Currently only update()/init() dispatched.
-
-### #2 — engine.isScreensaver() / engine.isRunningInEditor()
-Found missing in Gengar. Simple boolean properties to add to EngineObject.
-
-### #3 — Composelayer ordering (Lofi Cafe 2370927443)
+### #1 — Composelayer ordering (Lofi Cafe 2370927443)
 Diagonal split. Structural composelayer bug, not a scripting issue.
 
-### #4 — Media integration (NEW-32)
+### #2 — Media integration (NEW-32)
 mediaPropertiesChanged/mediaThumbnailChanged — Spotify/media hooks.
 Scripts ARE exporting these handlers — just never called.
 
-### #5 — Real getTextureAnimation() implementation
+### #3 — Real getTextureAnimation() implementation
 Currently a no-op stub. Real implementation requires per-object animation
 rate/pause state in the rendering pipeline (CPass.cpp).
 
-### #6 — thisScene.destroyLayer() / getLayerCount()
-Two more IScene methods from lib.sceneScript.d.ts not yet implemented.
+### #4 — thisScene.destroyLayer()
+`getLayerCount()` implemented and verified 2026-07-04 (see commit table).
+`destroyLayer(layer: String|Number|ILayer): Boolean` remains — deliberately
+deferred, since it's the first genuinely destructive lifecycle operation in
+this API surface (everything implemented so far has been read-only or
+additive) and this codebase has **zero existing removal infrastructure**
+to build on (confirmed via repo-wide grep — createLayer() only ever adds;
+nothing has ever needed to tear a CObject back down). Needs its own
+dedicated design pass covering:
+- CObject ownership/lifetime: raw pointers in m_objects/m_objectsByRenderOrder,
+  actual delete presumably happens in CScene's destructor today — need to
+  trace exactly where `new CObject` happens (inside dispatchObjectType()) to
+  know what a safe mid-run teardown actually requires (GPU resource release,
+  etc.)
+- Deferred-removal semantics per spec ("removed after all scripts on that
+  frame updated") — needs a pending-destroy queue, likely mirroring the
+  existing m_pendingInitKeys snapshot-and-clear pattern in ScriptEngine, but
+  for teardown instead of construction
+- Stale-reference safety: if a script already holds a live ILayer JS object
+  (from getChildren()/getLayer()/enumerateLayers()) pointing at the object
+  being destroyed, that JS wrapper's opaque CObject* would dangle after
+  C++-side deletion unless something defensively flags "destroyed" and
+  checked on every subsequent property access — no such mechanism exists yet
+- Whether ScriptEngine has any per-object cached state (m_scriptModules
+  entries for property scripts on that object, m_layerInitialized for text
+  layers) that needs cleanup too, to avoid leaving dangling entries keyed by
+  a destroyed object's id
+- Polymorphic argument handling (name string, numeric id, or ILayer object)
 
-### #7 — T7 upstream rebase (web wallpapers)
+### #5 — ILayer.getTransformMatrix() / getAttachmentMatrix() / getAttachmentOrigin() / getAttachmentAngles() — SCOPE MUCH BIGGER THAN EXPECTED, DEFERRED
+Originally scoped (incorrectly) as a small task alongside getParent(). Actual
+investigation (2026-07-04) found:
+- `Mat4` is a full-featured JS class per lib.sceneScript.d.ts — 1 constructor,
+  7 static factories (identity/fromTranslation/fromScale/fromRotation/
+  fromEuler/fromBasis/lookAt/compose), and ~20 instance methods (translation/
+  right/up/forward accessors, add/subtract/multiply, translate/rotate/scale,
+  transformPoint/transformDirection, transpose/inverse/determinant/
+  extractEuler/normalMatrix/decompose/copy/equals/toString). `normalMatrix()`
+  returns a *separate* `Mat3` class, also undefined in this codebase.
+  Comparable in scope to the entire VectorAdapter (Vec2/3/4) effort from the
+  July 3 session — arguably bigger. Confirmed via repo-wide grep: zero Mat4/
+  glm::mat4 exposure anywhere in Scripting/, so this is a from-scratch build,
+  not a small addition.
+- getTransformMatrix() itself only becomes trivial AFTER Mat4 exists, and
+  even then needs per-object-type verification (CParticle has stored
+  m_modelMatrix; CImage/CText's model matrix source wasn't confirmed —
+  needs checking whether it's computed and stored the same way or built
+  inline without persistent storage).
+- getAttachmentMatrix()/getAttachmentOrigin()/getAttachmentAngles() are
+  blocked entirely on a bone/puppet-warp rig system — confirmed via
+  repo-wide grep that zero attachment/puppet/bone infrastructure exists in
+  this fork at all. These would need to be honest stubs (undefined/clear
+  "not supported" error) rather than real implementations, unless building
+  actual puppet-warp support becomes its own dedicated project.
+
+Deferred — needs its own dedicated multi-session scoping the same way the
+live-reload and destroyLayer() work did, not a quick single-session add.
+
+### #6 — DONE: module-linking-failure exceptions were silently swallowed
+Fixed 2026-07-04, but the original framing here (from the isScreensaver
+session) turned out to be imprecise — worth recording the correction. The
+actual mechanism, confirmed empirically by testing both cases and reading
+QuickJS's own JS_EvalFunctionInternal:
+- A **runtime throw inside a module's top-level body** (e.g. bare
+  `throw new Error(...)`) settles the module's completion as a rejected
+  promise — this ALREADY logged correctly via the JS_PROMISE_REJECTED
+  branch, both before and after this fix.
+- A **module linking failure** (a bad `import`/`export` reference — e.g.
+  `import { doesNotExist } from 'WEMath'`) fails in js_link_module() before
+  the module body ever runs, producing a genuine JS_EXCEPTION from
+  JS_EvalFunction directly — THIS was the actually-silent branch, now fixed
+  with one `logJSException()` call (ScriptEngine.cpp, queueScript()).
+  Confirmed via constructed test case, now logs: `ScriptEngine [alpha_1]:
+  SyntaxError: Could not find export 'thisExportDoesNotExist' in module
+  'WEMath'`.
+
+**Open question, not fully resolved**: whether this fix actually explains
+the isScreensaver/isRunningInEditor bug's original invisibility. That bug
+was a runtime TypeError (`engine.isScreensaver()` calling a non-function) —
+per the mechanism above, that should have hit the already-correctly-logging
+promise-rejected branch, not the branch fixed here. The connection asserted
+in Claude Code's report isn't fully verified against this reasoning; treat
+this fix as closing a real, independently-valuable gap (linking failures),
+not necessarily as fully explaining the historical bug's silence.
+
+6-wallpaper regression: 5/6 unaffected; 3713073223's known pre-existing GLSL
+error unchanged; 3300031038 (Gengar)'s existing script errors all trace to
+other, already-correctly-logging call sites — zero new output introduced
+for scripts that were already passing.
+
+### #7 — Sibling silent gap: unresolvable module reference at compile stage
+Found while verifying #6, not fixed (out of scope for that task). An
+unresolvable module reference itself (`import ... from 'nonexistent-module'`,
+as opposed to a resolvable module with a bad named export) fails even
+earlier, at the `JS_Eval(...JS_EVAL_FLAG_COMPILE_ONLY)` step in
+queueScript() — hitting a separate `JS_IsException(moduleFunc)` check a few
+lines above the one just fixed, which is also still silent. Same fix shape
+likely applies (add a logJSException() call there too) — small, contained,
+good candidate for a quick follow-up.
+
+### #8 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
 
 ---
@@ -121,8 +351,11 @@ Two more IScene methods from lib.sceneScript.d.ts not yet implemented.
 |-----|--------|
 | engine.runtime / frametime / timeOfDay / localtime | ✅ |
 | engine.canvasSize | ✅ |
+| engine.isScreensaver() | ✅ (method, hardcoded false — lwe has no screensaver mode) |
+| engine.isRunningInEditor() | ✅ (method, hardcoded false — lwe has no editor mode) |
+| engine.isWallpaper() | ✅ (method, hardcoded true) |
+| engine.isPortrait() | ✅ (method, real height>width check) |
 | engine.registerAudioBuffers() + AUDIO_RESOLUTION_* | ✅ |
-| engine.isScreensaver/isRunningInEditor/isWallpaper/isPortrait | ⚠️ isScreensaver missing |
 | localStorage.get/set/remove/clear + LOCATION_* | ✅ |
 | setInterval/clearInterval/setTimeout/clearTimeout | ✅ |
 | console.log/error | ✅ |
@@ -131,12 +364,15 @@ Two more IScene methods from lib.sceneScript.d.ts not yet implemented.
 | thisScene.getLayerIndex() / sortLayer() | ✅ |
 | thisScene.createLayer() | ✅ |
 | thisScene.enumerateLayers() | ✅ |
-| thisScene.destroyLayer() / getLayerCount() | ❌ |
+| thisScene.getLayerCount() | ✅ (filtered to ScriptableObject, verified consistent with enumerateLayers() including on a real scene with sound objects) |
+| thisScene.destroyLayer() | ❌ (deliberately deferred — needs dedicated design pass, see priority #4) |
 | input.cursorWorldPosition/cursorScreenPosition/cursorLeftDown | ✅ |
 | cursorDown/Up/Move/Click event dispatch | ✅ |
 | ILayer.origin/scale/angles/visible/alpha/parallaxDepth | ✅ (now actually writes through to render state) |
 | ILayer.name / ILayer.id | ✅ |
 | ILayer.getTextureAnimation() | ⚠️ stub (no-op rate/play/stop/pause/setFrame) |
+| ILayer.getChildren() | ✅ |
+| ILayer.getParent() | ✅ |
 | ILayer.play() (sound layers) | ❌ |
 | createScriptProperties() builder (all add* methods + defaults) | ✅ |
 | WEMath (smoothStep, mix, deg2rad, rad2deg) | ✅ |
@@ -144,7 +380,7 @@ Two more IScene methods from lib.sceneScript.d.ts not yet implemented.
 | WEColor (hsv2rgb, rgb2hsv, normalizeColor, expandColor) | ✅ |
 | Vec2/3/4 constructors (all args read correctly) | ✅ |
 | Vec2/3/4 prototype methods (full set) | ✅ |
-| applyUserProperties(changedProps) | ❌ |
+| applyUserProperties(changedProps) | ✅ (load-time full-set + live changed-only via --properties-file/SIGUSR1, fully verified end-to-end 2026-07-04) |
 | resizeScreen(size) / destroy() | ❌ |
 | media* event hooks | ❌ |
 
