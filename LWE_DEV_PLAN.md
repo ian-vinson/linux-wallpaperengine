@@ -1,6 +1,26 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (module-linking-failure silent-swallow gap fixed; sibling compile-stage gap found, not yet fixed; #5 scoped and deferred)
+**Last updated:** 2026-07-04 (compile-stage silent-swallow fix done, uncommitted; new pattern-audit item #8 added)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
+
+---
+
+## Git Status (as of 2026-07-04)
+
+**linux-wallpaperengine** — pushed to `origin/main` through `2b2e726`;
+**one more fix uncommitted as of this update** (the #7 compile-stage
+silent-swallow fix in `ScriptEngine.cpp`, one line, needs its own commit +
+push):
+- `2b2e726` docs: update dev plan for live-reload + getLayerCount + silent-throw fix sessions
+- `d42356d` scripting: fix silent exception swallow on module linking failure
+- `3e27537` scripting: implement thisScene.getLayerCount()
+- `42637d5` scripting: live user-property reload via --properties-file + SIGUSR1
+- `62bb3ed` scripting: applyUserProperties, engine.isX() methods, ILayer parent/child hierarchy
+- `e7192ce` feat(script): enumerateLayers, getLayerByID, getTextureAnimation + critical ScriptableObjectAdapter exotic method fix
+
+**mural** (github.com/ian-vinson/mural) — pushed to `origin/main`, clean working tree:
+- `18b398c` backend: live property reload via lwe's --properties-file/SIGUSR1
+- `57b4771` backend: bump default lwe volume 80→100 and fix --volume scale conversion
+- `552db2b` fix(library): remove stale PKGV>0008 compatibility warning
 
 ---
 
@@ -90,6 +110,7 @@ leaves them per project convention. Run `git add -A && git commit` when ready.
 | WallpaperApplication.{h,cpp} | fix: pre-existing (not introduced this session) key mismatch for `--screen-span` groups — `m_backgrounds` keys a span group as `"span:"+screens.front()`, but `RenderContext::getWallpapers()` registers the shared wallpaper under each real screen name individually, never under the `"span:"` key. This meant `checkPropertyReload()`'s final dispatch lookup could never succeed for any spanned wallpaper — properties still updated via `Property::update()`, but `applyUserProperties()` silently never fired. New `WallpaperApplication::resolveWallpaperLookupKey()` translates a `"span:X"` background key to one real screen name before querying `getWallpapers()` (confirmed via `prepareOutputs()` that every real-screen entry in a span group points at the identical shared `CWallpaper`, so any one member is a valid, non-approximate lookup). `m_backgrounds`/`getWallpapers()`'s own keying conventions were left untouched — this is a narrow translation fix, not a re-key. Verified via backward-compat re-test (non-span path fully unaffected — the helper is a no-op passthrough) and a full code-level trace of a concrete span example confirming the resolved key now actually exists in `getWallpapers()`; a live two-monitor test wasn't safely possible without disrupting the real running wallpaper session, same constraint as the prior session. **Does not change what Mural needs to write** — `"span:<firstScreen>"` remains the correct JSON key for spanned wallpapers. |
 | SceneObject.cpp | feat: `thisScene.getLayerCount()`. First pass returned the raw size of `getObjectsByRenderOrder()`, which overcounts relative to `enumerateLayers()` on any scene containing `CSound` objects (audio layers don't extend `ScriptableObject`, so `enumerateLayers()` correctly excludes them but the naive raw-size count didn't) — caught via a real-scene test (`dino_run`, 2 sound objects among ~32 layers: 36 vs the correct 34) rather than assumed. Fixed to filter on `is<ScriptableObject>()`, exactly matching `enumerateLayers()`'s own filter, so the two APIs are now guaranteed consistent by construction. (Initially suspected the bloom composite object as a second overcounting source too — traced with temporary diagnostics and confirmed that was wrong; the bloom object is a genuine `CImage`/`ScriptableObject`, so it was never actually excluded by either version.) |
 | ScriptEngine.cpp | fix: `queueScript()`'s `JS_IsException(evalResult)` branch was silently swallowing exceptions with zero logging, unlike its already-correct `JS_PROMISE_REJECTED` sibling branch right above it. Added one `logJSException()` call, matching the "log before free" ordering used at every other call site in the file. Empirically confirmed (via constructed test cases, not assumption) that this branch specifically catches **module linking failures** (a bad `import`/`export` reference resolved before the module body runs) — a runtime throw inside the module body instead settles as a rejected promise, which was already logging correctly both before and after this fix. Verified against a constructed bad-import case (`ScriptEngine [alpha_1]: SyntaxError: Could not find export...` now logs where it previously logged nothing) and a 6-wallpaper quick regression (zero new output on already-passing scripts). Found but did not fix a sibling gap in the same function — see priority #7. |
+| ScriptEngine.cpp | fix: sibling silent-swallow gap — `queueScript()`'s earlier `JS_IsException(moduleFunc)` check (right after `JS_Eval(...COMPILE_ONLY)`, catching a fully unresolvable module reference rather than a bad named export on a resolvable one) also got the `logJSException()` treatment. Verified both checks now independently fire on their own distinct constructed failure case, not conflated, and the 6-wallpaper regression is byte-identical to the prior session's. Found (not fixed, flagged as new priority #8) that this specific failure shape logs an uninformative `[uninitialized]` message — traced to `scriptengine_module_loader()` returning a bare `nullptr` without calling any `JS_Throw*()`, so there's no real exception object behind the `JS_EXCEPTION` sentinel for `logJSException()` to read. |
 
 ---
 
@@ -330,17 +351,42 @@ error unchanged; 3300031038 (Gengar)'s existing script errors all trace to
 other, already-correctly-logging call sites — zero new output introduced
 for scripts that were already passing.
 
-### #7 — Sibling silent gap: unresolvable module reference at compile stage
-Found while verifying #6, not fixed (out of scope for that task). An
-unresolvable module reference itself (`import ... from 'nonexistent-module'`,
-as opposed to a resolvable module with a bad named export) fails even
-earlier, at the `JS_Eval(...JS_EVAL_FLAG_COMPILE_ONLY)` step in
-queueScript() — hitting a separate `JS_IsException(moduleFunc)` check a few
-lines above the one just fixed, which is also still silent. Same fix shape
-likely applies (add a logJSException() call there too) — small, contained,
-good candidate for a quick follow-up.
+### #7 — DONE: unresolvable module reference at compile stage now logs
+Fixed 2026-07-04, same one-line `logJSException()` fix as #6, applied to
+`queueScript()`'s earlier `JS_IsException(moduleFunc)` check (right after
+the `JS_Eval(...JS_EVAL_FLAG_COMPILE_ONLY)` call). Verified both this fix
+and #6's fix independently hit their own correct, distinct branch (bad
+named export vs. fully unresolvable module reference) — not conflated.
+6-wallpaper regression identical to #6's — zero new output on already-
+passing scripts.
 
-### #8 — T7 upstream rebase (web wallpapers)
+**Caveat worth tracking as its own item (not fixed here, out of scope for
+this task)**: the new log line for this specific failure shape is
+uninformative — `ScriptEngine [alpha_1]: [uninitialized]` rather than a
+real message. Root cause: `scriptengine_module_loader()` returns a bare
+`nullptr` on a module-lookup miss without ever calling `JS_ThrowReferenceError()`
+(or similar), so QuickJS's module-resolution machinery produces the
+`JS_EXCEPTION` sentinel with no real exception object behind it —
+`JS_GetException()` (what `logJSException()` reads) comes back empty. This
+is the same "`JS_EXCEPTION` without a matching `JS_Throw*`" shape already
+noted elsewhere (a `get_layer` by-name-miss bug) — a recurring pattern
+worth a dedicated audit rather than one-off patching each time it's found.
+See new priority #8.
+
+### #8 — Audit for "JS_EXCEPTION without JS_Throw" pattern
+A recurring bug shape, now seen at least twice (module-loader lookup miss
+found this session; a `get_layer` by-name-miss noted previously): C++ code
+returns `nullptr`/an error sentinel to QuickJS without calling any
+`JS_Throw*()` function first, so `JS_IsException()` correctly detects
+*that something failed*, but there's no real exception object for
+`logJSException()`/`JS_GetException()` to actually report — resulting in
+technically-logged-but-uninformative output (`[uninitialized]` or similar).
+Worth a dedicated pass: grep for callback sites that return error sentinels
+into QuickJS (module loaders, property lookups, etc.) and confirm each one
+calls an appropriate `JS_Throw*()` before returning, rather than fixing
+these one at a time as they're individually discovered.
+
+### #9 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
 
 ---
