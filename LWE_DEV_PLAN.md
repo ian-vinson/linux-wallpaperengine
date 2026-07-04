@@ -1,13 +1,16 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (#2 media integration closed — was already working, dev plan note was stale; 2 real narrower bugs found and tracked as #2a/#2b, not fixed)
+**Last updated:** 2026-07-04 (#2a done — media polling throttle fixed, ~60x reduction measured; #2b hit twice now, good next candidate)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
 
 ## Git Status (as of 2026-07-04)
 
-**linux-wallpaperengine** — pushed to `origin/main` through `a3c1b1f`,
-clean working tree:
+**linux-wallpaperengine** — pushed to `origin/main` through `a9c3e65`,
+clean at that point; **the #2a MediaSource throttle fix (MediaSource.cpp,
+2 lines) is sitting as uncommitted working-tree changes** — commit and
+push both the code and this doc update next:
+- `a9c3e65` docs: close #2 media integration — was already working, note was stale
 - `a3c1b1f` scripting: fix unbounded JSValue refcount leak in color/vector conversion functions
 - `6dcc335` docs: mark #8 done (JS_Throw audit), add #8a/#8b follow-ups, update baseline to 354/356, confirm Mural live-reload verified on real hardware
 - `331e553` scripting: audit and fix JS_EXCEPTION-without-JS_Throw pattern (60 sites)
@@ -150,6 +153,7 @@ leaves them per project convention. Run `git add -A && git commit` when ready.
 | ScriptEngine.cpp | fix: sibling silent-swallow gap — `queueScript()`'s earlier `JS_IsException(moduleFunc)` check (right after `JS_Eval(...COMPILE_ONLY)`, catching a fully unresolvable module reference rather than a bad named export on a resolvable one) also got the `logJSException()` treatment. Verified both checks now independently fire on their own distinct constructed failure case, not conflated, and the 6-wallpaper regression is byte-identical to the prior session's. Found (not fixed, flagged as new priority #8) that this specific failure shape logs an uninformative `[uninitialized]` message — traced to `scriptengine_module_loader()` returning a bare `nullptr` without calling any `JS_Throw*()`, so there's no real exception object behind the `JS_EXCEPTION` sentinel for `logJSException()` to read. |
 | EngineObject.cpp, InputObject.cpp, SceneObject.cpp, Adapters/ScriptableObjectAdapter.cpp, Adapters/VectorAdapter.cpp, Modules/{Vector,Math,Color}Module.cpp, ScriptPropertiesObject.cpp, ScriptEngine.cpp | fix: **#8 JS_EXCEPTION-without-JS_Throw audit — 60 sites fixed across 10 files.** Every QuickJS-facing callback that returned the bare `JS_EXCEPTION` sentinel (or `nullptr`/`-1` interpreted as one) without ever calling a real `JS_Throw*()` now does — argc/type checks, name-lookup misses, magic-check macros (`VectorAdapter.cpp`'s 2 shared macros alone covered ~50 call sites in one edit), and read-only-property setters across the board. Includes the exact `scriptengine_module_loader` "unresolvable module reference" bug named in last session's task (missed by that session's own discovery grep due to a pipe-filter blind spot — function name and `return nullptr;` on different lines — caught on this session's broader re-sweep). Verified via `git stash`/`stash pop` before/after comparison against a synthetic 18-case test wallpaper: every case went from a logged `[uninitialized]` to a real, specific message (e.g. `TypeError: clearInterval() expects exactly 1 argument, got 0`). Confirmed the two prior-session module-loading fixes still fire correctly, unaffected. Explicitly deferred rather than forced: (1) whether `Vec2/3/4`'s property *setter* should fall back to plain own-property definition on an unknown name the way the *getter* already falls back to the prototype chain for method calls — a real design question, not a quick fix; (2) `ScriptPropertiesObject`'s always-reject-on-unknown-property behavior was kept as-is (just given a real message) rather than changed to a silent no-op, since that would be a behavior change beyond diagnostics. Noted but explicitly out of scope: a pre-existing `JSValue` refcount leak on `VectorModule.cpp`/`ColorModule.cpp`'s new early-throw paths — see new priority item below. Full 356-wallpaper regression: 354/356 clean, 2 known-unrelated pre-existing GLSL errors (see Batch Test Baseline above) — zero `SCRIPT_EXCEPTION`-tagged errors anywhere, confirming the fixes are net-neutral on behavior. |
 | Modules/ColorModule.cpp, Modules/VectorModule.cpp | fix: **#8a JSValue refcount leak — broader than originally flagged.** Investigation found the leak wasn't limited to the newly-added throw paths as first noted — `x`/`y`/`z` fetched via `JS_GetPropertyStr` were never freed on *any* path in 5 functions, including the normal success path (`JS_ToFloat64` reads a value without consuming/freeing it). Since these are color/vector conversion functions callable every frame from a script's `update()`, this was a real unbounded leak in long-running sessions. Fixed via the existing `ScopeGuard` RAII pattern (matching `ScriptEngine.cpp`/`LocalStorageObject.cpp`'s established usage) placed immediately after each fetch, covering every path by construction. Verification caught its own initial methodology flaw (plain JS number literals aren't refcounted in QuickJS, so a naive numeric-only leak test shows nothing) and corrected it using property-getter objects returning fresh heap-allocated strings at ~300k conversions/second: **pre-fix RSS grew ~47 MB/second linearly; post-fix, perfectly flat under identical load.** All success-path outputs and throw-path messages confirmed byte-identical before/after — pure memory fix, zero behavior change. 6-wallpaper regression (including the heavily-scripted Gengar/3300031038): zero new output. |
+| Media/MediaSource.cpp | fix: **#2a `m_nextUpdate` throttle dead code.** Never advanced past its default-constructed epoch value, so `MediaSource::update()`'s throttle check was always false — `performUpdate()` ran every rendered frame instead of once per `m_updateInterval` (2s). Two-line fix: advance `m_nextUpdate` after each real update. Measured (not assumed) ~60x reduction in `performUpdate()` calls/sec (~30 → ~0.5), corroborated two independent ways (direct temporary instrumentation, and the polled `Position` value itself jumping in exact 2-second increments post-fix vs. ~33ms pre-fix). Confirmed all four media dispatch events still fire correctly at the new rate, and the signal-driven track-change path is unaffected (D-Bus-signal-triggered, not polling-gated). 6-wallpaper regression byte-identical to prior baseline. |
 
 ---
 
@@ -320,15 +324,31 @@ disabled/broken flag on that side could have produced a false "media hooks
 don't work" impression independent of lwe's own pipeline, which is
 confirmed fine.
 
-### #2a — MediaSource update throttle is dead code
-Found while verifying #2, not fixed (out of scope for that investigation).
-`MediaSource::m_nextUpdate` is never advanced past its default-constructed
-epoch value, so the intended update-interval throttle (2 seconds, passed to
-`DBusMediaSource`'s constructor) is completely inert — a full D-Bus
-`Position` round-trip happens every single rendered frame instead of once
-per `updateInterval` as designed. Wasteful (extra D-Bus traffic every
-frame), not a correctness bug — scripts still receive correct data, just
-far more often than intended.
+### #2a — DONE: MediaSource update throttle fixed
+Fixed 2026-07-04. `MediaSource::update()` now advances `m_nextUpdate` after
+each real `performUpdate()` call — a clean 2-line addition, no cast needed
+adding `m_updateInterval` (`std::chrono::milliseconds`) to a
+`steady_clock::time_point`.
+
+Measured, not assumed: `performUpdate()` calls/sec went from ~30 (every
+frame, matching the 30fps cap — throttle completely inert) to ~0.5 (once
+per ~2s, matching the intended interval) — a ~60x reduction in actual D-Bus
+round-trips. Confirmed two independent ways: direct temporary
+instrumentation (steady 1-call-per-2s pattern, fully reverted before
+commit) and independent corroboration from the data itself — polled
+`Position` values jumped in exact 2-second increments post-fix versus
+~33ms sub-frame increments pre-fix.
+
+Confirmed dispatch still correct at the new throttled rate
+(`mediaPropertiesChanged`/`mediaPlaybackChanged`/`mediaTimelineChanged`/
+`mediaThumbnailChanged` all fire with live, correctly-changing data), and
+confirmed the signal-driven track-change path is unaffected either way
+(fires immediately on a real `OpenUri` switch, not gated by the interval —
+as expected, since that path is D-Bus-signal-triggered, not
+polling-triggered). Hit the #2b multi-player bug again during testing
+(Firefox's stale tab winning detection over VLC) — worked around
+non-destructively via a temporary `dbus-send` pause/resume, no lasting
+changes. 6-wallpaper regression byte-identical to prior baseline.
 
 ### #2b — DBusMediaSource::detectPlayer() early-return and no tie-breaking
 Found while verifying #2, not fixed. The multi-player enumeration loop does
@@ -342,6 +362,14 @@ testing, a stale/backgrounded Firefox YouTube tab that self-reported
 "Playing" won over VLC — though the dispatch mechanism to scripts worked
 identically regardless of which player won, so this didn't affect #2's
 core finding.
+
+**Hit again during #2a's verification** (same Firefox-vs-VLC confound,
+worked around non-destructively both times via a temporary `dbus-send`
+pause/resume of Firefox's MPRIS session) — this is a real, reproducible
+annoyance for testing this subsystem at minimum, and plausibly a real
+user-facing bug if someone has a stale browser tab and an active media
+player running simultaneously. Good next candidate given it's now been
+independently reproduced twice.
 
 ### #3 — Real getTextureAnimation() implementation
 Currently a no-op stub. Real implementation requires per-object animation
