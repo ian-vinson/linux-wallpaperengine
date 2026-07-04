@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <random>
 
@@ -115,6 +116,26 @@ private:
      */
     void setupPropertiesForProject (const Project& project);
     /**
+     * Checks whether a SIGUSR1-triggered property reload is pending and, if so, re-reads
+     * --properties-file, applies any changed values, and dispatches applyUserProperties()
+     * to the affected scripts. No-op if no reload is pending.
+     */
+    void checkPropertyReload ();
+    /**
+     * Translates an m_backgrounds key into the key RenderContext::getWallpapers() actually uses.
+     *
+     * For a regular --screen-root background these are the same string. For a --screen-span group,
+     * m_backgrounds keys the loaded Project as "span:<firstScreen>", but getWallpapers() registers
+     * the group's single shared CWallpaper under each real screen name individually (never under the
+     * "span:" key) — so this resolves the m_backgrounds key back to that first real screen name.
+     * All screens in a span group point at the identical CWallpaper instance, so any one of them is a
+     * valid lookup key.
+     *
+     * @param backgroundKey a key from m_backgrounds
+     * @return the corresponding key to look up in RenderContext::getWallpapers()
+     */
+    [[nodiscard]] std::string resolveWallpaperLookupKey (const std::string& backgroundKey) const;
+    /**
      * Prepares CEF browser to be used
      */
     void setupBrowser ();
@@ -177,6 +198,7 @@ private:
     std::unique_ptr<WallpaperEngine::WebBrowser::WebBrowserContext> m_browserContext = nullptr;
     std::unique_ptr<WallpaperEngine::Media::MediaSource> m_mediaSource = nullptr;
     std::mt19937 m_playlistRng { std::random_device {}() };
+    std::atomic<bool> m_reloadPropertiesRequested = false;
     bool m_isPaused = false;
     bool m_screenShotTaken = false;
     uint32_t m_nextFrameScreenshot = 0;

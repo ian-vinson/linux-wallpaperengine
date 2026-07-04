@@ -739,6 +739,44 @@ JSValue ScriptEngine::buildUserPropertiesObject () const {
     return obj;
 }
 
+JSValue ScriptEngine::buildUserPropertiesObject (const std::map<std::string, PropertySharedPtr>& changed) const {
+    JSValue obj = JS_NewObject (this->m_context);
+
+    for (auto& [name, property] : changed) {
+	JS_SetPropertyStr (this->m_context, obj, name.c_str (), this->dynamicToJs (*property));
+    }
+
+    return obj;
+}
+
+void ScriptEngine::notifyUserPropertiesChanged (const std::map<std::string, PropertySharedPtr>& changed) {
+    if (changed.empty ()) {
+	return;
+    }
+
+    for (auto& [key, loaded] : this->m_scriptModules) {
+	this->m_runningModule = &loaded;
+
+	JS_SetPropertyStr (
+	    this->m_context, this->m_globalThis, "thisLayer", this->m_adapters.object->instantiate (loaded.object)
+	);
+
+	JSValue propsArgs[] = { this->buildUserPropertiesObject (changed) };
+	JSValue propsResult = this->call (loaded.module, 1, propsArgs, "applyUserProperties");
+
+	ScopeGuard propsGuard ([this, propsArgs, propsResult] () {
+	    JS_FreeValue (this->m_context, propsResult);
+	    JS_FreeValue (this->m_context, propsArgs[0]);
+	});
+
+	if (JS_IsException (propsResult)) {
+	    logJSException (this->m_context, key.c_str ());
+	}
+    }
+
+    this->m_runningModule = nullptr;
+}
+
 void ScriptEngine::runPendingInits () {
     // Snapshot-and-clear rather than iterate m_pendingInitKeys directly: an init()/update() call
     // below can itself queue new scripts (e.g. a dynamically created layer), which would append

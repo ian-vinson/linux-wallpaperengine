@@ -12,11 +12,13 @@
 #include "WallpaperEngine/Data/Dumpers/StringPrinter.h"
 #include "WallpaperEngine/Data/Parsers/ProjectParser.h"
 
+#include "WallpaperEngine/Data/JSON.h"
 #include "WallpaperEngine/Data/Model/Property.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Debugging/CallStack.h"
 #include "WallpaperEngine/FileSystem/Adapters/MediaCover.h"
 #include "WallpaperEngine/Media/DBusMediaSource.h"
+#include "WallpaperEngine/Render/Wallpapers/CScene.h"
 
 #if DEMOMODE
 #include "recording.h"
@@ -24,6 +26,8 @@
 
 #include <algorithm>
 #include <climits>
+#include <csignal>
+#include <fstream>
 #include <numeric>
 #include <unistd.h>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -40,6 +44,7 @@ using namespace WallpaperEngine::Assets;
 using namespace WallpaperEngine::Application;
 using namespace WallpaperEngine::Data::Model;
 using namespace WallpaperEngine::FileSystem;
+using WallpaperEngine::Data::JSON::JSON;
 
 void CustomGLDebugCallback (
     GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam
@@ -509,6 +514,90 @@ void WallpaperApplication::updatePlaylists () {
     }
 }
 
+std::string WallpaperApplication::resolveWallpaperLookupKey (const std::string& backgroundKey) const {
+    if (backgroundKey.rfind ("span:", 0) != 0) {
+	return backgroundKey;
+    }
+
+    for (const auto& spanGroup : this->m_context.settings.general.spanGroups) {
+	if (spanGroup.screens.empty ()) {
+	    continue;
+	}
+
+	if ("span:" + spanGroup.screens.front () == backgroundKey) {
+	    return spanGroup.screens.front ();
+	}
+    }
+
+    return backgroundKey;
+}
+
+void WallpaperApplication::checkPropertyReload () {
+    if (!this->m_reloadPropertiesRequested.exchange (false)) {
+	return;
+    }
+
+    if (this->m_context.settings.general.propertiesFile.empty ()) {
+	sLog.error ("Property reload signaled but no --properties-file was set, ignoring");
+	return;
+    }
+
+    std::ifstream file (this->m_context.settings.general.propertiesFile);
+
+    if (!file.is_open ()) {
+	sLog.error ("Could not open properties file for reload: ", this->m_context.settings.general.propertiesFile);
+	return;
+    }
+
+    JSON overrides;
+
+    try {
+	file >> overrides;
+    } catch (const std::exception& e) {
+	sLog.error ("Failed to parse properties file: ", e.what ());
+	return;
+    }
+
+    for (const auto& [screen, project] : this->m_backgrounds) {
+	if (!overrides.contains (screen)) {
+	    continue;
+	}
+
+	const auto& screenOverrides = overrides[screen];
+	std::map<std::string, PropertySharedPtr> changed;
+
+	for (const auto& [key, property] : project->properties) {
+	    if (!screenOverrides.contains (key)) {
+		continue;
+	    }
+
+	    const std::string newValue = screenOverrides[key].is_string () ? screenOverrides[key].get<std::string> ()
+									    : screenOverrides[key].dump ();
+
+	    if (newValue == property->toString ()) {
+		continue;
+	    }
+
+	    property->update (newValue, DynamicValue::UpdateSource::User);
+	    changed.emplace (key, property);
+	}
+
+	if (changed.empty ()) {
+	    continue;
+	}
+
+	const auto wallpaperIt = this->m_renderContext->getWallpapers ().find (this->resolveWallpaperLookupKey (screen));
+
+	if (wallpaperIt == this->m_renderContext->getWallpapers ().end ()) {
+	    continue;
+	}
+
+	if (auto* scene = dynamic_cast<Render::Wallpapers::CScene*> (wallpaperIt->second.get ())) {
+	    scene->getScriptEngine ().notifyUserPropertiesChanged (changed);
+	}
+    }
+}
+
 void WallpaperApplication::setupPropertiesForProject (const Project& project) {
     // show properties if required
     for (const auto& [key, cur] : project.properties) {
@@ -863,6 +952,8 @@ void WallpaperApplication::setup () {
 }
 
 void WallpaperApplication::render () {
+    this->checkPropertyReload ();
+
     static time_t seconds;
     static struct tm* timeinfo;
 
@@ -985,6 +1076,12 @@ void WallpaperApplication::update (Render::Drivers::Output::OutputViewport* view
 }
 
 void WallpaperApplication::signal (int signal) {
+    if (signal == SIGUSR1) {
+	sLog.out ("Property reload requested by signal");
+	this->m_reloadPropertiesRequested = true;
+	return;
+    }
+
     sLog.out ("Stop requested by signal ", signal);
     this->m_context.state.general.keepRunning = false;
 }

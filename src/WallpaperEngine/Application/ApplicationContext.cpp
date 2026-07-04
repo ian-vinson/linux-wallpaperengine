@@ -594,6 +594,16 @@ void ApplicationContext::loadSettingsFromArgv () {
 	})
 	.append ();
 
+    configurationGroup.add_argument ("--properties-file")
+	.help (
+	    "Path to a JSON file of property overrides, live-reloadable via SIGUSR1. Must be nested by screen/"
+	    "background key (matching --screen-root's screen name, or \"span:<firstScreen>\" for a --screen-span "
+	    "group), e.g. {\"DP-3\": {\"speed\": \"2.0\"}, \"HDMI-1\": {\"speed\": \"5.0\"}} — this keeps "
+	    "same-named properties on different backgrounds from colliding"
+	)
+	.default_value ("")
+	.action ([this] (const std::string& value) -> void { this->settings.general.propertiesFile = value; });
+
     auto& debuggingGroup = program.add_group ("Debugging options");
 
     debuggingGroup.add_argument ("--pkg-validate")

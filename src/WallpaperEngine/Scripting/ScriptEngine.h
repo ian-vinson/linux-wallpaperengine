@@ -97,6 +97,14 @@ public:
     void runPendingInits ();
 
     /**
+     * Dispatches applyUserProperties() to every loaded script module with ONLY the changed
+     * properties (not the full set — unlike the load-time call in runPendingInits(), which
+     * intentionally sends everything as "changed"). No-op for scripts that don't export
+     * applyUserProperties.
+     */
+    void notifyUserPropertiesChanged (const std::map<std::string, PropertySharedPtr>& changed);
+
+    /**
      * Runs a frame tick in the javascript engine. Dispatches any pending events,
      * timeouts, intervals AND calls any update() functions.
      */
@@ -178,6 +186,9 @@ private:
     // no live property-reload path yet, only this load-time call (which real
     // WE also makes once on startup in addition to live edits).
     JSValue buildUserPropertiesObject () const;
+    // Same as above, but built from an explicit changed-properties map instead of the full
+    // project property set — used by notifyUserPropertiesChanged() for live reloads.
+    JSValue buildUserPropertiesObject (const std::map<std::string, PropertySharedPtr>& changed) const;
     void dispatchCursorEvent (
 	LoadedModule& module, const char* name, const glm::vec3& worldPosition, const glm::vec2& screenPosition,
 	bool leftDown

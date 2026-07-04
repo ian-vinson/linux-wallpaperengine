@@ -95,6 +95,11 @@ public:
 	    std::map<std::string, std::filesystem::path> screenBackgrounds;
 	    /** Properties to change values for */
 	    std::map<std::string, std::string> properties;
+	    /** Path to a JSON file of property overrides, live-reloadable via SIGUSR1. Nested by screen/background
+	     *  key (matching each m_backgrounds entry: a --screen-root screen name, or "span:<firstScreen>" for a
+	     *  --screen-span group), e.g. {"DP-3": {"speed": "2.0"}}, so properties of the same name on different
+	     *  backgrounds don't collide. */
+	    std::string propertiesFile;
 	    /** The scaling mode for different screens */
 	    std::map<std::string, WallpaperEngine::Render::WallpaperState::TextureUVsScaling> screenScalings;
 	    /** The clamping mode for different screens */
@@ -195,6 +200,7 @@ public:
             .defaultBackground = "",
             .screenBackgrounds = {},
             .properties = {},
+            .propertiesFile = "",
             .screenScalings = {},
             .screenClamps = {},
             .screenPlaylists = {},
