@@ -33,6 +33,8 @@ void MediaSource::update () {
     }
 
     this->performUpdate ();
+
+    m_nextUpdate = std::chrono::steady_clock::now () + m_updateInterval;
 }
 
 std::function<void ()> MediaSource::addMetadataListener (std::function<void (const MediaInfo&)> listener) {
