@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (composelayer FBO-hazard theory disproven via implementation + pixel-diff; real bug traced to the "perspective" effect's quad-warp shader math, needs fresh scoping)
+**Last updated:** 2026-07-04 (composelayer bug precisely root-caused after two disproven theories — dummy-texture GL_REPEAT wrap mode, not an FBO hazard or shader math bug; small fix now scoped with high confidence)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,71 +296,98 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #1 — REVISED (2026-07-04): FBO-feedback theory disproven; real bug is in the "perspective" effect's quad-warp shader math
-**The FBO-feedback-hazard theory from the prior session was wrong** —
-disproven via implementation and a pixel-level diff, not just re-reading
-code. What's still correct from before: composelayer is an ordinary
-image-type object (`models/util/composelayer.json`), and its material does
-bind `_rt_FullFrameBuffer` to grab already-rendered screen content. What was
-wrong: that this ever creates an actual read/write feedback loop in
-practice.
+### #1 — ROOT CAUSE PRECISELY DIAGNOSED (2026-07-04): dummy-texture GL_REPEAT wrap mode, not shader math — small, well-scoped fix
+Two prior theories, both wrong, both correctly disproven rather than shipped
+— see below for the full trail. **The actual bug, confirmed via real
+ground truth (the compiled GLSL sent to the GPU driver, not inference):**
 
-**How the theory was disproven**: implemented the scoped fix exactly as
-specified (mirrored `CParticle`'s proven REFRACT shadow-FBO + blit pattern
-into `CImage.cpp`). Build succeeded, detection/shadow-FBO-creation logic
-confirmed firing correctly via temporary instrumentation. Re-screenshotted
-Lofi Cafe with composelayer objects enabled — **diagonal split still fully
-present, pixel-for-pixel**. Rather than trust a visual "looks about the
-same," diffed the two screenshots directly: zero pixels differed in the
-composelayer region (only ordinary particle/clock animation noise
-elsewhere). The fix provably did nothing.
+Composelayer has no real source bitmap, so `CImage::detectTexture()` leaves
+`m_texture` null, and `CImage`'s constructor falls back to a dummy `CFBO`
+created with `TextureFlags_NoFlags` (existing code, ~line 207, already
+carries a `// TODO: create a dummy texture of correct size ... this should
+be properly handled` admission). That flag propagates to `m_mainFBO`/
+`m_subFBO` — the object's private ping-pong targets chaining composelayer's
+base pass into an attached effect (Perspective, in Lofi Cafe's case) — via
+`this->m_texture->getFlags()`. In `CFBO.cpp`, `TextureFlags_NoFlags` (i.e.
+neither `ClampUVs` nor `ClampUVsBorder`) sets **`GL_REPEAT`** on both wrap
+axes. The Perspective effect's `v_TexCoord` computation naturally produces
+UVs outside `[0,1]` whenever the warp quad doesn't exactly reproduce the
+full unit square (true for virtually any real use of the effect — the
+shipped *default* is the identity square, so anything actually using
+Perspective for visible distortion, like Lofi Cafe, hits this). Those
+out-of-range samples **wrap to the opposite texture edge instead of
+clamping**, producing the visible seam — whose shape traces the UV-boundary
+crossing (a diagonal, for Lofi Cafe's specific near-trapezoidal corners).
 
-**Why it did nothing, traced**: `CImage::setupPasses()`/`configurePassTarget()`
-only route a pass to the live scene FBO when it's the chain's **final**
-pass. Composelayer's own base-material pass is never final when an effect
-is attached — the effect's own pass is final instead — so the base pass
-always draws into the object's private `m_mainFBO`, never the scene FBO it
-reads from. No feedback loop ever occurs there. Separately, a composelayer
-object *without* any effect never renders at all (`CImage::setup()`'s
-"passthrough images without effects are bad, do not draw them" early
-return — confirmed via debug instrumentation that object 3282, which has
-no effect, never even reaches pass-creation). So the specific hazard
-theorized last session structurally cannot occur in `CImage`'s current
-control flow, for either shape of composelayer usage.
+**This is a general bug class, not Perspective-specific**: the same
+`this->m_texture->getFlags()` fallback governs any effect's own declared
+intermediate FBOs (`cur->effect->fbos` in `CImage::setup()`) for *any*
+passthrough object lacking a real texture — composelayer, fullscreenlayer,
+and projectlayer are all candidates for the identical bug with any
+UV-warping effect attached, not just Perspective.
 
-**The real cause, found empirically**: disabling object 3479's effects
-array entirely just makes it not render (same early-return, uninformative).
-But overwriting its **"perspective" effect's** corner values
-(`point0`..`point3`) to the identity square (`"0 0"`/`"1 0"`/`"1 1"`/`"0 1"`)
-**eliminates the diagonal split** (at the cost of mirroring the "LO-FI" sign
-text, confirming the identity values weren't a true no-op — but conclusively
-implicating the perspective effect's quad-warp specifically, not
-composelayer's FBO usage at all). Likely next lead, not yet confirmed:
-`shaders/common_perspective.h`'s `squareToQuad()` plus a custom `mat3
-inverse()` gated behind `#if HLSL` — a shader-transpilation/matrix-convention
-issue in the homography-warp path, which would affect *any* effect using
-that path, not just composelayer specifically.
+**Full investigation trail** (both discarded theories kept for the record,
+since each closing was itself a real, useful piece of work):
+1. *Original theory (very first pass)*: composelayer hidden behind
+   `ObjectParser.cpp`'s ignored `config` field — an unimplemented feature.
+   **Wrong.** Composelayer is an ordinary image-type object
+   (`models/util/composelayer.json`), fully parsed and rendered normally.
+2. *Second theory*: an OpenGL feedback hazard — composelayer's material
+   samples `_rt_FullFrameBuffer` while it's still the live scene FBO being
+   rendered into, mirroring a real, proven precedent (`CParticle.cpp`'s
+   REFRACT fix). Plausible, well-precedented, and **wrong** — disproven by
+   implementing the fix and pixel-diffing before/after screenshots (zero
+   pixels changed). Traced why: `CImage`'s pass-routing only sends the
+   *final* pass to the live scene FBO, and composelayer's base pass is
+   never final when an effect is attached, so the theorized feedback loop
+   structurally cannot occur. Fix fully reverted (confirmed empty diff).
+3. *Third theory*: a shader-transpilation bug in `common_perspective.h`'s
+   `squareToQuad()`/a custom `mat3 inverse()` gated behind `#if HLSL`.
+   **Also wrong**, and disproven with unusually strong evidence — dumped
+   the actual final compiled GLSL sent to the driver (via temporary
+   instrumentation in `CPass.cpp`, reverted after) and confirmed
+   `GLSLContext::toGlsl()` parses shaders as pure GLSL
+   (`glslang::EShSourceGlsl`) always; `HLSL` is never `#define`d anywhere
+   in this fork's actual shader-preprocessing pipeline
+   (`ShaderUnit.cpp` injects `#define mul(x,y) ((y)*(x))`,
+   `#define frac fract`, etc., but never `HLSL`) — the `#if HLSL` block is
+   dead code, never compiled. Hand-derived `squareToQuad()` against
+   Heckbert's classic 1989 unit-square-to-quadrilateral algorithm and
+   confirmed the actual compiled shader matches it term-for-term, including
+   correct `mul()`/matrix-convention handling. **The shader math itself has
+   no bug at all.**
+4. *Real cause found*: systematic differential testing (identity → an
+   axis-aligned shrunk square → a near-full-coverage shear → a trapezoid)
+   revealed a completely different signature than a math bug would produce
+   — artifact size/shape scaling exactly with how much of the `[0,1]`
+   destination area falls outside the warped quad's coverage, which is the
+   signature of wrap-mode wraparound, not misplaced geometry. Traced to the
+   dummy-texture flag propagation described above.
 
-**Outcome**: the implemented FBO fix was fully reverted (confirmed empty
-`git diff` on `CImage.cpp`/`CImage.h`, clean rebuild) since it doesn't
-address the real bug — correctly not left in place just because it was
-built. No regression run was needed since there's no net code change.
+**Ground truth check**: no separate/distinct WE installation was available
+to diff `common_perspective.h` against, but it matches Heckbert's textbook
+algorithm closely enough to be confident it's an unmodified, correct copy
+of WE's original file — the bug is squarely in this fork's own
+`CImage`/`CFBO` texture-flag plumbing, not in any WE-authored shader source.
 
-**Revised scope estimate**: this is now a materially different and more
-involved bug than originally scoped — a shader math/transpilation issue in
-`common_perspective.h`'s homography-warp implementation, not an FBO
-management fix with an existing one-file precedent to mirror. Treat this as
-needing its own fresh scoping pass (read `common_perspective.h` in full,
-understand `squareToQuad()`'s math and the `#if HLSL` custom `mat3 inverse()`
-path, check whether other effects using the same perspective-warp utility
-are similarly affected) rather than assuming it's still a small,
-well-precedented change.
+**Scope estimate — genuinely small now**: the fix is very likely just
+changing the dummy-texture fallback's flag (the already-TODO-flagged
+~line 207 in `CImage.cpp`'s constructor) from `TextureFlags_NoFlags` to
+`TextureFlags_ClampUVs` (or `ClampUVsBorder`) so `CFBO.cpp` sets clamping
+instead of repeat for textureless passthrough objects. No shader changes
+needed at all. Still worth verifying this doesn't have unintended
+consequences for whatever the original `TODO` comment's context was
+concerned about, and worth checking the general bug class (fullscreenlayer/
+projectlayer + other UV-warping effects) isn't masking anything else once
+the specific fix is in.
 
-**Still open, carried over from before, now lower priority given the above**:
-the `copybackground` field (238/356 wallpapers, overwhelmingly `true`) remains
-completely unhandled in the codebase — worth revisiting once the actual
-perspective-warp bug is understood, since it may or may not be related.
+No code changes made yet — this was scoping only, across three full
+investigation passes. Ready to implement with high confidence next time.
 
+**Still open, lower priority given the above**: the `copybackground` field
+(238/356 wallpapers, overwhelmingly `true`) remains completely unhandled in
+the codebase — revisit once this fix lands, since it may or may not be
+related to the same dummy-texture code path.
 
 ### #3 — Real getTextureAnimation() implementation
 Currently a no-op stub. Real implementation requires per-object animation

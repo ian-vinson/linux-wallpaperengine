@@ -1,9 +1,10 @@
 # Wallpaper Engine Official Documentation — Reference Notes
 **Compiled:** 2026-07-04, for the Mural/linux-wallpaperengine fork project.
 **Updated:** 2026-07-04, corrected the composelayer mechanism description
-twice — first after finding the UI copy didn't match the actual GLSL
-implementation, then again after a follow-up implementation attempt
-disproved the initially-suspected FBO feedback hazard. See §1's update note.
+three times as investigation progressed: first the UI-copy-vs-mechanism
+mismatch, then a disproven FBO-feedback theory, then a disproven shader-math
+theory, landing on the actual root cause (texture wrap mode). See §1's
+final update note.
 **Sources:** docs.wallpaperengine.io (Designer Documentation — Scene Guide + Web Guide),
 official Wallpaper Engine UI translation strings (GitHub).
 
@@ -88,14 +89,16 @@ the object's own transform), not literally "render this object's children
 into an isolated offscreen texture" the way the UI description above implies.
 Treat the UI description as effect-level marketing copy, not a mechanism
 spec — the real technical behavior is closer to a heat-haze/refraction/portal
-primitive than an isolated compositing group. **A follow-up implementation
-attempt disproved the initially-suspected OpenGL feedback hazard** (sampling
-the same FBO currently being rendered into) — `CImage`'s pass-routing only
-ever sends the *final* pass to the live scene FBO, and composelayer's base
-pass is never final when an effect is attached, so no feedback loop actually
-occurs in practice. The real bug (still being investigated) instead traces
-to the "perspective" effect's quad-warp shader math — see the dev plan's
-priority #1 for the full corrected writeup.
+primitive than an isolated compositing group. **Two follow-up investigations
+each disproved a plausible theory** (an OpenGL feedback hazard sampling the
+live scene FBO; a shader-transpilation bug in the perspective-warp math) —
+**the actual bug turned out to be a texture wrap-mode issue**: composelayer
+has no real source bitmap, so it falls back to a dummy texture created with
+no clamp flags, which propagates `GL_REPEAT` wrap mode into the FBOs
+chaining into any attached UV-warping effect. Out-of-range UVs (produced by
+almost any real use of an effect like Perspective) wrap instead of clamp,
+producing the visible seam. See the dev plan's priority #1 for the full
+three-theory investigation trail and fix scope.
 
 **Scope note**: this fork already has FBO/render-target infrastructure for
 other effects (bloom: `_rt_4FrameBuffer`, `_rt_8FrameBuffer`, `_rt_Bloom` on
