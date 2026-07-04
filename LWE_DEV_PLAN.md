@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (#2a confirmed committed/pushed; #2b done — early-return fix reproduced from scratch and verified; tie-breaking deliberately closed with no fix, "stale tab" framing corrected)
+**Last updated:** 2026-07-04 (added #10 — ISoundLayer scripting gap, found via WE_DOCS_REFERENCE.md cross-reference against the #8 audit's own findings)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -571,6 +571,36 @@ arbitrary properties to a Vec instance. **Closed, no further action.**
 ### #9 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
 
+### #10 — ISoundLayer: sound layers have zero scripting surface
+Found while cross-referencing the official WE documentation (see
+`WE_DOCS_REFERENCE.md` §16) against the #8 audit's own findings. Real WE
+has a documented `ISoundLayer` SceneScript class — `volume` (playback
+volume), `isPlaying()`, `play()` (starts if not already running), `stop()`
+(resets internal playback timer), `pause()` (holds current playback
+position). This fork's `CSound` object type does not extend
+`ScriptableObject` (confirmed during the #8 JS_Throw audit session), meaning
+**sound layers currently cannot be scripted at all** in this fork — no
+`thisLayer` binding, no `getLayer()`/`enumerateLayers()` visibility (they're
+filtered out the same way `getLayerCount()` had to learn to exclude them —
+see the #getLayerCount() commit entry above), nothing. Any real-world
+wallpaper script that tries to control sound playback (start/stop/pause a
+sound layer, adjust its volume dynamically, react to `isPlaying()`) would
+silently have no way to do so today.
+
+Scoping notes for whenever this gets picked up:
+- Would need `CSound` (or whatever this fork's actual sound-layer render
+  class is named — verify exact class name before assuming) to additionally
+  inherit `ScriptableObject`, following the same pattern already
+  established for `CImage`/`CParticle`/text layers.
+- The four methods map onto whatever this fork's actual audio-playback
+  backend already exposes for controlling a sound's play/pause/stop state
+  and volume — check what's already there before assuming new playback
+  infrastructure is needed; this may be substantially a wiring task (expose
+  existing playback control through the SceneScript API surface) rather
+  than a new-feature build, unlike the destroyLayer()/Mat4 situations.
+- Confirm whether `CSound` already tracks a "currently playing" boolean
+  internally (needed for `isPlaying()`) or whether that needs adding.
+
 ---
 
 ## API Implementation Status (vs lib.sceneScript.d.ts v2.8)
@@ -601,7 +631,7 @@ arbitrary properties to a Vec instance. **Closed, no further action.**
 | ILayer.getTextureAnimation() | ⚠️ stub (no-op rate/play/stop/pause/setFrame) |
 | ILayer.getChildren() | ✅ |
 | ILayer.getParent() | ✅ |
-| ILayer.play() (sound layers) | ❌ |
+| ISoundLayer (volume/isPlaying/play/stop/pause) | ❌ — `CSound` doesn't extend `ScriptableObject`, zero scripting surface at all (not just `play()`); see priority #10 |
 | createScriptProperties() builder (all add* methods + defaults) | ✅ |
 | WEMath (smoothStep, mix, deg2rad, rad2deg) | ✅ |
 | WEVector (angleVector2, vectorAngle2) | ✅ |
