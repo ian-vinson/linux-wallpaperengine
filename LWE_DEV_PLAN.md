@@ -1,15 +1,17 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (#2a done — media polling throttle fixed, ~60x reduction measured; #2b hit twice now, good next candidate)
+**Last updated:** 2026-07-04 (#2a confirmed committed/pushed; #2b done — early-return fix reproduced from scratch and verified; tie-breaking deliberately closed with no fix, "stale tab" framing corrected)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
 
 ## Git Status (as of 2026-07-04)
 
-**linux-wallpaperengine** — pushed to `origin/main` through `a9c3e65`,
-clean at that point; **the #2a MediaSource throttle fix (MediaSource.cpp,
-2 lines) is sitting as uncommitted working-tree changes** — commit and
-push both the code and this doc update next:
+**linux-wallpaperengine** — pushed to `origin/main` through `eef63ff`,
+confirmed clean at that point. **The #2b detectPlayer() fix
+(DBusMediaSource.cpp, 1 line) is sitting as uncommitted working-tree
+changes** — commit and push both the code and this doc update next:
+- `eef63ff` docs: mark #2a done with measured before/after throttle verification
+- `6a4d15f` media: fix dead update throttle (m_nextUpdate never advanced)
 - `a9c3e65` docs: close #2 media integration — was already working, note was stale
 - `a3c1b1f` scripting: fix unbounded JSValue refcount leak in color/vector conversion functions
 - `6dcc335` docs: mark #8 done (JS_Throw audit), add #8a/#8b follow-ups, update baseline to 354/356, confirm Mural live-reload verified on real hardware
@@ -154,6 +156,7 @@ leaves them per project convention. Run `git add -A && git commit` when ready.
 | EngineObject.cpp, InputObject.cpp, SceneObject.cpp, Adapters/ScriptableObjectAdapter.cpp, Adapters/VectorAdapter.cpp, Modules/{Vector,Math,Color}Module.cpp, ScriptPropertiesObject.cpp, ScriptEngine.cpp | fix: **#8 JS_EXCEPTION-without-JS_Throw audit — 60 sites fixed across 10 files.** Every QuickJS-facing callback that returned the bare `JS_EXCEPTION` sentinel (or `nullptr`/`-1` interpreted as one) without ever calling a real `JS_Throw*()` now does — argc/type checks, name-lookup misses, magic-check macros (`VectorAdapter.cpp`'s 2 shared macros alone covered ~50 call sites in one edit), and read-only-property setters across the board. Includes the exact `scriptengine_module_loader` "unresolvable module reference" bug named in last session's task (missed by that session's own discovery grep due to a pipe-filter blind spot — function name and `return nullptr;` on different lines — caught on this session's broader re-sweep). Verified via `git stash`/`stash pop` before/after comparison against a synthetic 18-case test wallpaper: every case went from a logged `[uninitialized]` to a real, specific message (e.g. `TypeError: clearInterval() expects exactly 1 argument, got 0`). Confirmed the two prior-session module-loading fixes still fire correctly, unaffected. Explicitly deferred rather than forced: (1) whether `Vec2/3/4`'s property *setter* should fall back to plain own-property definition on an unknown name the way the *getter* already falls back to the prototype chain for method calls — a real design question, not a quick fix; (2) `ScriptPropertiesObject`'s always-reject-on-unknown-property behavior was kept as-is (just given a real message) rather than changed to a silent no-op, since that would be a behavior change beyond diagnostics. Noted but explicitly out of scope: a pre-existing `JSValue` refcount leak on `VectorModule.cpp`/`ColorModule.cpp`'s new early-throw paths — see new priority item below. Full 356-wallpaper regression: 354/356 clean, 2 known-unrelated pre-existing GLSL errors (see Batch Test Baseline above) — zero `SCRIPT_EXCEPTION`-tagged errors anywhere, confirming the fixes are net-neutral on behavior. |
 | Modules/ColorModule.cpp, Modules/VectorModule.cpp | fix: **#8a JSValue refcount leak — broader than originally flagged.** Investigation found the leak wasn't limited to the newly-added throw paths as first noted — `x`/`y`/`z` fetched via `JS_GetPropertyStr` were never freed on *any* path in 5 functions, including the normal success path (`JS_ToFloat64` reads a value without consuming/freeing it). Since these are color/vector conversion functions callable every frame from a script's `update()`, this was a real unbounded leak in long-running sessions. Fixed via the existing `ScopeGuard` RAII pattern (matching `ScriptEngine.cpp`/`LocalStorageObject.cpp`'s established usage) placed immediately after each fetch, covering every path by construction. Verification caught its own initial methodology flaw (plain JS number literals aren't refcounted in QuickJS, so a naive numeric-only leak test shows nothing) and corrected it using property-getter objects returning fresh heap-allocated strings at ~300k conversions/second: **pre-fix RSS grew ~47 MB/second linearly; post-fix, perfectly flat under identical load.** All success-path outputs and throw-path messages confirmed byte-identical before/after — pure memory fix, zero behavior change. 6-wallpaper regression (including the heavily-scripted Gengar/3300031038): zero new output. |
 | Media/MediaSource.cpp | fix: **#2a `m_nextUpdate` throttle dead code.** Never advanced past its default-constructed epoch value, so `MediaSource::update()`'s throttle check was always false — `performUpdate()` ran every rendered frame instead of once per `m_updateInterval` (2s). Two-line fix: advance `m_nextUpdate` after each real update. Measured (not assumed) ~60x reduction in `performUpdate()` calls/sec (~30 → ~0.5), corroborated two independent ways (direct temporary instrumentation, and the polled `Position` value itself jumping in exact 2-second increments post-fix vs. ~33ms pre-fix). Confirmed all four media dispatch events still fire correctly at the new rate, and the signal-driven track-change path is unaffected (D-Bus-signal-triggered, not polling-gated). 6-wallpaper regression byte-identical to prior baseline. |
+| Media/DBusMediaSource.cpp | fix: **#2b `detectPlayer()` early-return bug.** One-word fix (`return` → `continue`) — a failed `PlaybackStatus` query against one MPRIS player no longer abandons detection for every candidate after it in the list. Reproduced from scratch with a real fake MPRIS D-Bus service (`dbus-python`, claims a bus name but exposes no `Player` interface) positioned ahead of a genuinely playing VLC instance in enumeration order: pre-fix binary hit the real D-Bus error then produced zero media events despite VLC actively playing; post-fix binary hit the same error but correctly continued past it, landing on VLC (12 media events, real data). Confirmed inert on the all-responsive path both by direct observation and by construction. Tie-breaking for multiple simultaneously-"Playing" players deliberately NOT implemented — investigated and concluded the originally-suspected "stale tab" scenario was actually a genuinely-active session, and no clearly-correct tie-break policy exists without risking misbehavior for legitimate browser MPRIS integrations that don't report `Position`. |
 
 ---
 
@@ -350,26 +353,38 @@ polling-triggered). Hit the #2b multi-player bug again during testing
 non-destructively via a temporary `dbus-send` pause/resume, no lasting
 changes. 6-wallpaper regression byte-identical to prior baseline.
 
-### #2b — DBusMediaSource::detectPlayer() early-return and no tie-breaking
-Found while verifying #2, not fixed. The multi-player enumeration loop does
-an early `return` (abandoning detection entirely) if any one MPRIS player's
-`PlaybackStatus` query fails, instead of `continue`-ing to the next
-candidate — meaning one unresponsive service earlier in D-Bus's `ListNames`
-order can prevent detecting a perfectly good player later in the list.
-Also no tie-breaking when multiple players simultaneously report "Playing"
-— binds to whichever is enumerated first (order not guaranteed stable). In
-testing, a stale/backgrounded Firefox YouTube tab that self-reported
-"Playing" won over VLC — though the dispatch mechanism to scripts worked
-identically regardless of which player won, so this didn't affect #2's
-core finding.
+### #2b — DONE (early-return fix); tie-breaking deliberately left open
+**Early-return bug: fixed 2026-07-04.** One-word change (`return` →
+`continue` in `detectPlayer()`'s loop) so a failed `PlaybackStatus` query
+against one MPRIS player no longer abandons detection for every candidate
+after it. Reproduced from scratch with a real fake MPRIS D-Bus service
+(via `dbus-python`) that claims a bus name but exposes no `Player`
+interface, positioned first in enumeration order ahead of a genuinely
+playing VLC instance: pre-fix binary hit the real D-Bus error and then
+produced zero media events despite VLC actively playing; post-fix binary
+still hit the same error for the fake player but correctly continued past
+it and landed on VLC (12 media events, real title/artist/album data).
+Confirmed inert on the all-responsive path both by direct observation (the
+modified branch was never entered when testing against only genuinely
+responsive players) and by construction (the diff only touches the body of
+`if (reply == nullptr)`).
 
-**Hit again during #2a's verification** (same Firefox-vs-VLC confound,
-worked around non-destructively both times via a temporary `dbus-send`
-pause/resume of Firefox's MPRIS session) — this is a real, reproducible
-annoyance for testing this subsystem at minimum, and plausibly a real
-user-facing bug if someone has a stale browser tab and an active media
-player running simultaneously. Good next candidate given it's now been
-independently reproduced twice.
+**Tie-breaking: investigated, deliberately NOT implemented.** The original
+framing of this ("stale/backgrounded Firefox tab won over VLC") turned out
+to be based on a wrong assumption — the Firefox session in question was
+genuinely, actively being watched at the time, not stale. That reframes
+the actual question: when two players are *both* legitimately playing
+simultaneously, there is no clearly "more correct" one to prefer — it's a
+real ambiguity about user intent, not a bug. A tempting heuristic (prefer
+whichever candidate's `Position` is actively advancing) was considered and
+rejected, since some browser-based MPRIS integrations report `Metadata`
+correctly but never wire up `Position` at all even during genuine active
+playback — such a heuristic would systematically deprioritize legitimate
+browser playback sessions, which would be a worse outcome than the current
+"first responsive player wins" behavior. Left as-is; revisit only if a
+concrete real-world case surfaces where the wrong simultaneously-playing
+session drives the wallpaper in a way that's actually a problem in
+practice, rather than guessing at a policy now.
 
 ### #3 — Real getTextureAnimation() implementation
 Currently a no-op stub. Real implementation requires per-object animation
