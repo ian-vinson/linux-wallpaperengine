@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (full 356-wallpaper regression confirmed clean post-all-changes — 355/356, identical to prior baseline, zero new errors)
+**Last updated:** 2026-07-04 (JS_Throw audit complete — 60 sites, 10 files, verified end-to-end; new baseline is 354/356 with 2 known-unrelated pre-existing errors; Mural live-reload confirmed working on real hardware)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -7,8 +7,10 @@
 ## Git Status (as of 2026-07-04)
 
 **linux-wallpaperengine** — pushed to `origin/main` through `f4a2283`,
-clean working tree, and now confirmed clean on the full 356-wallpaper
-regression too (see baseline entry below):
+clean at that point; **the #8 JS_Throw audit (60 sites, 10 files) is sitting
+as uncommitted working-tree changes** (Claude Code leaves changes
+uncommitted per project convention) — commit and push both the code and
+this doc update next:
 - `f4a2283` docs: mark #7 done, add #8 (JS_EXCEPTION-without-JS_Throw audit)
 - `fbe1d8d` scripting: fix silent exception swallow on unresolvable module reference
 - `2b2e726` docs: update dev plan for live-reload + getLayerCount + silent-throw fix sessions
@@ -73,8 +75,26 @@ against. Notably: since the silent-throw fixes specifically ADD log output
 for failures that were previously invisible, a naive count drop here
 would've needed careful per-wallpaper investigation to distinguish
 "newly-surfaced pre-existing failure" from "genuine regression" — moot in
-this case since the count didn't change at all. **This is the current
-stable baseline.**
+this case since the count didn't change at all.
+
+**Date:** 2026-07-04 ~13:47 (full regression, post-JS_Throw audit — 60
+sites fixed across 10 files) — 356 scene wallpapers, **354 clean (99%), 2
+errors, 0 crashes**. New baseline going forward:
+- 3713073223 (Lost Landscape 3) — the long-documented pre-existing GLSL
+  failure, unchanged.
+- 3420062133 (Chainsaw Man) — **newly appearing**, but independently
+  reproduced standalone and root-caused: `error C7011: implicit cast from
+  "vec4" to "vec2"` in a fragment shader, entirely inside Render/Shader
+  (CPass/GLSLContext) — a subsystem this session's changes never touched
+  (all 60 fixes confined to `src/WallpaperEngine/Scripting/*.cpp`,
+  exception-throwing only). Confirmed as corpus drift surfacing a
+  pre-existing shader bug that simply wasn't in the smaller sample checked
+  in prior sessions, not a regression from this work.
+
+Zero `SCRIPT_EXCEPTION`-tagged errors appeared anywhere in the run — the 60
+new `JS_Throw*()` calls are net-neutral on rendering/script behavior,
+purely additive to diagnostic quality. **This 354/356 (2 known, unrelated,
+pre-existing errors) is the current stable baseline going forward.**
 
 **Known test-tooling quirk (pre-existing, not touched):** `batch_test.py`
 filters on `type == "scene"` (lowercase only), silently excluding wallpapers
@@ -127,6 +147,7 @@ leaves them per project convention. Run `git add -A && git commit` when ready.
 | SceneObject.cpp | feat: `thisScene.getLayerCount()`. First pass returned the raw size of `getObjectsByRenderOrder()`, which overcounts relative to `enumerateLayers()` on any scene containing `CSound` objects (audio layers don't extend `ScriptableObject`, so `enumerateLayers()` correctly excludes them but the naive raw-size count didn't) — caught via a real-scene test (`dino_run`, 2 sound objects among ~32 layers: 36 vs the correct 34) rather than assumed. Fixed to filter on `is<ScriptableObject>()`, exactly matching `enumerateLayers()`'s own filter, so the two APIs are now guaranteed consistent by construction. (Initially suspected the bloom composite object as a second overcounting source too — traced with temporary diagnostics and confirmed that was wrong; the bloom object is a genuine `CImage`/`ScriptableObject`, so it was never actually excluded by either version.) |
 | ScriptEngine.cpp | fix: `queueScript()`'s `JS_IsException(evalResult)` branch was silently swallowing exceptions with zero logging, unlike its already-correct `JS_PROMISE_REJECTED` sibling branch right above it. Added one `logJSException()` call, matching the "log before free" ordering used at every other call site in the file. Empirically confirmed (via constructed test cases, not assumption) that this branch specifically catches **module linking failures** (a bad `import`/`export` reference resolved before the module body runs) — a runtime throw inside the module body instead settles as a rejected promise, which was already logging correctly both before and after this fix. Verified against a constructed bad-import case (`ScriptEngine [alpha_1]: SyntaxError: Could not find export...` now logs where it previously logged nothing) and a 6-wallpaper quick regression (zero new output on already-passing scripts). Found but did not fix a sibling gap in the same function — see priority #7. |
 | ScriptEngine.cpp | fix: sibling silent-swallow gap — `queueScript()`'s earlier `JS_IsException(moduleFunc)` check (right after `JS_Eval(...COMPILE_ONLY)`, catching a fully unresolvable module reference rather than a bad named export on a resolvable one) also got the `logJSException()` treatment. Verified both checks now independently fire on their own distinct constructed failure case, not conflated, and the 6-wallpaper regression is byte-identical to the prior session's. Found (not fixed, flagged as new priority #8) that this specific failure shape logs an uninformative `[uninitialized]` message — traced to `scriptengine_module_loader()` returning a bare `nullptr` without calling any `JS_Throw*()`, so there's no real exception object behind the `JS_EXCEPTION` sentinel for `logJSException()` to read. |
+| EngineObject.cpp, InputObject.cpp, SceneObject.cpp, Adapters/ScriptableObjectAdapter.cpp, Adapters/VectorAdapter.cpp, Modules/{Vector,Math,Color}Module.cpp, ScriptPropertiesObject.cpp, ScriptEngine.cpp | fix: **#8 JS_EXCEPTION-without-JS_Throw audit — 60 sites fixed across 10 files.** Every QuickJS-facing callback that returned the bare `JS_EXCEPTION` sentinel (or `nullptr`/`-1` interpreted as one) without ever calling a real `JS_Throw*()` now does — argc/type checks, name-lookup misses, magic-check macros (`VectorAdapter.cpp`'s 2 shared macros alone covered ~50 call sites in one edit), and read-only-property setters across the board. Includes the exact `scriptengine_module_loader` "unresolvable module reference" bug named in last session's task (missed by that session's own discovery grep due to a pipe-filter blind spot — function name and `return nullptr;` on different lines — caught on this session's broader re-sweep). Verified via `git stash`/`stash pop` before/after comparison against a synthetic 18-case test wallpaper: every case went from a logged `[uninitialized]` to a real, specific message (e.g. `TypeError: clearInterval() expects exactly 1 argument, got 0`). Confirmed the two prior-session module-loading fixes still fire correctly, unaffected. Explicitly deferred rather than forced: (1) whether `Vec2/3/4`'s property *setter* should fall back to plain own-property definition on an unknown name the way the *getter* already falls back to the prototype chain for method calls — a real design question, not a quick fix; (2) `ScriptPropertiesObject`'s always-reject-on-unknown-property behavior was kept as-is (just given a real message) rather than changed to a silent no-op, since that would be a behavior change beyond diagnostics. Noted but explicitly out of scope: a pre-existing `JSValue` refcount leak on `VectorModule.cpp`/`ColorModule.cpp`'s new early-throw paths — see new priority item below. Full 356-wallpaper regression: 354/356 clean, 2 known-unrelated pre-existing GLSL errors (see Batch Test Baseline above) — zero `SCRIPT_EXCEPTION`-tagged errors anywhere, confirming the fixes are net-neutral on behavior. |
 
 ---
 
@@ -383,18 +404,25 @@ noted elsewhere (a `get_layer` by-name-miss bug) — a recurring pattern
 worth a dedicated audit rather than one-off patching each time it's found.
 See new priority #8.
 
-### #8 — Audit for "JS_EXCEPTION without JS_Throw" pattern
-A recurring bug shape, now seen at least twice (module-loader lookup miss
-found this session; a `get_layer` by-name-miss noted previously): C++ code
-returns `nullptr`/an error sentinel to QuickJS without calling any
-`JS_Throw*()` function first, so `JS_IsException()` correctly detects
-*that something failed*, but there's no real exception object for
-`logJSException()`/`JS_GetException()` to actually report — resulting in
-technically-logged-but-uninformative output (`[uninitialized]` or similar).
-Worth a dedicated pass: grep for callback sites that return error sentinels
-into QuickJS (module loaders, property lookups, etc.) and confirm each one
-calls an appropriate `JS_Throw*()` before returning, rather than fixing
-these one at a time as they're individually discovered.
+### #8 — DONE: JS_EXCEPTION-without-JS_Throw audit, 60 sites fixed
+See commit table above for full detail. Two smaller items surfaced along
+the way, deliberately not fixed as part of that pass:
+
+### #8a — VectorModule.cpp/ColorModule.cpp: JSValue refcount leak on new throw paths
+Unrelated to the exception-message content itself — the new early-`JS_Throw*`
+returns in these two files leak the already-fetched x/y(/z) `JSValue`s
+instead of freeing them before returning. Small, contained, same shape as
+any other missing-`JS_FreeValue` fix elsewhere in this codebase.
+
+### #8b — Vec2/3/4 setter fallback design question
+The getter already falls back to the prototype chain on an unrecognized
+property name (needed so `.add()`/`.toString()`/etc. resolve as method
+calls, not just x/y/z/w). The setter, by contrast, now throws on any
+unrecognized name (e.g. `vec2.z = 5`) rather than falling back to plain
+own-property definition. Worth deciding deliberately whether that asymmetry
+is correct (real WE Vec2 genuinely has no `z`, so throwing may be the more
+correct behavior) or whether some other fallback is warranted — not a
+"just fix it" item, a real design call.
 
 ### #9 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
