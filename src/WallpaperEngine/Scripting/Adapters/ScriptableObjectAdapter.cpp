@@ -55,6 +55,81 @@ JSValue scriptableobject_get_texture_animation (JSContext* ctx, JSValueConst thi
     return anim;
 }
 
+// thisLayer.getChildren(): every other scene object whose Object::parent
+// references this object's id, in scene render order. Mirrors
+// scene_enumerate_layers()'s iterate/filter/wrap shape (SceneObject.cpp) —
+// skips objects that aren't ScriptableObject-derived (e.g. isPureGroup
+// placeholder objects), since only those can be represented as an ILayer
+// JS proxy.
+JSValue scriptableobject_get_children (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
+	return JS_EXCEPTION;
+    }
+
+    JSValue array = JS_NewArray (ctx);
+    uint32_t index = 0;
+    const int parentId = container->object.getId ();
+
+    for (auto* candidate : container->object.getScene ().getObjectsByRenderOrder ()) {
+	const auto& parent = candidate->getObject ().parent;
+
+	if (!parent.has_value () || parent.value () != parentId) {
+	    continue;
+	}
+
+	if (!candidate->is<WallpaperEngine::Scripting::ScriptableObject> ()) {
+	    continue;
+	}
+
+	JS_SetPropertyUint32 (
+	    ctx, array, index++,
+	    container->adapter.instantiate (*candidate->as<WallpaperEngine::Scripting::ScriptableObject> ())
+	);
+    }
+
+    return array;
+}
+
+// thisLayer.getParent(): resolves this object's Object::parent id back to
+// a single CObject via the same getObjectsByRenderOrder() scan
+// getChildren() uses (CScene::getObject(id) returns a const CObject*,
+// which can't satisfy instantiate()'s non-const ScriptableObject&
+// requirement — this sidesteps that entirely). Returns JS_UNDEFINED if
+// unparented, or if the parent isn't ScriptableObject-derived.
+JSValue scriptableobject_get_parent (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
+	return JS_EXCEPTION;
+    }
+
+    const auto& parent = container->object.getObject ().parent;
+
+    if (!parent.has_value ()) {
+	return JS_UNDEFINED;
+    }
+
+    const int parentId = parent.value ();
+
+    for (auto* candidate : container->object.getScene ().getObjectsByRenderOrder ()) {
+	if (candidate->getId () != parentId) {
+	    continue;
+	}
+
+	if (!candidate->is<WallpaperEngine::Scripting::ScriptableObject> ()) {
+	    return JS_UNDEFINED;
+	}
+
+	return container->adapter.instantiate (*candidate->as<WallpaperEngine::Scripting::ScriptableObject> ());
+    }
+
+    return JS_UNDEFINED;
+}
+
 JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst receiver) {
     JSClassID classId = 0;
 
@@ -74,6 +149,14 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
 
     if (strcmp (name, "getTextureAnimation") == 0) {
 	return JS_NewCFunction (ctx, scriptableobject_get_texture_animation, "getTextureAnimation", 0);
+    }
+
+    if (strcmp (name, "getChildren") == 0) {
+	return JS_NewCFunction (ctx, scriptableobject_get_children, "getChildren", 0);
+    }
+
+    if (strcmp (name, "getParent") == 0) {
+	return JS_NewCFunction (ctx, scriptableobject_get_parent, "getParent", 0);
     }
 
     // Read-only scene.json metadata — not backed by a scriptable DynamicValue like

@@ -112,8 +112,28 @@ JSValue engine_clear_timeout (JSContext* ctx, JSValueConst this_val, int argc, J
     return JS_UNDEFINED;
 }
 
-JSValue engine_get_is_screensaver (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+JSValue engine_is_screensaver (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     return JS_FALSE;
+}
+
+JSValue engine_is_running_in_editor (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return JS_FALSE;
+}
+
+// lwe only ever runs as a wallpaper (no screensaver mode exists, per engine_is_screensaver above).
+JSValue engine_is_wallpaper (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return JS_TRUE;
+}
+
+JSValue engine_is_portrait (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
+    const auto it = engineInstances.find (magic);
+
+    if (it == engineInstances.end ()) {
+	return JS_EXCEPTION;
+    }
+
+    const auto& scene = it->second.getScene ();
+    return JS_NewBool (ctx, scene.getHeight () > scene.getWidth ());
 }
 
 JSValue engine_set_interval (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
@@ -263,11 +283,28 @@ EngineObject::EngineObject (ScriptEngine& engine, Render::Wallpapers::CScene& sc
 	JS_NewCFunction (this->m_engine.getContext (), engine_open_user_shortcut, "openUserShortcut", 0),
 	JS_PROP_ENUMERABLE
     );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance,
-	JS_NewAtom (this->m_engine.getContext (), "isScreensaver"),
-	JS_NewCFunction (this->m_engine.getContext (), engine_get_is_screensaver, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), engine_set_value, "set", 1), JS_PROP_ENUMERABLE
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "isScreensaver",
+	JS_NewCFunction (this->m_engine.getContext (), engine_is_screensaver, "isScreensaver", 0),
+	JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "isRunningInEditor",
+	JS_NewCFunction (this->m_engine.getContext (), engine_is_running_in_editor, "isRunningInEditor", 0),
+	JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "isWallpaper",
+	JS_NewCFunction (this->m_engine.getContext (), engine_is_wallpaper, "isWallpaper", 0),
+	JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "isPortrait",
+	JS_NewCFunctionMagic (
+	    this->m_engine.getContext (), engine_is_portrait, "isPortrait", 0, JS_CFUNC_generic_magic,
+	    this->m_instanceId
+	),
+	JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_instance, "registerAudioBuffers",

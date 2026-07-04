@@ -172,6 +172,12 @@ private:
     // Cursor event dispatch (cursorDown/cursorUp/cursorMove/cursorClick), called once per tick().
     void dispatchCursorEvents ();
     JSValue buildCursorEvent (const glm::vec3& worldPosition, const glm::vec2& screenPosition, bool leftDown);
+
+    // Builds the changedUserProperties object passed to applyUserProperties().
+    // Currently always contains every project-level user property — lwe has
+    // no live property-reload path yet, only this load-time call (which real
+    // WE also makes once on startup in addition to live edits).
+    JSValue buildUserPropertiesObject () const;
     void dispatchCursorEvent (
 	LoadedModule& module, const char* name, const glm::vec3& worldPosition, const glm::vec2& screenPosition,
 	bool leftDown

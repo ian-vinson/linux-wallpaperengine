@@ -1,114 +1,117 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-03 12:33 (after localStorage + scriptProperties fixes)
+**Last updated:** 2026-07-03 (end of session — 356 wallpapers tested, 356 clean)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
 
-## Batch Test Baseline
+## Batch Test Baseline — CLEAN
 
-**Date:** 2026-07-03 12:31
-**Total scene wallpapers tested:** 201
-**Clean/Timeout:** 200 (99%)
-**Errors:** 1 — Anonymous (2430021386) OBJECT_SETUP_FAIL (shader issue, pre-existing, unrelated to scripting work)
-**Crashes:** 0
+**Date:** 2026-07-03 16:36
+**Total scene wallpapers tested:** 356
+**Clean/Timeout:** 356 (100%)
+**Errors:** 0 / **Crashes:** 0
 
 ---
 
-## Recent Commit Log — July 3 Session (newest first)
+## July 3 Session — Full Commit Summary
 
-| Commit | Description |
+All changes are working-tree modifications (uncommitted), as Claude Code
+leaves them per project convention. Run `git add -A && git commit` when ready.
+
+### Commits to create from working tree:
+
+| Change | Description |
 |--------|-------------|
-| (localStorage) | fix(script): implement localStorage.get/set/remove + LOCATION_* constants |
-| (scriptProperties) | fix(script): implement createScriptProperties() builder — 3 bugs fixed |
-| (Vec/modules) | feat(script): WEMath/WEVector/WEColor modules + Vec2/3/4 prototype methods + VectorAdapter arg-order fix |
-| (cursor) | feat(script): implement input global and cursor event handlers |
-| (createLayer) | feat(script): implement thisScene.createLayer(), getLayerIndex(), sortLayer() |
-| (Vec/module fix) | fix(scripting): Vec2/3/4 on globalThis + module eval + thisLayer rebinding + destructor ordering |
-| `0a209c8` | feat(script): implement engine.registerAudioBuffers() + fix engineInstances |
-| `88f7dc6` | fix(texture): skip LZ4 decompression for video-flagged raw-GL textures |
-| `0ffc279` | fix(texture): use real per-image mip level count for TEXB0004 raw-GL mip loop |
-| `68f3cb4` | fix(assets): transparent placeholder for unconfigured user texture slots |
-| `10ed1c6` | fix(shader): handle vector ternary operator HLSL-to-GLSL conversion |
-| `4dbec55` | feat(script): thisScene.getLayer() property setter + Vec3 z/w fixes |
-| `d46458b` | fix(text): scale pointsize by scene_h/540 for correct scene-unit rendering |
-| `e13ad10` | fix(text): inkRight clipping fix |
-| `c567afb` | fix(text): correct Y-axis coordinate inversion in CText positioning |
-| `f0197a0` | fix(scripting): correct inverted OR in jsToDynamicValue vector check |
+| VectorAdapter.cpp | fix: subtract/divide/cross/mix argument order (a op b, not b op a) |
+| VectorAdapter.cpp | feat: new Vec2/3/4 prototype methods (distance, distanceSqr, isFinite, negate, reflect, project, angleBetween, clamp, fract, mod, step, smoothStep, Vec2: angle/rotate/perpendicular, Vec3: refract/toSpherical/fromSpherical) |
+| VectorAdapter.cpp | fix: exotic get_property no longer shadows prototype chain — method lookups (add/subtract/length/etc.) now fall through to the prototype correctly |
+| VectorAdapter.cpp | fix: new Vec3(x,y,z) now reads all 3 arguments (was silently producing (x,x,x)) |
+| MathModule.cpp | fix: JS_AddModuleExport (name declaration) now runs eagerly at construction; JS_SetModuleExport (value binding) runs lazily in init_func — WEMath exports were always undefined before |
+| ColorModule.cpp | fix: same eager/lazy ordering fix — WEColor exports were always undefined before |
+| VectorModule.{h,cpp} | feat: new WEVector module — angleVector2(degrees)→Vec2, vectorAngle2(Vec2)→degrees |
+| ScriptPropertiesObject.cpp | fix(3 bugs): createScriptProperties() calling-convention mismatch (JS_CFUNC_generic→generic_magic), refcount corruption in method chaining, .finish() reading module state before it was set |
+| ScriptPropertiesObject.cpp | feat: default value fallback — .addSlider({value:0.1}) etc. now feeds scriptProperties.x when project.json has no override; colors parsed from "r g b" to Vec3 |
+| LocalStorageObject.cpp | feat: implement real WE localStorage API — get/set/remove with JSON round-tripping, LOCATION_SCREEN/LOCATION_GLOBAL constants |
+| ConsoleObject.cpp | fix: multi-arg console.log now space-separates; objects print as JSON, circular refs fall back gracefully |
+| ScriptEngine.h/.cpp | feat: runPendingInits() — two-pass object construction so init() scripts can reference any layer regardless of scene.json declaration order |
+| CScene.cpp | fix: call runPendingInits() after both construction loop AND render-order loop |
+| SceneObject.cpp | feat: enumerateLayers() returns all scene layers as ILayer array in render order |
+| SceneObject.cpp | feat: getLayerByID(id) — get layer by numeric scene.json id (coerces string args) |
+| ScriptableObjectAdapter.cpp | **CRITICAL FIX**: exotic get/set methods were declared but never assigned — every thisLayer.X read/write and getLayer().X read/write was completely disconnected from the actual render state. Now wired correctly. |
+| ScriptableObjectAdapter.cpp | feat: getTextureAnimation() — returns stub {rate, play(), stop(), pause(), setFrame()} no-ops (real animation timing has no per-object state to hook into) |
+| ScriptableObjectAdapter.cpp | feat: ILayer.name and ILayer.id as read-only properties (needed for enumerateLayers filter patterns) |
+| ScriptEngine.cpp | fix: module eval promise rejection now surfaces as sLog.error instead of passing silently |
+| ScriptEngine.cpp | fix: exception logging in init()/update() call sites now includes stack traces |
+
+---
+
+## Key Discoveries — July 3 (HIGH IMPACT)
+
+### ScriptableObjectAdapter exotic methods were never wired (CRITICAL)
+`m_exoticMethods ()` zero-initializes in the constructor and was never
+assigned `get_property`/`set_property` function pointers — unlike
+VectorAdapter and ScriptPropertiesObject which wire theirs up correctly.
+This meant **every** `thisLayer.X = Y` and `getLayer(...).X` read/write
+was completely disconnected from the actual render state — reads returned
+undefined, writes were silently discarded as plain JS properties.
+Fixed: constructor now explicitly assigns both function pointers.
+
+### WEMath/WEColor exports were always undefined
+`JS_SetModuleExport` (value binding) ran at construction time before
+`JS_AddModuleExport` (name declaration) — which QuickJS invokes lazily
+in the module's init_func. Swapped to correct eager/lazy ordering.
+Every `WEMath.mix()`, `WEColor.hsv2rgb()` etc. was throwing TypeError.
+
+### Vec exotic getter shadowed entire prototype chain
+QuickJS exotic getter for x/y/z intercepted ALL property lookups — including
+method calls. `vec.add()` silently returned undefined instead of calling the
+method. Fixed by falling through to prototype for non-x/y/z/w names.
+
+### new Vec3(x, y, z) only read first argument
+`vector_get<3>(argv[0])` broadcast just the x value — silently producing
+(x, x, x) for every `new Vec3(a, b, c)` call. Fixed with explicit
+per-component reads when all args are numeric.
+
+### createScriptProperties() had 3 silent bugs
+See commit list above. The pattern used by virtually every WE script.
+
+### localStorage API mismatch
+96 wallpapers use `.get()`, 88 use `.set()` — none use `.getItem()`.
+lwe only had Web Storage API (getItem/setItem). Fixed with JSON round-tripping.
+
+### Two-pass construction order
+`init()` scripts called `thisScene.getLayer("name")` on layers not yet
+constructed. Fixed with `runPendingInits()` called after both the
+construction loop AND the render-order loop in CScene.
 
 ---
 
 ## Priority Order (next sessions)
 
-### #1 — Object construction-order dependency
-Scripts in `init()` call `thisScene.getLayer("name")` on layers that
-haven't been constructed yet (declared later in scene.json). The fix
-requires a two-pass construction: first build all objects, then run
-all `init()` scripts. Currently init() runs synchronously during
-object construction, so forward references always fail.
+### #1 — applyUserProperties(changedProps) lifecycle hook
+Called when user changes wallpaper properties. Many wallpapers use for
+property-change reactions (day/night switches, color changes, etc.).
+Currently only update()/init() dispatched.
 
-Affects: Gengar (white main layer), any wallpaper where init() references
-a layer by name that's later in scene.json order.
+### #2 — engine.isScreensaver() / engine.isRunningInEditor()
+Found missing in Gengar. Simple boolean properties to add to EngineObject.
 
-### #2 — Anonymous (2430021386) OBJECT_SETUP_FAIL
-One remaining error wallpaper. Quick to investigate — run it and see
-what the actual error is. May be a simple shader include issue.
-
-### #3 — console.log/error implementation
-From lib.sceneScript.d.ts: `console.log(...args)` and `console.error(...args)`.
-Currently missing — scripts calling console.log silently fail.
-One-line implementation forwarding to sLog. Very easy win.
-
-### #4 — applyUserProperties(changedProps) lifecycle hook
-Called when user changes wallpaper properties. Many wallpapers use
-this for property-change reactions. Currently only update()/init()
-dispatched. Needs project.json property change notification system.
-
-### #5 — Media integration (NEW-32)
-mediaPropertiesChanged/mediaThumbnailChanged — Spotify/media hooks.
-Blank media player in Gengar, blank poster in Bunk. The scripts ARE
-exported and registered — just never called since media events aren't
-fired. Needs a media event source.
-
-### #6 — thisScene.enumerateLayers() + getLayerByID()
-Two missing IScene methods seen in real wallpaper scripts.
-Simple to implement alongside getLayerCount().
-
-### #7 — Composelayer ordering (Lofi Cafe 2370927443)
+### #3 — Composelayer ordering (Lofi Cafe 2370927443)
 Diagonal split. Structural composelayer bug, not a scripting issue.
 
-### #8 — T7 upstream rebase (web wallpapers)
+### #4 — Media integration (NEW-32)
+mediaPropertiesChanged/mediaThumbnailChanged — Spotify/media hooks.
+Scripts ARE exporting these handlers — just never called.
+
+### #5 — Real getTextureAnimation() implementation
+Currently a no-op stub. Real implementation requires per-object animation
+rate/pause state in the rendering pipeline (CPass.cpp).
+
+### #6 — thisScene.destroyLayer() / getLayerCount()
+Two more IScene methods from lib.sceneScript.d.ts not yet implemented.
+
+### #7 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
-
----
-
-## Key Discoveries — July 3
-
-### createScriptProperties() had 3 silent bugs
-1. Registered with wrong calling convention (JS_CFUNC_generic vs
-   JS_CFUNC_generic_magic) — whole call returned undefined
-2. Method chaining (.addSlider().addCheckbox()) returned borrowed
-   this_val, corrupting refcounts mid-chain
-3. .finish() reads getRunningModule() which was only set AFTER the
-   module's top-level code ran — so `export var scriptProperties =
-   createScriptProperties().finish()` always saw null module
-
-### localStorage used wrong API surface
-96 wallpapers use `.get()`, 88 use `.set()`. LocalStorageObject only
-had `.getItem()/.setItem()` (Web Storage API). Every real wallpaper
-was silently failing to persist/retrieve anything. Fixed with JSON
-round-tripping so objects/numbers survive storage correctly.
-
-### localStorage.LOCATION_SCREEN / LOCATION_GLOBAL constants missing
-Wallpapers pass these as the location argument to get/set.
-
-### Vec2/3/4 exotic property getter shadowed prototype chain
-QuickJS exotic getter for x/y/z intercepted ALL property lookups —
-including method calls. `vec.add()` silently returned undefined instead
-of calling the method.
-
-### Module exports never actually bound
-WEMath/WEVector/WEColor module exports were registered but the init
-function never ran, so all imported names were undefined.
 
 ---
 
@@ -119,32 +122,30 @@ function never ran, so all imported names were undefined.
 | engine.runtime / frametime / timeOfDay / localtime | ✅ |
 | engine.canvasSize | ✅ |
 | engine.registerAudioBuffers() + AUDIO_RESOLUTION_* | ✅ |
-| engine.isRunningInEditor/isWallpaper/isScreensaver/isPortrait | ✅ |
+| engine.isScreensaver/isRunningInEditor/isWallpaper/isPortrait | ⚠️ isScreensaver missing |
 | localStorage.get/set/remove/clear + LOCATION_* | ✅ |
 | setInterval/clearInterval/setTimeout/clearTimeout | ✅ |
-| thisScene.getLayer() + getLayerIndex() + sortLayer() | ✅ |
+| console.log/error | ✅ |
+| thisScene.getLayer() | ✅ (exotic methods now actually wired) |
+| thisScene.getLayerByID() | ✅ |
+| thisScene.getLayerIndex() / sortLayer() | ✅ |
 | thisScene.createLayer() | ✅ |
+| thisScene.enumerateLayers() | ✅ |
+| thisScene.destroyLayer() / getLayerCount() | ❌ |
 | input.cursorWorldPosition/cursorScreenPosition/cursorLeftDown | ✅ |
 | cursorDown/Up/Move/Click event dispatch | ✅ |
-| ILayer.origin/scale/angles/visible/alpha/parallaxDepth | ✅ |
-| createScriptProperties() builder (all add* methods) | ✅ |
+| ILayer.origin/scale/angles/visible/alpha/parallaxDepth | ✅ (now actually writes through to render state) |
+| ILayer.name / ILayer.id | ✅ |
+| ILayer.getTextureAnimation() | ⚠️ stub (no-op rate/play/stop/pause/setFrame) |
+| ILayer.play() (sound layers) | ❌ |
+| createScriptProperties() builder (all add* methods + defaults) | ✅ |
 | WEMath (smoothStep, mix, deg2rad, rad2deg) | ✅ |
 | WEVector (angleVector2, vectorAngle2) | ✅ |
 | WEColor (hsv2rgb, rgb2hsv, normalizeColor, expandColor) | ✅ |
-| Vec2/3/4 prototype methods (add/subtract/multiply/etc.) | ✅ |
-| console.log/error | ❌ (easy — one session) |
+| Vec2/3/4 constructors (all args read correctly) | ✅ |
+| Vec2/3/4 prototype methods (full set) | ✅ |
 | applyUserProperties(changedProps) | ❌ |
-| resizeScreen(size) | ❌ |
-| destroy() | ❌ |
-| thisScene.getLayerByID() | ❌ |
-| thisScene.enumerateLayers() | ❌ |
-| thisScene.destroyLayer() | ❌ |
-| thisScene.getAnimation() | ❌ |
-| ILayer.play() (sound layers) | ❌ |
-| ILayer.text (writable on layer proxy) | ❌ (construction-order dep) |
-| ITextLayer.color/alpha/pointsize | ❌ |
-| IImageLayer.getVideoTexture() | ❌ |
-| IImageLayer.getTextureAnimation() | ❌ |
+| resizeScreen(size) / destroy() | ❌ |
 | media* event hooks | ❌ |
 
 ---
@@ -152,7 +153,7 @@ function never ran, so all imported names were undefined.
 ## Test Commands
 
 ```fish
-# Batch test (201 wallpapers, ~20 min)
+# Full batch test (356 wallpapers, ~35 min)
 cd /home/getcached/Downloads/linux-wallpaperengine/build/output
 python3 ~/Downloads/batch_test.py 2>/dev/null | tail -5
 
@@ -162,26 +163,29 @@ for id in 2891436791 2134765860 3044659344 2241938645 3300031038 3713073223
     --assets-dir ~/.local/share/Steam/steamapps/common/wallpaper_engine/assets \
     --screen-root DP-3 \
     --bg ~/.steam/steam/steamapps/workshop/content/431960/$id \
-    2>&1 | grep -iv "LightingV1\|Resolving\|Replaced\|GLEW\|Fullscreen\|Estimating\|Loaded puppet\|mp3\|mp4" \
+    2>&1 | grep "ScriptEngine\|TypeError\|Error\|Failed" \
+    | grep -iv "LightingV1\|Resolving\|Replaced\|GLEW\|Fullscreen\|mp3" \
     | head -5
 end
 
 # Rebuild
 cd /home/getcached/Downloads/linux-wallpaperengine/build
 make -j$(nproc) 2>&1 | tail -5
+
+# Stage and commit all working-tree changes
+cd /home/getcached/Downloads/linux-wallpaperengine
+git add -A
+git status  # review before committing
 ```
 
 ---
 
-## Notes on Remaining Gengar Visual Issues
+## Official API Reference
 
-Gengar (3300031038) remaining errors after today's fixes:
-- `origin_445`: localStorage.get fixed ✅ — color picker now initializes
-- `origin_137/141`: `thisScene.getLayer()` returns undefined (construction-order)
-- `origin_194`: `thisScene.getLayer()` returns undefined (construction-order)
-- `origin_239`: `mediaPropertiesChanged` — media hooks not implemented
-- `visible_261`: some function not found (needs investigation)
-- `cursorMove`: `layer.text` setter failing (construction-order — layer is undefined)
+`lib.sceneScript.d.ts` (66KB) — complete TypeScript type definitions for
+all SceneScript APIs. Located at:
+`~/.local/share/Steam/steamapps/common/wallpaper_engine/ui/dist/monaco/autocomplete/lib.sceneScript.d.ts`
+Also at: `~/Downloads/lib.sceneScript.d.ts`
 
-Main Gengar character is still white — driven by construction-order
-dependent `init()` scripts that can't find their target layers yet.
+WE editor Monaco snippets (official usage examples):
+`~/.local/share/Steam/steamapps/common/wallpaper_engine/ui/dist/monaco/snippets/`

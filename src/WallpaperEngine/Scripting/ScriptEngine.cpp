@@ -9,6 +9,8 @@
 #include "ScriptableObject.h"
 #include "WallpaperEngine/Audio/AudioContext.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h"
+#include "WallpaperEngine/Data/Model/Project.h"
+#include "WallpaperEngine/Data/Model/Property.h"
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Render/CObject.h"
@@ -727,6 +729,16 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
     this->m_pendingInitKeys.push_back (key);
 }
 
+JSValue ScriptEngine::buildUserPropertiesObject () const {
+    JSValue obj = JS_NewObject (this->m_context);
+
+    for (auto& [name, property] : this->m_scene.getScene ().project.properties) {
+	JS_SetPropertyStr (this->m_context, obj, name.c_str (), this->dynamicToJs (*property));
+    }
+
+    return obj;
+}
+
 void ScriptEngine::runPendingInits () {
     // Snapshot-and-clear rather than iterate m_pendingInitKeys directly: an init()/update() call
     // below can itself queue new scripts (e.g. a dynamically created layer), which would append
@@ -752,6 +764,18 @@ void ScriptEngine::runPendingInits () {
 	    JS_SetPropertyStr (
 		this->m_context, this->m_globalThis, "thisLayer", this->m_adapters.object->instantiate (loaded.object)
 	    );
+
+	    JSValue propsArgs[] = { this->buildUserPropertiesObject () };
+	    JSValue propsResult = this->call (module, 1, propsArgs, "applyUserProperties");
+
+	    ScopeGuard propsGuard ([this, propsArgs, propsResult] () {
+		JS_FreeValue (this->m_context, propsResult);
+		JS_FreeValue (this->m_context, propsArgs[0]);
+	    });
+
+	    if (JS_IsException (propsResult)) {
+		logJSException (this->m_context, key.c_str ());
+	    }
 
 	    // Call init() if the script exports it — it sets up initial state (e.g. transition
 	    // timer, shared palette values) and returns the correct starting value. Fall back to
