@@ -1,16 +1,17 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (JS_Throw audit complete — 60 sites, 10 files, verified end-to-end; new baseline is 354/356 with 2 known-unrelated pre-existing errors; Mural live-reload confirmed working on real hardware)
+**Last updated:** 2026-07-04 (#8b investigated and closed with no code change — setter/getter asymmetry confirmed correct, not a bug; entire #8 audit thread now fully resolved)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
 
 ## Git Status (as of 2026-07-04)
 
-**linux-wallpaperengine** — pushed to `origin/main` through `f4a2283`,
-clean at that point; **the #8 JS_Throw audit (60 sites, 10 files) is sitting
-as uncommitted working-tree changes** (Claude Code leaves changes
-uncommitted per project convention) — commit and push both the code and
-this doc update next:
+**linux-wallpaperengine** — pushed to `origin/main` through `a3c1b1f`,
+clean working tree:
+- `a3c1b1f` scripting: fix unbounded JSValue refcount leak in color/vector conversion functions
+- `6dcc335` docs: mark #8 done (JS_Throw audit), add #8a/#8b follow-ups, update baseline to 354/356, confirm Mural live-reload verified on real hardware
+- `331e553` scripting: audit and fix JS_EXCEPTION-without-JS_Throw pattern (60 sites)
+- `dd93d5d` docs: confirm live-reload verified end-to-end on real hardware
 - `f4a2283` docs: mark #7 done, add #8 (JS_EXCEPTION-without-JS_Throw audit)
 - `fbe1d8d` scripting: fix silent exception swallow on unresolvable module reference
 - `2b2e726` docs: update dev plan for live-reload + getLayerCount + silent-throw fix sessions
@@ -148,6 +149,7 @@ leaves them per project convention. Run `git add -A && git commit` when ready.
 | ScriptEngine.cpp | fix: `queueScript()`'s `JS_IsException(evalResult)` branch was silently swallowing exceptions with zero logging, unlike its already-correct `JS_PROMISE_REJECTED` sibling branch right above it. Added one `logJSException()` call, matching the "log before free" ordering used at every other call site in the file. Empirically confirmed (via constructed test cases, not assumption) that this branch specifically catches **module linking failures** (a bad `import`/`export` reference resolved before the module body runs) — a runtime throw inside the module body instead settles as a rejected promise, which was already logging correctly both before and after this fix. Verified against a constructed bad-import case (`ScriptEngine [alpha_1]: SyntaxError: Could not find export...` now logs where it previously logged nothing) and a 6-wallpaper quick regression (zero new output on already-passing scripts). Found but did not fix a sibling gap in the same function — see priority #7. |
 | ScriptEngine.cpp | fix: sibling silent-swallow gap — `queueScript()`'s earlier `JS_IsException(moduleFunc)` check (right after `JS_Eval(...COMPILE_ONLY)`, catching a fully unresolvable module reference rather than a bad named export on a resolvable one) also got the `logJSException()` treatment. Verified both checks now independently fire on their own distinct constructed failure case, not conflated, and the 6-wallpaper regression is byte-identical to the prior session's. Found (not fixed, flagged as new priority #8) that this specific failure shape logs an uninformative `[uninitialized]` message — traced to `scriptengine_module_loader()` returning a bare `nullptr` without calling any `JS_Throw*()`, so there's no real exception object behind the `JS_EXCEPTION` sentinel for `logJSException()` to read. |
 | EngineObject.cpp, InputObject.cpp, SceneObject.cpp, Adapters/ScriptableObjectAdapter.cpp, Adapters/VectorAdapter.cpp, Modules/{Vector,Math,Color}Module.cpp, ScriptPropertiesObject.cpp, ScriptEngine.cpp | fix: **#8 JS_EXCEPTION-without-JS_Throw audit — 60 sites fixed across 10 files.** Every QuickJS-facing callback that returned the bare `JS_EXCEPTION` sentinel (or `nullptr`/`-1` interpreted as one) without ever calling a real `JS_Throw*()` now does — argc/type checks, name-lookup misses, magic-check macros (`VectorAdapter.cpp`'s 2 shared macros alone covered ~50 call sites in one edit), and read-only-property setters across the board. Includes the exact `scriptengine_module_loader` "unresolvable module reference" bug named in last session's task (missed by that session's own discovery grep due to a pipe-filter blind spot — function name and `return nullptr;` on different lines — caught on this session's broader re-sweep). Verified via `git stash`/`stash pop` before/after comparison against a synthetic 18-case test wallpaper: every case went from a logged `[uninitialized]` to a real, specific message (e.g. `TypeError: clearInterval() expects exactly 1 argument, got 0`). Confirmed the two prior-session module-loading fixes still fire correctly, unaffected. Explicitly deferred rather than forced: (1) whether `Vec2/3/4`'s property *setter* should fall back to plain own-property definition on an unknown name the way the *getter* already falls back to the prototype chain for method calls — a real design question, not a quick fix; (2) `ScriptPropertiesObject`'s always-reject-on-unknown-property behavior was kept as-is (just given a real message) rather than changed to a silent no-op, since that would be a behavior change beyond diagnostics. Noted but explicitly out of scope: a pre-existing `JSValue` refcount leak on `VectorModule.cpp`/`ColorModule.cpp`'s new early-throw paths — see new priority item below. Full 356-wallpaper regression: 354/356 clean, 2 known-unrelated pre-existing GLSL errors (see Batch Test Baseline above) — zero `SCRIPT_EXCEPTION`-tagged errors anywhere, confirming the fixes are net-neutral on behavior. |
+| Modules/ColorModule.cpp, Modules/VectorModule.cpp | fix: **#8a JSValue refcount leak — broader than originally flagged.** Investigation found the leak wasn't limited to the newly-added throw paths as first noted — `x`/`y`/`z` fetched via `JS_GetPropertyStr` were never freed on *any* path in 5 functions, including the normal success path (`JS_ToFloat64` reads a value without consuming/freeing it). Since these are color/vector conversion functions callable every frame from a script's `update()`, this was a real unbounded leak in long-running sessions. Fixed via the existing `ScopeGuard` RAII pattern (matching `ScriptEngine.cpp`/`LocalStorageObject.cpp`'s established usage) placed immediately after each fetch, covering every path by construction. Verification caught its own initial methodology flaw (plain JS number literals aren't refcounted in QuickJS, so a naive numeric-only leak test shows nothing) and corrected it using property-getter objects returning fresh heap-allocated strings at ~300k conversions/second: **pre-fix RSS grew ~47 MB/second linearly; post-fix, perfectly flat under identical load.** All success-path outputs and throw-path messages confirmed byte-identical before/after — pure memory fix, zero behavior change. 6-wallpaper regression (including the heavily-scripted Gengar/3300031038): zero new output. |
 
 ---
 
@@ -408,21 +410,67 @@ See new priority #8.
 See commit table above for full detail. Two smaller items surfaced along
 the way, deliberately not fixed as part of that pass:
 
-### #8a — VectorModule.cpp/ColorModule.cpp: JSValue refcount leak on new throw paths
-Unrelated to the exception-message content itself — the new early-`JS_Throw*`
-returns in these two files leak the already-fetched x/y(/z) `JSValue`s
-instead of freeing them before returning. Small, contained, same shape as
-any other missing-`JS_FreeValue` fix elsewhere in this codebase.
+### #8a — DONE: JSValue refcount leak, broader than originally noted
+Fixed 2026-07-04. The original note ("leak on the new throw paths") undersold
+the actual bug: investigation found `x`/`y`/`z` `JSValue`s fetched via
+`JS_GetPropertyStr` were **never freed on any code path** in 5 functions —
+not the throw branches, and not the normal success path either
+(`JS_ToFloat64` reads a value but doesn't consume/free it, and nothing else
+ever called `JS_FreeValue` on these anywhere in either file). Since these
+are color/vector conversion functions callable every frame from a script's
+`update()`, this was a real, unbounded leak in long-running sessions, not
+a cosmetic error-path issue.
 
-### #8b — Vec2/3/4 setter fallback design question
-The getter already falls back to the prototype chain on an unrecognized
-property name (needed so `.add()`/`.toString()`/etc. resolve as method
-calls, not just x/y/z/w). The setter, by contrast, now throws on any
-unrecognized name (e.g. `vec2.z = 5`) rather than falling back to plain
-own-property definition. Worth deciding deliberately whether that asymmetry
-is correct (real WE Vec2 genuinely has no `z`, so throwing may be the more
-correct behavior) or whether some other fallback is warranted — not a
-"just fix it" item, a real design call.
+Affected: `ColorModule.cpp`'s `wecolor_rgb2hsv`/`wecolor_hsv2rgb`/
+`wecolor_normalizecolor`/`wecolor_expandcolor` (x/y/z each), `VectorModule.cpp`'s
+`wevector_vectorangle2` (x/y).
+
+Fix: the existing `ScopeGuard` RAII pattern already used elsewhere in this
+codebase (`ScriptEngine.cpp`, `LocalStorageObject.cpp`,
+`ScriptableObjectAdapter.cpp`), placed immediately after each fetch so every
+return path — success and every throw branch — frees correctly by
+construction, rather than manually inserting `JS_FreeValue` before every
+individual return (the likely original cause of the leak). 33 lines added,
+no other logic touched.
+
+Verification, genuinely rigorous:
+- Code trace confirming exactly one `JS_FreeValue` per fetch, unconditional
+  via RAII.
+- Functional correctness: all 5 success-path outputs and all 6 throw-path
+  messages confirmed byte-identical before/after — pure memory-management
+  change, zero behavioral change.
+- **Real quantitative leak reproduction** — caught its own initial test
+  methodology flaw first (plain JS number literals aren't refcounted in
+  QuickJS, so a naive numeric-only test would show nothing meaningful),
+  corrected to use property-getter objects returning freshly heap-allocated
+  strings at ~300k conversions/second. Pre-fix binary: RSS grew linearly at
+  **~47 MB/second** over 12 seconds. Post-fix binary, identical load: flat
+  RSS for the full run.
+- 6-wallpaper regression (including Gengar/3300031038, the most heavily
+  scripted wallpaper in the corpus): zero new script-related output.
+
+### #8b — RESOLVED (no code change): Vec2/3/4 setter/getter asymmetry is correct
+Investigated 2026-07-04. The getter's prototype-chain fallback and the
+setter's throw-on-unrecognized-name aren't actually asymmetric in any way
+that needs reconciling — they solve two different problems:
+- The **getter** falls back to the prototype specifically so method calls
+  (`.add()`, `.toString()`, etc.) resolve as callable function references
+  — reading a *method*, not reading component data. This is the only
+  reason the fallback exists.
+- The **setter** has no equivalent need — there's no concept of "calling a
+  method via assignment" for scripts to fall back to. And since these are
+  exotic classes with no path to "just create an arbitrary own property"
+  (unlike a plain `{}` object), throwing on an unrecognized name is the
+  more correct and more helpful behavior: silently swallowing an assignment
+  to a nonexistent property (e.g. a typo'd name) would make the bug fail
+  *silently* — the assignment appears to succeed but has zero effect, which
+  is a worse debugging experience than an immediate, clear
+  `TypeError: Vec2 has no writable property 'customProp'`.
+
+Confirming evidence: the full 356-wallpaper regression run immediately
+after this exact throw was added already came back 354/356 clean with zero
+new script-related errors — nothing in the real corpus relies on assigning
+arbitrary properties to a Vec instance. **Closed, no further action.**
 
 ### #9 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
