@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (#8b investigated and closed with no code change — setter/getter asymmetry confirmed correct, not a bug; entire #8 audit thread now fully resolved)
+**Last updated:** 2026-07-04 (#2 media integration closed — was already working, dev plan note was stale; 2 real narrower bugs found and tracked as #2a/#2b, not fixed)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -286,9 +286,62 @@ gap in the feature; nothing more to test here.
 ### #1 — Composelayer ordering (Lofi Cafe 2370927443)
 Diagonal split. Structural composelayer bug, not a scripting issue.
 
-### #2 — Media integration (NEW-32)
-mediaPropertiesChanged/mediaThumbnailChanged — Spotify/media hooks.
-Scripts ARE exporting these handlers — just never called.
+### #2 — CLOSED 2026-07-04: media integration was never broken, dev plan note was stale
+Investigated end-to-end with real MPRIS playback (VLC + ffmpeg-generated
+test tracks — no CLI MPRIS player like `playerctl`/`mpd` was available in
+the sandbox). The full chain — `WallpaperApplication::update()` (every
+frame) → `DBusMediaSource::performUpdate()`/D-Bus `PropertiesChanged`
+signal filter → `fireMetadataListeners()`/`fireAlbumArtListeners()` →
+`ScriptEngine::notifyMediaUpdate()` → dispatches `mediaPropertiesChanged`/
+`mediaPlaybackChanged`/`mediaTimelineChanged`/`mediaThumbnailChanged` to
+every script module — **works correctly today**. Confirmed live via a
+synthetic test script's `console.log` output, both for a genuine
+mid-session track change (D-Bus signal path, `OpenUri`) and for ongoing
+position polling: 112 events over an 8-second run, real live-advancing
+title/artist/position/duration data. **This dev plan note was simply
+stale/incorrect as written — closing with no code change needed.**
+
+**Worth remembering**: an initial test run produced a false negative (zero
+events for several minutes) — traced to VLC's headless `--intf dummy` not
+auto-starting playback, sitting at `PlaybackStatus=Stopped` the whole time
+despite the process running. Correctly re-diagnosed as an environment
+artifact (not an lwe bug) before concluding anything, by sending an
+explicit MPRIS `Play` call and re-testing. Exactly the kind of thing that
+could produce a false "handlers never called" impression from a less
+careful test — the reason a live test was insisted on over trusting static
+code reading alone.
+
+**Separately, not tested here**: Mural has its own, entirely separate
+Python-side MPRIS integration (gated by `mpris_to_wallpaper`, pushing
+metadata via `--set-property mediametadata_title=...`) — a different
+mechanism from lwe's native `DBusMediaSource` pipeline verified above. If
+past testing went through Mural rather than direct lwe invocation, a
+disabled/broken flag on that side could have produced a false "media hooks
+don't work" impression independent of lwe's own pipeline, which is
+confirmed fine.
+
+### #2a — MediaSource update throttle is dead code
+Found while verifying #2, not fixed (out of scope for that investigation).
+`MediaSource::m_nextUpdate` is never advanced past its default-constructed
+epoch value, so the intended update-interval throttle (2 seconds, passed to
+`DBusMediaSource`'s constructor) is completely inert — a full D-Bus
+`Position` round-trip happens every single rendered frame instead of once
+per `updateInterval` as designed. Wasteful (extra D-Bus traffic every
+frame), not a correctness bug — scripts still receive correct data, just
+far more often than intended.
+
+### #2b — DBusMediaSource::detectPlayer() early-return and no tie-breaking
+Found while verifying #2, not fixed. The multi-player enumeration loop does
+an early `return` (abandoning detection entirely) if any one MPRIS player's
+`PlaybackStatus` query fails, instead of `continue`-ing to the next
+candidate — meaning one unresponsive service earlier in D-Bus's `ListNames`
+order can prevent detecting a perfectly good player later in the list.
+Also no tie-breaking when multiple players simultaneously report "Playing"
+— binds to whichever is enumerated first (order not guaranteed stable). In
+testing, a stale/backgrounded Firefox YouTube tab that self-reported
+"Playing" won over VLC — though the dispatch mechanism to scripts worked
+identically regardless of which player won, so this didn't affect #2's
+core finding.
 
 ### #3 — Real getTextureAnimation() implementation
 Currently a no-op stub. Real implementation requires per-object animation
