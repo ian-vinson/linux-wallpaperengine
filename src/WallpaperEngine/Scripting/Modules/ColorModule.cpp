@@ -1,8 +1,10 @@
 #include "ColorModule.h"
 
+#include "WallpaperEngine/Data/Utils/ScopeGuard.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 
 using namespace WallpaperEngine::Scripting::Modules;
+using WallpaperEngine::Data::Utils::ScopeGuard;
 
 #define min_f(a, b, c) (fminf (a, fminf (b, c)))
 #define max_f(a, b, c) (fmaxf (a, fmaxf (b, c)))
@@ -22,6 +24,12 @@ JSValue wecolor_rgb2hsv (JSContext* ctx, JSValueConst this_val, int argc, JSValu
     JSValue x = JS_GetPropertyStr (ctx, argv[0], "x");
     JSValue y = JS_GetPropertyStr (ctx, argv[0], "y");
     JSValue z = JS_GetPropertyStr (ctx, argv[0], "z");
+
+    ScopeGuard guard ([ctx, x, y, z] () {
+	JS_FreeValue (ctx, x);
+	JS_FreeValue (ctx, y);
+	JS_FreeValue (ctx, z);
+    });
 
     double xVal = 0.0f, yVal = 0.0f, zVal = 0.0f;
 
@@ -86,6 +94,12 @@ JSValue wecolor_hsv2rgb (JSContext* ctx, JSValueConst this_val, int argc, JSValu
     JSValue x = JS_GetPropertyStr (ctx, argv[0], "x");
     JSValue y = JS_GetPropertyStr (ctx, argv[0], "y");
     JSValue z = JS_GetPropertyStr (ctx, argv[0], "z");
+
+    ScopeGuard guard ([ctx, x, y, z] () {
+	JS_FreeValue (ctx, x);
+	JS_FreeValue (ctx, y);
+	JS_FreeValue (ctx, z);
+    });
 
     double xVal = 0.0f, yVal = 0.0f, zVal = 0.0f;
 
@@ -160,6 +174,12 @@ JSValue wecolor_normalizecolor (JSContext* ctx, JSValueConst this_val, int argc,
     JSValue y = JS_GetPropertyStr (ctx, argv[0], "y");
     JSValue z = JS_GetPropertyStr (ctx, argv[0], "z");
 
+    ScopeGuard guard ([ctx, x, y, z] () {
+	JS_FreeValue (ctx, x);
+	JS_FreeValue (ctx, y);
+	JS_FreeValue (ctx, z);
+    });
+
     if (!JS_IsNumber (x) || !JS_IsNumber (y) || !JS_IsNumber (z)) {
 	return JS_ThrowTypeError (ctx, "normalizeColor() argument must have numeric x, y, z properties");
     }
@@ -197,6 +217,12 @@ JSValue wecolor_expandcolor (JSContext* ctx, JSValueConst this_val, int argc, JS
     JSValue x = JS_GetPropertyStr (ctx, argv[0], "x");
     JSValue y = JS_GetPropertyStr (ctx, argv[0], "y");
     JSValue z = JS_GetPropertyStr (ctx, argv[0], "z");
+
+    ScopeGuard guard ([ctx, x, y, z] () {
+	JS_FreeValue (ctx, x);
+	JS_FreeValue (ctx, y);
+	JS_FreeValue (ctx, z);
+    });
 
     if (!JS_IsNumber (x) || !JS_IsNumber (y) || !JS_IsNumber (z)) {
 	return JS_ThrowTypeError (ctx, "expandColor() argument must have numeric x, y, z properties");

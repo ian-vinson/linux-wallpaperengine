@@ -1,10 +1,12 @@
 #include "VectorModule.h"
 
+#include "WallpaperEngine/Data/Utils/ScopeGuard.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 
 #include <cmath>
 
 using namespace WallpaperEngine::Scripting::Modules;
+using WallpaperEngine::Data::Utils::ScopeGuard;
 
 static uint32_t VectorModuleInstanceId = 0;
 std::map<uint32_t, VectorModule&> vectorModules;
@@ -45,6 +47,11 @@ JSValue wevector_vectorangle2 (JSContext* ctx, JSValueConst this_val, int argc, 
 
     JSValue x = JS_GetPropertyStr (ctx, argv[0], "x");
     JSValue y = JS_GetPropertyStr (ctx, argv[0], "y");
+
+    ScopeGuard guard ([ctx, x, y] () {
+	JS_FreeValue (ctx, x);
+	JS_FreeValue (ctx, y);
+    });
 
     if (!JS_IsNumber (x) || !JS_IsNumber (y)) {
 	return JS_ThrowTypeError (ctx, "vectorAngle2() argument must have numeric x and y properties");
