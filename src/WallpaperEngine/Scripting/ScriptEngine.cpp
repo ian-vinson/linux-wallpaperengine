@@ -696,6 +696,7 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
     }
 
     if (JS_IsException (evalResult)) {
+	logJSException (this->m_context, key.c_str ());
 	JS_FreeValue (this->m_context, evalResult);
 	this->m_runningModule = nullptr;
 	return;
