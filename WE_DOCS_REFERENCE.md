@@ -1,5 +1,9 @@
 # Wallpaper Engine Official Documentation — Reference Notes
 **Compiled:** 2026-07-04, for the Mural/linux-wallpaperengine fork project.
+**Updated:** 2026-07-04, corrected the composelayer mechanism description
+twice — first after finding the UI copy didn't match the actual GLSL
+implementation, then again after a follow-up implementation attempt
+disproved the initially-suspected FBO feedback hazard. See §1's update note.
 **Sources:** docs.wallpaperengine.io (Designer Documentation — Scene Guide + Web Guide),
 official Wallpaper Engine UI translation strings (GitHub).
 
@@ -69,6 +73,29 @@ into one clean texture, and this fork just renders them as plain unblended
 overlapping objects instead, the result would plausibly be exactly a visible
 seam/diagonal-split artifact — matching the reported Lofi Cafe symptom. See
 the live investigation for confirmation against the actual `scene.json`.
+
+**UPDATE, post-investigation (2026-07-04): this hypothesis was WRONG, in an
+informative way.** Composelayer is NOT hidden behind the `config`-field-ignore
+branch at all — that comment refers to something unrelated. Composelayer is a
+completely ordinary image-type object (model path
+`models/util/composelayer.json`), fully parsed and rendered like any other
+image layer. Its actual mechanism, confirmed by reading the real shader
+(`composelayer.frag`/`.vert`): it samples a special `_rt_FullFrameBuffer`
+render target at a screen coordinate derived from its own transform — i.e.
+it's a **screen-space grab-and-redistort primitive** (samples whatever's
+already been rendered to the screen so far, then redisplays it warped through
+the object's own transform), not literally "render this object's children
+into an isolated offscreen texture" the way the UI description above implies.
+Treat the UI description as effect-level marketing copy, not a mechanism
+spec — the real technical behavior is closer to a heat-haze/refraction/portal
+primitive than an isolated compositing group. **A follow-up implementation
+attempt disproved the initially-suspected OpenGL feedback hazard** (sampling
+the same FBO currently being rendered into) — `CImage`'s pass-routing only
+ever sends the *final* pass to the live scene FBO, and composelayer's base
+pass is never final when an effect is attached, so no feedback loop actually
+occurs in practice. The real bug (still being investigated) instead traces
+to the "perspective" effect's quad-warp shader math — see the dev plan's
+priority #1 for the full corrected writeup.
 
 **Scope note**: this fork already has FBO/render-target infrastructure for
 other effects (bloom: `_rt_4FrameBuffer`, `_rt_8FrameBuffer`, `_rt_Bloom` on

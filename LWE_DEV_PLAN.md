@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (reorganized: split Priority Order into active items + a new "Completed Items" section, so the open list isn't buried among finished work — no content changed, only reorganized)
+**Last updated:** 2026-07-04 (composelayer FBO-hazard theory disproven via implementation + pixel-diff; real bug traced to the "perspective" effect's quad-warp shader math, needs fresh scoping)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,72 +296,70 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #1 — SCOPED, ROOT CAUSE CONFIRMED (2026-07-04): composelayer FBO feedback hazard — small fix, existing precedent
-Original hypothesis (composelayer hidden behind `ObjectParser.cpp`'s ignored
-`config` field, i.e. an unimplemented feature) was **wrong** — investigated
-and overturned. Composelayer is a completely ordinary image-type object
-(model path `models/util/composelayer.json`), fully parsed and rendered like
-any other image layer. The `config`-field-ignore comment in `ObjectParser.cpp`
-refers to something else entirely, unrelated to this bug.
+### #1 — REVISED (2026-07-04): FBO-feedback theory disproven; real bug is in the "perspective" effect's quad-warp shader math
+**The FBO-feedback-hazard theory from the prior session was wrong** —
+disproven via implementation and a pixel-level diff, not just re-reading
+code. What's still correct from before: composelayer is an ordinary
+image-type object (`models/util/composelayer.json`), and its material does
+bind `_rt_FullFrameBuffer` to grab already-rendered screen content. What was
+wrong: that this ever creates an actual read/write feedback loop in
+practice.
 
-**What composelayer's shader actually does**: its material
-(`materials/util/composelayer.json`) binds a special render target,
-`_rt_FullFrameBuffer`, and the shader draws a full-screen quad, sampling that
-texture at a screen coordinate derived from the object's own transform
-(`v_ScreenCoord`, perspective-divided) — i.e. it grabs the already-rendered
-screen content and redistorts/re-places it through the object's transform. A
-screen-space "grab and redistort" compositing primitive — not literally "flatten
-this object's children into an isolated texture" the way the marketing-level
-UI description in `WE_DOCS_REFERENCE.md` §1 implies (worth treating that
-description as effect-level, not mechanism-level, per this finding).
+**How the theory was disproven**: implemented the scoped fix exactly as
+specified (mirrored `CParticle`'s proven REFRACT shadow-FBO + blit pattern
+into `CImage.cpp`). Build succeeded, detection/shadow-FBO-creation logic
+confirmed firing correctly via temporary instrumentation. Re-screenshotted
+Lofi Cafe with composelayer objects enabled — **diagonal split still fully
+present, pixel-for-pixel**. Rather than trust a visual "looks about the
+same," diffed the two screenshots directly: zero pixels differed in the
+composelayer region (only ordinary particle/clock animation noise
+elsewhere). The fix provably did nothing.
 
-**Root cause, confirmed two independent ways**:
-1. **Static analysis**: `_rt_FullFrameBuffer` (`CWallpaper.cpp:319`) is the
-   literal primary scene FBO, not a snapshot copy. `CImage.cpp`'s
-   base-material-pass path (`setup()`, ~line 649) builds its `CPass` with a
-   bare `FBOProvider` that has no local override for that name, so
-   `CPass::resolveFBO`/`FBOProvider::find` fall through to the live scene FBO
-   — the one currently being rendered into. Sampling a texture while it's
-   bound as the active render target is undefined behavior in OpenGL. This
-   exact bug class was already hit and fixed for a *different* feature
-   (`CParticle.cpp`'s REFRACT effect), with an explicit comment: *"Reading
-   from the same FBO being rendered to is undefined behavior in OpenGL,
-   causing black reads on NVIDIA."* `CImage.cpp` has zero equivalent
-   protection for passthrough materials, and carries a literal
-   `// TODO: SUPPORT PASSTHROUGH (IT'S A SHADER)` comment admitting the gap.
-2. **Empirical**: extracted the real `scene.json` from the packed wallpaper
-   (wrote a standalone Python script mirroring `PackageParser`'s format
-   logic, rather than touching `dumpPkg` itself). Screenshotted the running
-   wallpaper — a clear, unmistakable diagonal-split artifact matching the
-   original bug report. Disabled both composelayer objects
-   (`visible: false`, preserving parent references rather than deleting —
-   deleting broke a child's parent reference on the first attempt) and
-   re-screenshotted: **artifact completely gone, rest of scene renders
-   cleanly.**
+**Why it did nothing, traced**: `CImage::setupPasses()`/`configurePassTarget()`
+only route a pass to the live scene FBO when it's the chain's **final**
+pass. Composelayer's own base-material pass is never final when an effect
+is attached — the effect's own pass is final instead — so the base pass
+always draws into the object's private `m_mainFBO`, never the scene FBO it
+reads from. No feedback loop ever occurs there. Separately, a composelayer
+object *without* any effect never renders at all (`CImage::setup()`'s
+"passthrough images without effects are bad, do not draw them" early
+return — confirmed via debug instrumentation that object 3282, which has
+no effect, never even reaches pass-creation). So the specific hazard
+theorized last session structurally cannot occur in `CImage`'s current
+control flow, for either shape of composelayer usage.
 
-**Scope estimate — small, NOT a Mat4/attachment-scale surprise**:
-- Minimal fix: mirror the already-proven `CParticle` REFRACT pattern in
-  `CImage.cpp` (per-object shadow FBO named `_rt_FullFrameBuffer` +
-  `glBlitFramebuffer` before each render) — small, ~20-30 lines, following
-  an existing, battle-tested precedent in the same codebase rather than
-  needing new rendering infrastructure.
-- **Open question flagged, not yet resolved**: the `copybackground` field
-  (this wallpaper has it `false`) is currently unhandled anywhere in the
-  codebase (zero grep hits). Distribution check across the local
-  356-wallpaper corpus: appears in 238 wallpapers, **overwhelmingly `true`**
-  — `false` (this wallpaper's value) is rare. This distribution suggests
-  `copybackground` is most plausibly a performance hint ("skip a redundant
-  blit if one was just done") rather than a functionally-required distinct
-  code path, meaning the minimal always-blit fix would likely be correct for
-  the whole corpus, not just this one wallpaper — but this is an *inference*,
-  not confirmed against any WE documentation (none was found referencing
-  this specific field). **Spot-check a `copybackground: true` wallpaper
-  before assuming the minimal fix generalizes cleanly** — don't skip this
-  check just because the inference sounds reasonable.
+**The real cause, found empirically**: disabling object 3479's effects
+array entirely just makes it not render (same early-return, uninformative).
+But overwriting its **"perspective" effect's** corner values
+(`point0`..`point3`) to the identity square (`"0 0"`/`"1 0"`/`"1 1"`/`"0 1"`)
+**eliminates the diagonal split** (at the cost of mirroring the "LO-FI" sign
+text, confirming the identity values weren't a true no-op — but conclusively
+implicating the perspective effect's quad-warp specifically, not
+composelayer's FBO usage at all). Likely next lead, not yet confirmed:
+`shaders/common_perspective.h`'s `squareToQuad()` plus a custom `mat3
+inverse()` gated behind `#if HLSL` — a shader-transpilation/matrix-convention
+issue in the homography-warp path, which would affect *any* effect using
+that path, not just composelayer specifically.
 
-No code changes made yet — this was a scoping/root-cause investigation only.
-Ready to implement whenever picked up; the CParticle REFRACT precedent should
-be read first as the exact pattern to mirror.
+**Outcome**: the implemented FBO fix was fully reverted (confirmed empty
+`git diff` on `CImage.cpp`/`CImage.h`, clean rebuild) since it doesn't
+address the real bug — correctly not left in place just because it was
+built. No regression run was needed since there's no net code change.
+
+**Revised scope estimate**: this is now a materially different and more
+involved bug than originally scoped — a shader math/transpilation issue in
+`common_perspective.h`'s homography-warp implementation, not an FBO
+management fix with an existing one-file precedent to mirror. Treat this as
+needing its own fresh scoping pass (read `common_perspective.h` in full,
+understand `squareToQuad()`'s math and the `#if HLSL` custom `mat3 inverse()`
+path, check whether other effects using the same perspective-warp utility
+are similarly affected) rather than assuming it's still a small,
+well-precedented change.
+
+**Still open, carried over from before, now lower priority given the above**:
+the `copybackground` field (238/356 wallpapers, overwhelmingly `true`) remains
+completely unhandled in the codebase — worth revisiting once the actual
+perspective-warp bug is understood, since it may or may not be related.
 
 
 ### #3 — Real getTextureAnimation() implementation
