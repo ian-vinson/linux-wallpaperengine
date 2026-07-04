@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (added #10 — ISoundLayer scripting gap, found via WE_DOCS_REFERENCE.md cross-reference against the #8 audit's own findings)
+**Last updated:** 2026-07-04 (reorganized: split Priority Order into active items + a new "Completed Items" section, so the open list isn't buried among finished work — no content changed, only reorganized)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -290,8 +290,187 @@ gap in the feature; nothing more to test here.
 
 ## Priority Order (next sessions)
 
-### #1 — Composelayer ordering (Lofi Cafe 2370927443)
-Diagonal split. Structural composelayer bug, not a scripting issue.
+Numbers are stable identifiers referenced elsewhere in this doc (commit
+messages, API status table) — gaps (#2, #6, #7, #8) are items that were
+completed and moved to the **Completed Items** section below, not renumbered
+away. New items get the next unused number rather than filling gaps, so a
+number always means the same thing across the whole document's history.
+
+### #1 — SCOPED, ROOT CAUSE CONFIRMED (2026-07-04): composelayer FBO feedback hazard — small fix, existing precedent
+Original hypothesis (composelayer hidden behind `ObjectParser.cpp`'s ignored
+`config` field, i.e. an unimplemented feature) was **wrong** — investigated
+and overturned. Composelayer is a completely ordinary image-type object
+(model path `models/util/composelayer.json`), fully parsed and rendered like
+any other image layer. The `config`-field-ignore comment in `ObjectParser.cpp`
+refers to something else entirely, unrelated to this bug.
+
+**What composelayer's shader actually does**: its material
+(`materials/util/composelayer.json`) binds a special render target,
+`_rt_FullFrameBuffer`, and the shader draws a full-screen quad, sampling that
+texture at a screen coordinate derived from the object's own transform
+(`v_ScreenCoord`, perspective-divided) — i.e. it grabs the already-rendered
+screen content and redistorts/re-places it through the object's transform. A
+screen-space "grab and redistort" compositing primitive — not literally "flatten
+this object's children into an isolated texture" the way the marketing-level
+UI description in `WE_DOCS_REFERENCE.md` §1 implies (worth treating that
+description as effect-level, not mechanism-level, per this finding).
+
+**Root cause, confirmed two independent ways**:
+1. **Static analysis**: `_rt_FullFrameBuffer` (`CWallpaper.cpp:319`) is the
+   literal primary scene FBO, not a snapshot copy. `CImage.cpp`'s
+   base-material-pass path (`setup()`, ~line 649) builds its `CPass` with a
+   bare `FBOProvider` that has no local override for that name, so
+   `CPass::resolveFBO`/`FBOProvider::find` fall through to the live scene FBO
+   — the one currently being rendered into. Sampling a texture while it's
+   bound as the active render target is undefined behavior in OpenGL. This
+   exact bug class was already hit and fixed for a *different* feature
+   (`CParticle.cpp`'s REFRACT effect), with an explicit comment: *"Reading
+   from the same FBO being rendered to is undefined behavior in OpenGL,
+   causing black reads on NVIDIA."* `CImage.cpp` has zero equivalent
+   protection for passthrough materials, and carries a literal
+   `// TODO: SUPPORT PASSTHROUGH (IT'S A SHADER)` comment admitting the gap.
+2. **Empirical**: extracted the real `scene.json` from the packed wallpaper
+   (wrote a standalone Python script mirroring `PackageParser`'s format
+   logic, rather than touching `dumpPkg` itself). Screenshotted the running
+   wallpaper — a clear, unmistakable diagonal-split artifact matching the
+   original bug report. Disabled both composelayer objects
+   (`visible: false`, preserving parent references rather than deleting —
+   deleting broke a child's parent reference on the first attempt) and
+   re-screenshotted: **artifact completely gone, rest of scene renders
+   cleanly.**
+
+**Scope estimate — small, NOT a Mat4/attachment-scale surprise**:
+- Minimal fix: mirror the already-proven `CParticle` REFRACT pattern in
+  `CImage.cpp` (per-object shadow FBO named `_rt_FullFrameBuffer` +
+  `glBlitFramebuffer` before each render) — small, ~20-30 lines, following
+  an existing, battle-tested precedent in the same codebase rather than
+  needing new rendering infrastructure.
+- **Open question flagged, not yet resolved**: the `copybackground` field
+  (this wallpaper has it `false`) is currently unhandled anywhere in the
+  codebase (zero grep hits). Distribution check across the local
+  356-wallpaper corpus: appears in 238 wallpapers, **overwhelmingly `true`**
+  — `false` (this wallpaper's value) is rare. This distribution suggests
+  `copybackground` is most plausibly a performance hint ("skip a redundant
+  blit if one was just done") rather than a functionally-required distinct
+  code path, meaning the minimal always-blit fix would likely be correct for
+  the whole corpus, not just this one wallpaper — but this is an *inference*,
+  not confirmed against any WE documentation (none was found referencing
+  this specific field). **Spot-check a `copybackground: true` wallpaper
+  before assuming the minimal fix generalizes cleanly** — don't skip this
+  check just because the inference sounds reasonable.
+
+No code changes made yet — this was a scoping/root-cause investigation only.
+Ready to implement whenever picked up; the CParticle REFRACT precedent should
+be read first as the exact pattern to mirror.
+
+
+### #3 — Real getTextureAnimation() implementation
+Currently a no-op stub. Real implementation requires per-object animation
+rate/pause state in the rendering pipeline (CPass.cpp).
+
+
+### #4 — thisScene.destroyLayer()
+`getLayerCount()` implemented and verified 2026-07-04 (see commit table).
+`destroyLayer(layer: String|Number|ILayer): Boolean` remains — deliberately
+deferred, since it's the first genuinely destructive lifecycle operation in
+this API surface (everything implemented so far has been read-only or
+additive) and this codebase has **zero existing removal infrastructure**
+to build on (confirmed via repo-wide grep — createLayer() only ever adds;
+nothing has ever needed to tear a CObject back down). Needs its own
+dedicated design pass covering:
+- CObject ownership/lifetime: raw pointers in m_objects/m_objectsByRenderOrder,
+  actual delete presumably happens in CScene's destructor today — need to
+  trace exactly where `new CObject` happens (inside dispatchObjectType()) to
+  know what a safe mid-run teardown actually requires (GPU resource release,
+  etc.)
+- Deferred-removal semantics per spec ("removed after all scripts on that
+  frame updated") — needs a pending-destroy queue, likely mirroring the
+  existing m_pendingInitKeys snapshot-and-clear pattern in ScriptEngine, but
+  for teardown instead of construction
+- Stale-reference safety: if a script already holds a live ILayer JS object
+  (from getChildren()/getLayer()/enumerateLayers()) pointing at the object
+  being destroyed, that JS wrapper's opaque CObject* would dangle after
+  C++-side deletion unless something defensively flags "destroyed" and
+  checked on every subsequent property access — no such mechanism exists yet
+- Whether ScriptEngine has any per-object cached state (m_scriptModules
+  entries for property scripts on that object, m_layerInitialized for text
+  layers) that needs cleanup too, to avoid leaving dangling entries keyed by
+  a destroyed object's id
+- Polymorphic argument handling (name string, numeric id, or ILayer object)
+
+
+### #5 — ILayer.getTransformMatrix() / getAttachmentMatrix() / getAttachmentOrigin() / getAttachmentAngles() — SCOPE MUCH BIGGER THAN EXPECTED, DEFERRED
+Originally scoped (incorrectly) as a small task alongside getParent(). Actual
+investigation (2026-07-04) found:
+- `Mat4` is a full-featured JS class per lib.sceneScript.d.ts — 1 constructor,
+  7 static factories (identity/fromTranslation/fromScale/fromRotation/
+  fromEuler/fromBasis/lookAt/compose), and ~20 instance methods (translation/
+  right/up/forward accessors, add/subtract/multiply, translate/rotate/scale,
+  transformPoint/transformDirection, transpose/inverse/determinant/
+  extractEuler/normalMatrix/decompose/copy/equals/toString). `normalMatrix()`
+  returns a *separate* `Mat3` class, also undefined in this codebase.
+  Comparable in scope to the entire VectorAdapter (Vec2/3/4) effort from the
+  July 3 session — arguably bigger. Confirmed via repo-wide grep: zero Mat4/
+  glm::mat4 exposure anywhere in Scripting/, so this is a from-scratch build,
+  not a small addition.
+- getTransformMatrix() itself only becomes trivial AFTER Mat4 exists, and
+  even then needs per-object-type verification (CParticle has stored
+  m_modelMatrix; CImage/CText's model matrix source wasn't confirmed —
+  needs checking whether it's computed and stored the same way or built
+  inline without persistent storage).
+- getAttachmentMatrix()/getAttachmentOrigin()/getAttachmentAngles() are
+  blocked entirely on a bone/puppet-warp rig system — confirmed via
+  repo-wide grep that zero attachment/puppet/bone infrastructure exists in
+  this fork at all. These would need to be honest stubs (undefined/clear
+  "not supported" error) rather than real implementations, unless building
+  actual puppet-warp support becomes its own dedicated project.
+
+Deferred — needs its own dedicated multi-session scoping the same way the
+live-reload and destroyLayer() work did, not a quick single-session add.
+
+
+### #9 — T7 upstream rebase (web wallpapers)
+14+ web wallpapers blocked. Large dedicated session.
+
+
+### #10 — ISoundLayer: sound layers have zero scripting surface
+Found while cross-referencing the official WE documentation (see
+`WE_DOCS_REFERENCE.md` §16) against the #8 audit's own findings. Real WE
+has a documented `ISoundLayer` SceneScript class — `volume` (playback
+volume), `isPlaying()`, `play()` (starts if not already running), `stop()`
+(resets internal playback timer), `pause()` (holds current playback
+position). This fork's `CSound` object type does not extend
+`ScriptableObject` (confirmed during the #8 JS_Throw audit session), meaning
+**sound layers currently cannot be scripted at all** in this fork — no
+`thisLayer` binding, no `getLayer()`/`enumerateLayers()` visibility (they're
+filtered out the same way `getLayerCount()` had to learn to exclude them —
+see the #getLayerCount() commit entry above), nothing. Any real-world
+wallpaper script that tries to control sound playback (start/stop/pause a
+sound layer, adjust its volume dynamically, react to `isPlaying()`) would
+silently have no way to do so today.
+
+Scoping notes for whenever this gets picked up:
+- Would need `CSound` (or whatever this fork's actual sound-layer render
+  class is named — verify exact class name before assuming) to additionally
+  inherit `ScriptableObject`, following the same pattern already
+  established for `CImage`/`CParticle`/text layers.
+- The four methods map onto whatever this fork's actual audio-playback
+  backend already exposes for controlling a sound's play/pause/stop state
+  and volume — check what's already there before assuming new playback
+  infrastructure is needed; this may be substantially a wiring task (expose
+  existing playback control through the SceneScript API surface) rather
+  than a new-feature build, unlike the destroyLayer()/Mat4 situations.
+- Confirm whether `CSound` already tracks a "currently playing" boolean
+  internally (needed for `isPlaying()`) or whether that needs adding.
+
+---
+
+## Completed Items (done/closed/resolved — moved here for readability)
+
+These were originally tracked in Priority Order above but are finished —
+kept here as a record of what was investigated/fixed and why, rather than
+mixed in with items that still need work. Numbers match their original
+Priority Order identifiers.
 
 ### #2 — CLOSED 2026-07-04: media integration was never broken, dev plan note was stale
 Investigated end-to-end with real MPRIS playback (VLC + ffmpeg-generated
@@ -327,6 +506,7 @@ disabled/broken flag on that side could have produced a false "media hooks
 don't work" impression independent of lwe's own pipeline, which is
 confirmed fine.
 
+
 ### #2a — DONE: MediaSource update throttle fixed
 Fixed 2026-07-04. `MediaSource::update()` now advances `m_nextUpdate` after
 each real `performUpdate()` call — a clean 2-line addition, no cast needed
@@ -352,6 +532,7 @@ polling-triggered). Hit the #2b multi-player bug again during testing
 (Firefox's stale tab winning detection over VLC) — worked around
 non-destructively via a temporary `dbus-send` pause/resume, no lasting
 changes. 6-wallpaper regression byte-identical to prior baseline.
+
 
 ### #2b — DONE (early-return fix); tie-breaking deliberately left open
 **Early-return bug: fixed 2026-07-04.** One-word change (`return` →
@@ -386,67 +567,6 @@ concrete real-world case surfaces where the wrong simultaneously-playing
 session drives the wallpaper in a way that's actually a problem in
 practice, rather than guessing at a policy now.
 
-### #3 — Real getTextureAnimation() implementation
-Currently a no-op stub. Real implementation requires per-object animation
-rate/pause state in the rendering pipeline (CPass.cpp).
-
-### #4 — thisScene.destroyLayer()
-`getLayerCount()` implemented and verified 2026-07-04 (see commit table).
-`destroyLayer(layer: String|Number|ILayer): Boolean` remains — deliberately
-deferred, since it's the first genuinely destructive lifecycle operation in
-this API surface (everything implemented so far has been read-only or
-additive) and this codebase has **zero existing removal infrastructure**
-to build on (confirmed via repo-wide grep — createLayer() only ever adds;
-nothing has ever needed to tear a CObject back down). Needs its own
-dedicated design pass covering:
-- CObject ownership/lifetime: raw pointers in m_objects/m_objectsByRenderOrder,
-  actual delete presumably happens in CScene's destructor today — need to
-  trace exactly where `new CObject` happens (inside dispatchObjectType()) to
-  know what a safe mid-run teardown actually requires (GPU resource release,
-  etc.)
-- Deferred-removal semantics per spec ("removed after all scripts on that
-  frame updated") — needs a pending-destroy queue, likely mirroring the
-  existing m_pendingInitKeys snapshot-and-clear pattern in ScriptEngine, but
-  for teardown instead of construction
-- Stale-reference safety: if a script already holds a live ILayer JS object
-  (from getChildren()/getLayer()/enumerateLayers()) pointing at the object
-  being destroyed, that JS wrapper's opaque CObject* would dangle after
-  C++-side deletion unless something defensively flags "destroyed" and
-  checked on every subsequent property access — no such mechanism exists yet
-- Whether ScriptEngine has any per-object cached state (m_scriptModules
-  entries for property scripts on that object, m_layerInitialized for text
-  layers) that needs cleanup too, to avoid leaving dangling entries keyed by
-  a destroyed object's id
-- Polymorphic argument handling (name string, numeric id, or ILayer object)
-
-### #5 — ILayer.getTransformMatrix() / getAttachmentMatrix() / getAttachmentOrigin() / getAttachmentAngles() — SCOPE MUCH BIGGER THAN EXPECTED, DEFERRED
-Originally scoped (incorrectly) as a small task alongside getParent(). Actual
-investigation (2026-07-04) found:
-- `Mat4` is a full-featured JS class per lib.sceneScript.d.ts — 1 constructor,
-  7 static factories (identity/fromTranslation/fromScale/fromRotation/
-  fromEuler/fromBasis/lookAt/compose), and ~20 instance methods (translation/
-  right/up/forward accessors, add/subtract/multiply, translate/rotate/scale,
-  transformPoint/transformDirection, transpose/inverse/determinant/
-  extractEuler/normalMatrix/decompose/copy/equals/toString). `normalMatrix()`
-  returns a *separate* `Mat3` class, also undefined in this codebase.
-  Comparable in scope to the entire VectorAdapter (Vec2/3/4) effort from the
-  July 3 session — arguably bigger. Confirmed via repo-wide grep: zero Mat4/
-  glm::mat4 exposure anywhere in Scripting/, so this is a from-scratch build,
-  not a small addition.
-- getTransformMatrix() itself only becomes trivial AFTER Mat4 exists, and
-  even then needs per-object-type verification (CParticle has stored
-  m_modelMatrix; CImage/CText's model matrix source wasn't confirmed —
-  needs checking whether it's computed and stored the same way or built
-  inline without persistent storage).
-- getAttachmentMatrix()/getAttachmentOrigin()/getAttachmentAngles() are
-  blocked entirely on a bone/puppet-warp rig system — confirmed via
-  repo-wide grep that zero attachment/puppet/bone infrastructure exists in
-  this fork at all. These would need to be honest stubs (undefined/clear
-  "not supported" error) rather than real implementations, unless building
-  actual puppet-warp support becomes its own dedicated project.
-
-Deferred — needs its own dedicated multi-session scoping the same way the
-live-reload and destroyLayer() work did, not a quick single-session add.
 
 ### #6 — DONE: module-linking-failure exceptions were silently swallowed
 Fixed 2026-07-04, but the original framing here (from the isScreensaver
@@ -480,6 +600,7 @@ error unchanged; 3300031038 (Gengar)'s existing script errors all trace to
 other, already-correctly-logging call sites — zero new output introduced
 for scripts that were already passing.
 
+
 ### #7 — DONE: unresolvable module reference at compile stage now logs
 Fixed 2026-07-04, same one-line `logJSException()` fix as #6, applied to
 `queueScript()`'s earlier `JS_IsException(moduleFunc)` check (right after
@@ -502,9 +623,11 @@ noted elsewhere (a `get_layer` by-name-miss bug) — a recurring pattern
 worth a dedicated audit rather than one-off patching each time it's found.
 See new priority #8.
 
+
 ### #8 — DONE: JS_EXCEPTION-without-JS_Throw audit, 60 sites fixed
 See commit table above for full detail. Two smaller items surfaced along
 the way, deliberately not fixed as part of that pass:
+
 
 ### #8a — DONE: JSValue refcount leak, broader than originally noted
 Fixed 2026-07-04. The original note ("leak on the new throw paths") undersold
@@ -545,6 +668,7 @@ Verification, genuinely rigorous:
 - 6-wallpaper regression (including Gengar/3300031038, the most heavily
   scripted wallpaper in the corpus): zero new script-related output.
 
+
 ### #8b — RESOLVED (no code change): Vec2/3/4 setter/getter asymmetry is correct
 Investigated 2026-07-04. The getter's prototype-chain fallback and the
 setter's throw-on-unrecognized-name aren't actually asymmetric in any way
@@ -567,39 +691,6 @@ Confirming evidence: the full 356-wallpaper regression run immediately
 after this exact throw was added already came back 354/356 clean with zero
 new script-related errors — nothing in the real corpus relies on assigning
 arbitrary properties to a Vec instance. **Closed, no further action.**
-
-### #9 — T7 upstream rebase (web wallpapers)
-14+ web wallpapers blocked. Large dedicated session.
-
-### #10 — ISoundLayer: sound layers have zero scripting surface
-Found while cross-referencing the official WE documentation (see
-`WE_DOCS_REFERENCE.md` §16) against the #8 audit's own findings. Real WE
-has a documented `ISoundLayer` SceneScript class — `volume` (playback
-volume), `isPlaying()`, `play()` (starts if not already running), `stop()`
-(resets internal playback timer), `pause()` (holds current playback
-position). This fork's `CSound` object type does not extend
-`ScriptableObject` (confirmed during the #8 JS_Throw audit session), meaning
-**sound layers currently cannot be scripted at all** in this fork — no
-`thisLayer` binding, no `getLayer()`/`enumerateLayers()` visibility (they're
-filtered out the same way `getLayerCount()` had to learn to exclude them —
-see the #getLayerCount() commit entry above), nothing. Any real-world
-wallpaper script that tries to control sound playback (start/stop/pause a
-sound layer, adjust its volume dynamically, react to `isPlaying()`) would
-silently have no way to do so today.
-
-Scoping notes for whenever this gets picked up:
-- Would need `CSound` (or whatever this fork's actual sound-layer render
-  class is named — verify exact class name before assuming) to additionally
-  inherit `ScriptableObject`, following the same pattern already
-  established for `CImage`/`CParticle`/text layers.
-- The four methods map onto whatever this fork's actual audio-playback
-  backend already exposes for controlling a sound's play/pause/stop state
-  and volume — check what's already there before assuming new playback
-  infrastructure is needed; this may be substantially a wiring task (expose
-  existing playback control through the SceneScript API surface) rather
-  than a new-feature build, unlike the destroyLayer()/Mat4 situations.
-- Confirm whether `CSound` already tracks a "currently playing" boolean
-  internally (needed for `isPlaying()`) or whether that needs adding.
 
 ---
 
