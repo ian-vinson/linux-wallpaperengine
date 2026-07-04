@@ -135,7 +135,7 @@ JSValue get_cameraparallaxmouseinfluence (JSContext* ctx, JSValueConst this_val,
 
 JSValue get_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "getLayer() expects exactly one argument");
     }
 
     auto* container = get_opaque (this_val);
@@ -190,7 +190,7 @@ JSValue get_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst
 	return JS_UNDEFINED;
     }
 
-    return JS_EXCEPTION;
+    return JS_ThrowTypeError (ctx, "getLayer() argument must be a number or string");
 }
 
 // thisScene.getLayerByID(id): same lookup as get_layer()'s numeric-id branch, but coerces its
@@ -199,7 +199,7 @@ JSValue get_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst
 // otherwise fall through to a by-name search for an object literally named "123".
 JSValue scene_get_layer_by_id (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "getLayerByID() expects exactly one argument");
     }
 
     auto* container = get_opaque (this_val);
@@ -262,7 +262,7 @@ JSValue scene_get_layer_count (JSContext* ctx, JSValueConst this_val, int argc, 
 
 JSValue scene_create_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc < 1 || !JS_IsString (argv[0])) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "createLayer() expects a string model path argument");
     }
 
     auto* container = get_opaque (this_val);
@@ -285,14 +285,14 @@ JSValue scene_create_layer (JSContext* ctx, JSValueConst this_val, int argc, JSV
 
 JSValue scene_get_layer_index (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc < 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "getLayerIndex() expects one argument");
     }
 
     auto* container = get_opaque (this_val);
     auto* scriptable = WallpaperEngine::Scripting::Adapters::ScriptableObjectAdapter::extract (argv[0]);
 
     if (scriptable == nullptr) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "getLayerIndex() argument must be a layer object");
     }
 
     return JS_NewInt32 (ctx, container->getScene ().getRenderOrderIndex (*scriptable));
@@ -300,14 +300,14 @@ JSValue scene_get_layer_index (JSContext* ctx, JSValueConst this_val, int argc, 
 
 JSValue scene_sort_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc < 2) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "sortLayer() expects two arguments");
     }
 
     auto* container = get_opaque (this_val);
     auto* scriptable = WallpaperEngine::Scripting::Adapters::ScriptableObjectAdapter::extract (argv[0]);
 
     if (scriptable == nullptr) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "sortLayer() first argument must be a layer object");
     }
 
     int index = 0;
@@ -321,7 +321,9 @@ JSValue scene_sort_layer (JSContext* ctx, JSValueConst this_val, int argc, JSVal
     return JS_UNDEFINED;
 }
 
-JSValue scene_set_value (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) { return JS_EXCEPTION; }
+JSValue scene_set_value (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return JS_ThrowTypeError (ctx, "Cannot assign to read-only property");
+}
 
 SceneObject::SceneObject (ScriptEngine& engine, Render::Wallpapers::CScene& scene) :
     m_scene (scene), m_engine (engine), m_classId (0) {

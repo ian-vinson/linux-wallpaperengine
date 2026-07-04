@@ -12,11 +12,11 @@ std::map<uint32_t, MathModule&> mathModules;
 
 JSValue wemath_smoothstep (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc != 3) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "smoothStep() expects 3 arguments");
     }
 
     if (!JS_IsNumber (argv[0]) || !JS_IsNumber (argv[1]) || !JS_IsNumber (argv[2])) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "smoothStep() expects 3 numeric arguments");
     }
 
     double edge0 = 0.0f;
@@ -32,11 +32,11 @@ JSValue wemath_smoothstep (JSContext* ctx, JSValueConst this_val, int argc, JSVa
 
 JSValue wemath_mix (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc != 3) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "mix() expects 3 arguments");
     }
 
     if (!JS_IsNumber (argv[0]) || !JS_IsNumber (argv[1]) || !JS_IsNumber (argv[2])) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "mix() expects 3 numeric arguments");
     }
 
     double a = 0.0f;

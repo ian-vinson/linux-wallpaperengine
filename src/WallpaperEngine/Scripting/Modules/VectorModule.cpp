@@ -11,7 +11,7 @@ std::map<uint32_t, VectorModule&> vectorModules;
 
 JSValue wevector_anglevector2 (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc != 1 || !JS_IsNumber (argv[0])) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "angleVector2() expects 1 numeric argument");
     }
 
     double angle = 0.0;
@@ -36,18 +36,18 @@ JSValue wevector_anglevector2 (JSContext* ctx, JSValueConst this_val, int argc, 
 
 JSValue wevector_vectorangle2 (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "vectorAngle2() expects 1 argument");
     }
 
     if (JS_VALUE_GET_TAG (argv[0]) != JS_TAG_OBJECT) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "vectorAngle2() expects an object with x and y properties");
     }
 
     JSValue x = JS_GetPropertyStr (ctx, argv[0], "x");
     JSValue y = JS_GetPropertyStr (ctx, argv[0], "y");
 
     if (!JS_IsNumber (x) || !JS_IsNumber (y)) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "vectorAngle2() argument must have numeric x and y properties");
     }
 
     double xVal = 0.0, yVal = 0.0;

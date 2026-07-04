@@ -62,7 +62,7 @@ JSValue scriptproperties_property_get (JSContext* ctx, JSValueConst obj_val, JSA
 
 	return JS_UNDEFINED;
     } catch (const std::exception& e) {
-	return JS_EXCEPTION;
+	return JS_ThrowInternalError (ctx, "%s", e.what ());
     }
 }
 
@@ -70,6 +70,9 @@ int scriptproperties_property_set (
     JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst val, JSValueConst receiver, int flags
 ) {
     // do not support setting properties
+    const char* name = JS_AtomToCString (ctx, atom);
+    JS_ThrowTypeError (ctx, "Cannot assign to read-only scriptProperties property '%s'", name != nullptr ? name : "?");
+    JS_FreeCString (ctx, name);
     return -1;
 }
 

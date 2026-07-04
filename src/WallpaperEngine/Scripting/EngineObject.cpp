@@ -16,7 +16,9 @@ extern float g_Daytime;
 static uint32_t EngineInstanceId = 0;
 std::map<uint32_t, EngineObject&> engineInstances;
 
-JSValue engine_set_value (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) { return JS_EXCEPTION; }
+JSValue engine_set_value (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return JS_ThrowTypeError (ctx, "Cannot assign to read-only property");
+}
 
 JSValue engine_open_user_shortcut (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     return JS_UNDEFINED;
@@ -80,13 +82,13 @@ JSValue engine_stop_timeout (
 
 JSValue engine_clear_interval (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "clearInterval() expects exactly 1 argument, got %d", argc);
     }
 
     const auto it = engineInstances.find (magic);
 
     if (it == engineInstances.end ()) {
-	return JS_EXCEPTION;
+	return JS_ThrowReferenceError (ctx, "Could not find engine instance '%d' for clearInterval", magic);
     }
 
     int id = 0;
@@ -97,13 +99,13 @@ JSValue engine_clear_interval (JSContext* ctx, JSValueConst this_val, int argc, 
 
 JSValue engine_clear_timeout (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "clearTimeout() expects exactly 1 argument, got %d", argc);
     }
 
     const auto it = engineInstances.find (magic);
 
     if (it == engineInstances.end ()) {
-	return JS_EXCEPTION;
+	return JS_ThrowReferenceError (ctx, "Could not find engine instance '%d' for clearTimeout", magic);
     }
 
     int id = 0;
@@ -129,7 +131,7 @@ JSValue engine_is_portrait (JSContext* ctx, JSValueConst this_val, int argc, JSV
     const auto it = engineInstances.find (magic);
 
     if (it == engineInstances.end ()) {
-	return JS_EXCEPTION;
+	return JS_ThrowReferenceError (ctx, "Could not find engine instance '%d' for isPortrait", magic);
     }
 
     const auto& scene = it->second.getScene ();
@@ -138,7 +140,7 @@ JSValue engine_is_portrait (JSContext* ctx, JSValueConst this_val, int argc, JSV
 
 JSValue engine_set_interval (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc < 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "setInterval() requires at least 1 argument (callback)");
     }
 
     int delay = 0;
@@ -150,13 +152,13 @@ JSValue engine_set_interval (JSContext* ctx, JSValueConst this_val, int argc, JS
     JSValue function = argv[0];
 
     if (!JS_IsFunction (ctx, function)) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "setInterval() argument 1 must be a function");
     }
 
     const auto it = engineInstances.find (magic);
 
     if (it == engineInstances.end ()) {
-	return JS_EXCEPTION;
+	return JS_ThrowReferenceError (ctx, "Could not find engine instance '%d' for setInterval", magic);
     }
 
     int id = it->second.reserveNextIntervalId (function, delay);
@@ -165,7 +167,7 @@ JSValue engine_set_interval (JSContext* ctx, JSValueConst this_val, int argc, JS
 
 JSValue engine_set_timeout (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc < 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "setTimeout() requires at least 1 argument (callback)");
     }
 
     int delay = 0;
@@ -177,13 +179,13 @@ JSValue engine_set_timeout (JSContext* ctx, JSValueConst this_val, int argc, JSV
     JSValue function = argv[0];
 
     if (!JS_IsFunction (ctx, function)) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "setTimeout() argument 1 must be a function");
     }
 
     const auto it = engineInstances.find (magic);
 
     if (it == engineInstances.end ()) {
-	return JS_EXCEPTION;
+	return JS_ThrowReferenceError (ctx, "Could not find engine instance '%d' for setTimeout", magic);
     }
 
     int id = it->second.reserveNextTimeoutId (function, delay);
@@ -194,7 +196,7 @@ JSValue engine_register_audio_buffers (JSContext* ctx, JSValueConst this_val, in
     const auto it = engineInstances.find (magic);
 
     if (it == engineInstances.end ()) {
-	return JS_EXCEPTION;
+	return JS_ThrowReferenceError (ctx, "Could not find engine instance '%d' for registerAudioBuffers", magic);
     }
 
     int32_t resolution = 64;

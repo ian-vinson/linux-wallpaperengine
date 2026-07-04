@@ -66,7 +66,7 @@ JSValue scriptableobject_get_children (JSContext* ctx, JSValueConst this_val, in
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
 
     if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "getChildren() called on an invalid receiver");
     }
 
     JSValue array = JS_NewArray (ctx);
@@ -104,7 +104,7 @@ JSValue scriptableobject_get_parent (JSContext* ctx, JSValueConst this_val, int 
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
 
     if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "getParent() called on an invalid receiver");
     }
 
     const auto& parent = container->object.getObject ().parent;
@@ -136,7 +136,7 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (obj_val, &classId));
 
     if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "invalid receiver for property access");
     }
 
     const char* name = JS_AtomToCString (ctx, atom);
@@ -187,6 +187,7 @@ int scriptableobject_property_set (
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (obj_val, &classId));
 
     if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
+	JS_ThrowTypeError (ctx, "invalid receiver for property assignment");
 	return -1;
     }
 
@@ -202,7 +203,8 @@ int scriptableobject_property_set (
 	auto& property = container->object.getProperty (name);
 	container->adapter.getEngine ().jsToDynamic (val, property);
 	return 1;
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+	JS_ThrowTypeError (ctx, "%s", e.what ());
 	return -1;
     }
 }

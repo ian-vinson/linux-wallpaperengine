@@ -21,12 +21,13 @@ static constexpr int InvalidVectorInstanceId = 0;
 #define VEC_MAGIC_CHECK_EXCEPTION(container, components)                                                               \
     do {                                                                                                               \
 	if (!container || container->magic != (int)(VEC_OPAQUE_MAGIC + components)) {                                  \
-	    return JS_EXCEPTION;                                                                                       \
+	    return JS_ThrowTypeError (ctx, "not a Vec%d object", (int) (components));                                  \
 	}                                                                                                              \
     } while (0)
 #define VEC_MAGIC_CHECK_ERROR(container, components)                                                                   \
     do {                                                                                                               \
 	if (!container || container->magic != (int)(VEC_OPAQUE_MAGIC + components)) {                                  \
+	    JS_ThrowTypeError (ctx, "not a Vec%d object", (int) (components));                                         \
 	    return -1;                                                                                                 \
 	}                                                                                                              \
     } while (0)
@@ -225,6 +226,7 @@ int vector_property_set (
     int tag = JS_VALUE_GET_TAG (val);
 
     if (tag != JS_TAG_INT && !JS_TAG_IS_FLOAT64 (tag)) {
+	JS_ThrowTypeError (ctx, "cannot assign a non-numeric value to a Vec%d component", components);
 	return -1;
     }
 
@@ -275,6 +277,7 @@ int vector_property_set (
     }
 
     if (into == nullptr) {
+	JS_ThrowTypeError (ctx, "Vec%d has no writable property '%s'", components, name);
 	return -1;
     }
 
@@ -387,13 +390,13 @@ template JSValue vector_length<4> (JSContext* ctx, JSValueConst this_val, int ar
 template <int components>
 JSValue vector_constructor (JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv, int magic) {
     if (argc == 0) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "Vec%d constructor requires at least 1 argument", components);
     }
 
     auto it = vectorAdapterInstances<components>.find (magic);
 
     if (it == vectorAdapterInstances<components>.end ()) {
-	return JS_EXCEPTION;
+	return JS_ThrowInternalError (ctx, "Vec%d adapter is no longer available", components);
     }
 
     JSValue result = it->second.instantiate ();
@@ -649,11 +652,11 @@ template JSValue vector_cross<3> (JSContext* ctx, JSValueConst this_val, int arg
 
 template <int components> JSValue vector_mix (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 2) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "mix() requires 2 arguments (vector, amount)");
     }
 
     if (!JS_IsNumber (argv[1])) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "mix() amount must be a number");
     }
 
     double amount = 0.0f;
@@ -877,7 +880,7 @@ template JSValue vector_lengthSqr<4> (JSContext* ctx, JSValueConst this_val, int
 
 template <int components> JSValue vector_distance (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "distance() requires 1 argument");
     }
 
     JSClassID classId = 0;
@@ -897,7 +900,7 @@ template JSValue vector_distance<4> (JSContext* ctx, JSValueConst this_val, int 
 template <int components>
 JSValue vector_distanceSqr (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "distanceSqr() requires 1 argument");
     }
 
     JSClassID classId = 0;
@@ -961,7 +964,7 @@ template JSValue vector_negate<4> (JSContext* ctx, JSValueConst this_val, int ar
 
 template <int components> JSValue vector_reflect (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "reflect() requires 1 argument (the normal vector)");
     }
 
     JSClassID classId = 0;
@@ -988,7 +991,7 @@ template JSValue vector_reflect<4> (JSContext* ctx, JSValueConst this_val, int a
 
 template <int components> JSValue vector_project (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "project() requires 1 argument");
     }
 
     JSClassID classId = 0;
@@ -1017,7 +1020,7 @@ template JSValue vector_project<4> (JSContext* ctx, JSValueConst this_val, int a
 template <int components>
 JSValue vector_angleBetween (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "angleBetween() requires 1 argument");
     }
 
     JSClassID classId = 0;
@@ -1038,7 +1041,7 @@ template JSValue vector_angleBetween<4> (JSContext* ctx, JSValueConst this_val, 
 
 template <int components> JSValue vector_clamp (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 2) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "clamp() requires 2 arguments (min, max)");
     }
 
     JSClassID classId = 0;
@@ -1090,7 +1093,7 @@ template JSValue vector_fract<4> (JSContext* ctx, JSValueConst this_val, int arg
 
 template <int components> JSValue vector_mod (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "mod() requires 1 argument");
     }
 
     JSClassID classId = 0;
@@ -1117,7 +1120,7 @@ template JSValue vector_mod<4> (JSContext* ctx, JSValueConst this_val, int argc,
 
 template <int components> JSValue vector_step (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "step() requires 1 argument");
     }
 
     JSClassID classId = 0;
@@ -1145,7 +1148,7 @@ template JSValue vector_step<4> (JSContext* ctx, JSValueConst this_val, int argc
 template <int components>
 JSValue vector_smoothStep (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 2) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "smoothStep() requires 2 arguments");
     }
 
     JSClassID classId = 0;
@@ -1188,7 +1191,7 @@ JSValue vector2_angle (JSContext* ctx, JSValueConst this_val, int argc, JSValueC
 // Vec2-only: rotate this vector by an angle in degrees.
 JSValue vector2_rotate (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 1 || !JS_IsNumber (argv[0])) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "rotate() requires 1 numeric argument (angle in degrees)");
     }
 
     JSClassID classId = 0;
@@ -1240,7 +1243,7 @@ JSValue vector2_perpendicular (JSContext* ctx, JSValueConst this_val, int argc, 
 // Vec3-only: refract this vector (the incident direction) against a normal, given an eta ratio.
 JSValue vector3_refract (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 2 || !JS_IsNumber (argv[1])) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "refract() requires 2 arguments (normal vector, eta number)");
     }
 
     JSClassID classId = 0;
@@ -1299,13 +1302,13 @@ JSValue vector3_toSpherical (JSContext* ctx, JSValueConst this_val, int argc, JS
 // Vec3-only static: build a cartesian Vec3 from spherical coordinates (radius, polar angle, azimuth in degrees).
 JSValue vector3_fromSpherical (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc != 3 || !JS_IsNumber (argv[0]) || !JS_IsNumber (argv[1]) || !JS_IsNumber (argv[2])) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "fromSpherical() requires 3 numeric arguments (radius, theta, phi)");
     }
 
     const auto it = vectorAdapterInstances<3>.find (magic);
 
     if (it == vectorAdapterInstances<3>.end ()) {
-	return JS_EXCEPTION;
+	return JS_ThrowInternalError (ctx, "Vec3 adapter is no longer available");
     }
 
     double radius = 0.0, theta = 0.0, phi = 0.0;
