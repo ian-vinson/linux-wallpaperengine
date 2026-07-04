@@ -660,6 +660,7 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
     );
 
     if (JS_IsException (moduleFunc)) {
+	logJSException (this->m_context, key.c_str ());
 	JS_FreeValue (this->m_context, moduleFunc);
 	return;
     }
