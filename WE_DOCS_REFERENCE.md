@@ -1,9 +1,9 @@
 # Wallpaper Engine Official Documentation — Reference Notes
 **Compiled:** 2026-07-04, for the Mural/linux-wallpaperengine fork project.
-**Updated:** 2026-07-04, corrected the composelayer mechanism description
-three times as investigation progressed: first the UI-copy-vs-mechanism
-mismatch, then a disproven FBO-feedback theory, then a disproven shader-math
-theory, landing on the actual root cause (texture wrap mode). See §1's
+**Updated:** 2026-07-05, composelayer mechanism description corrected
+across six investigation passes — UI-copy-vs-mechanism mismatch, four
+disproven theories (FBO feedback, shader math, wrap mode, an unpinned
+base-pass finding), then a pixel-verified arithmetic root cause. See §1's
 final update note.
 **Sources:** docs.wallpaperengine.io (Designer Documentation — Scene Guide + Web Guide),
 official Wallpaper Engine UI translation strings (GitHub).
@@ -89,16 +89,23 @@ the object's own transform), not literally "render this object's children
 into an isolated offscreen texture" the way the UI description above implies.
 Treat the UI description as effect-level marketing copy, not a mechanism
 spec — the real technical behavior is closer to a heat-haze/refraction/portal
-primitive than an isolated compositing group. **Two follow-up investigations
-each disproved a plausible theory** (an OpenGL feedback hazard sampling the
-live scene FBO; a shader-transpilation bug in the perspective-warp math) —
-**the actual bug turned out to be a texture wrap-mode issue**: composelayer
-has no real source bitmap, so it falls back to a dummy texture created with
-no clamp flags, which propagates `GL_REPEAT` wrap mode into the FBOs
-chaining into any attached UV-warping effect. Out-of-range UVs (produced by
-almost any real use of an effect like Perspective) wrap instead of clamp,
-producing the visible seam. See the dev plan's priority #1 for the full
-three-theory investigation trail and fix scope.
+primitive than an isolated compositing group. **Four follow-up
+investigations each disproved a plausible theory** (an OpenGL feedback
+hazard; a shader-transpilation bug in the perspective-warp math; a
+dummy-texture wrap-mode issue; and an initially-unpinned "corruption exists
+in composelayer's own base pass" finding) before a sixth pass **pixel-
+verified the actual arithmetic bug**: `CImage::getSize()` unconditionally
+prefers a resolved texture's real pixel dimensions over the object's
+authored `size` field — harmless for ordinary images, but composelayer's
+texture is aliased to the scene's full-resolution grab-buffer
+(`_rt_FullFrameBuffer`), so its footprint gets computed at the *screen's*
+resolution instead of its own authored size, inflating it ~4x and pushing
+its NDC corners far outside `±1`, producing exactly the observed
+clamp-to-edge streaking (later reshaped into a diagonal seam by whatever
+UV-warping effect is attached). Fix identified (prefer authored `size` when
+non-zero) and verified via a reversible probe against real FBO pixel dumps,
+but not yet implemented as a permanent change. See the dev plan's priority
+#1 for the full six-pass investigation trail.
 
 **Scope note**: this fork already has FBO/render-target infrastructure for
 other effects (bloom: `_rt_4FrameBuffer`, `_rt_8FrameBuffer`, `_rt_Bloom` on

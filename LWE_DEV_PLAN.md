@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-04 (composelayer bug precisely root-caused after two disproven theories — dummy-texture GL_REPEAT wrap mode, not an FBO hazard or shader math bug; small fix now scoped with high confidence)
+**Last updated:** 2026-07-05 (composelayer: exact arithmetic root cause pixel-verified — `CImage::getSize()` substitutes the full-scene grab-buffer resolution for the object's authored size once its passthrough texture resolves; fix identified, not yet implemented)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,98 +296,159 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #1 — ROOT CAUSE PRECISELY DIAGNOSED (2026-07-04): dummy-texture GL_REPEAT wrap mode, not shader math — small, well-scoped fix
-Two prior theories, both wrong, both correctly disproven rather than shipped
-— see below for the full trail. **The actual bug, confirmed via real
-ground truth (the compiled GLSL sent to the GPU driver, not inference):**
+### #1 — ROOT CAUSE PIXEL-VERIFIED (2026-07-05): `CImage::getSize()` substitutes the scene's full-frame resolution for the object's authored size
 
-Composelayer has no real source bitmap, so `CImage::detectTexture()` leaves
-`m_texture` null, and `CImage`'s constructor falls back to a dummy `CFBO`
-created with `TextureFlags_NoFlags` (existing code, ~line 207, already
-carries a `// TODO: create a dummy texture of correct size ... this should
-be properly handled` admission). That flag propagates to `m_mainFBO`/
-`m_subFBO` — the object's private ping-pong targets chaining composelayer's
-base pass into an attached effect (Perspective, in Lofi Cafe's case) — via
-`this->m_texture->getFlags()`. In `CFBO.cpp`, `TextureFlags_NoFlags` (i.e.
-neither `ClampUVs` nor `ClampUVsBorder`) sets **`GL_REPEAT`** on both wrap
-axes. The Perspective effect's `v_TexCoord` computation naturally produces
-UVs outside `[0,1]` whenever the warp quad doesn't exactly reproduce the
-full unit square (true for virtually any real use of the effect — the
-shipped *default* is the identity square, so anything actually using
-Perspective for visible distortion, like Lofi Cafe, hits this). Those
-out-of-range samples **wrap to the opposite texture edge instead of
-clamping**, producing the visible seam — whose shape traces the UV-boundary
-crossing (a diagonal, for Lofi Cafe's specific near-trapezoidal corners).
+**Six investigation passes.** The sixth pass had a single, narrow goal set by
+the fifth: find the exact arithmetic reason composelayer's base-pass output
+has a correctly-sized valid rectangle surrounded by `GL_CLAMP_TO_EDGE`
+streaking, for object 3479 ("Lofi Cafe"'s composelayer, child of 2682).
+That reason is now pinned down and confirmed by making a targeted one-line
+change and watching the corrupted region shrink dramatically in the
+predicted direction, on real `glReadPixels` dumps — not inferred from
+source reading alone.
 
-**This is a general bug class, not Perspective-specific**: the same
-`this->m_texture->getFlags()` fallback governs any effect's own declared
-intermediate FBOs (`cur->effect->fbos` in `CImage::setup()`) for *any*
-passthrough object lacking a real texture — composelayer, fullscreenlayer,
-and projectlayer are all candidates for the identical bug with any
-UV-warping effect attached, not just Perspective.
+**How composelayer's "grab pass" actually works** (read from
+`composelayer.vert`/`.frag` directly): `gl_Position` is driven purely by
+`a_TexCoord`, so the base pass always rasterizes across the *entire*
+destination FBO. But the fragment shader computes its sample coordinate as
+a **manual perspective divide** of a second attribute-derived varying:
+`texCoord = v_ScreenCoord.xy / v_ScreenCoord.z * 0.5 + 0.5`, where
+`v_ScreenCoord = (a_Position, 1.0) * g_ModelViewProjectionMatrix).xyw`. For
+composelayer's first (copy) pass, `a_Position` is the object's own
+scene-space footprint (`m_pos`, built in `CImage::updateScenePosition()`)
+and the matrix is the *real* camera screen matrix
+(`m_modelViewProjectionScreen`). In other words: composelayer rasterizes a
+full-canvas quad but samples the scene's full-frame buffer at the NDC
+position corresponding to *where this object's own footprint sits on
+screen* — a screen-space "grab" of whatever is behind it. This is
+intentional and correct in concept; texCoord values are only valid
+(`[0,1]`) where that footprint's clip-space projection stays within `±1`
+NDC. Anywhere the footprint's projected corners exceed that range, the
+affinely-interpolated texCoord overshoots `[0,1]` and clamp-to-edge kicks
+in — which is exactly the observed "sharp valid rectangle, streaked
+border" shape once you work out where an affine interpolation between two
+out-of-range corner values crosses back through `[0,1]`.
 
-**Full investigation trail** (both discarded theories kept for the record,
-since each closing was itself a real, useful piece of work):
-1. *Original theory (very first pass)*: composelayer hidden behind
-   `ObjectParser.cpp`'s ignored `config` field — an unimplemented feature.
-   **Wrong.** Composelayer is an ordinary image-type object
-   (`models/util/composelayer.json`), fully parsed and rendered normally.
-2. *Second theory*: an OpenGL feedback hazard — composelayer's material
-   samples `_rt_FullFrameBuffer` while it's still the live scene FBO being
-   rendered into, mirroring a real, proven precedent (`CParticle.cpp`'s
-   REFRACT fix). Plausible, well-precedented, and **wrong** — disproven by
-   implementing the fix and pixel-diffing before/after screenshots (zero
-   pixels changed). Traced why: `CImage`'s pass-routing only sends the
-   *final* pass to the live scene FBO, and composelayer's base pass is
-   never final when an effect is attached, so the theorized feedback loop
-   structurally cannot occur. Fix fully reverted (confirmed empty diff).
-3. *Third theory*: a shader-transpilation bug in `common_perspective.h`'s
-   `squareToQuad()`/a custom `mat3 inverse()` gated behind `#if HLSL`.
-   **Also wrong**, and disproven with unusually strong evidence — dumped
-   the actual final compiled GLSL sent to the driver (via temporary
-   instrumentation in `CPass.cpp`, reverted after) and confirmed
-   `GLSLContext::toGlsl()` parses shaders as pure GLSL
-   (`glslang::EShSourceGlsl`) always; `HLSL` is never `#define`d anywhere
-   in this fork's actual shader-preprocessing pipeline
-   (`ShaderUnit.cpp` injects `#define mul(x,y) ((y)*(x))`,
-   `#define frac fract`, etc., but never `HLSL`) — the `#if HLSL` block is
-   dead code, never compiled. Hand-derived `squareToQuad()` against
-   Heckbert's classic 1989 unit-square-to-quadrilateral algorithm and
-   confirmed the actual compiled shader matches it term-for-term, including
-   correct `mul()`/matrix-convention handling. **The shader math itself has
-   no bug at all.**
-4. *Real cause found*: systematic differential testing (identity → an
-   axis-aligned shrunk square → a near-full-coverage shear → a trapezoid)
-   revealed a completely different signature than a math bug would produce
-   — artifact size/shape scaling exactly with how much of the `[0,1]`
-   destination area falls outside the warped quad's coverage, which is the
-   signature of wrap-mode wraparound, not misplaced geometry. Traced to the
-   dummy-texture flag propagation described above.
+**Direct measurement (temporary debug prints in
+`CImage::updateScreenSpacePosition()`/`resolveTransform()`, object
+3479)**: resolved transform scale is `(2.468, 1.800, 1.933)` (almost
+entirely from object 3479's own `scale` field — parent 2682 contributes
+~1.0), and the `size` feeding `scaledSize = size * scale` was
+**`3840×2160`** — suspiciously identical to the scene's own resolution.
+The resulting footprint corners, run through the real screen MVP, land at
+NDC roughly `(-3.10, 2.08)` to `(1.84, -1.52)` — wildly outside `±1` on
+every side, which is why the corrupted "streaked" border reached so far
+inward from every edge (matches the ~4× oversized diagonal-split artifact
+seen in the final frame).
 
-**Ground truth check**: no separate/distinct WE installation was available
-to diff `common_perspective.h` against, but it matches Heckbert's textbook
-algorithm closely enough to be confident it's an unmodified, correct copy
-of WE's original file — the bug is squarely in this fork's own
-`CImage`/`CFBO` texture-flag plumbing, not in any WE-authored shader source.
+**Why `size` was `3840×2160`**: `CImage::getSize()` is:
+```cpp
+glm::vec2 CImage::getSize () const {
+    if (this->m_texture == nullptr) {
+        return this->getImage ().size;
+    }
+    return { this->m_texture->getRealWidth (), this->m_texture->getRealHeight () };
+}
+```
+It unconditionally prefers the resolved texture's real pixel dimensions
+over the object's own authored `size` field whenever a texture is present.
+For an ordinary image this is harmless — the texture *is* the object's own
+art asset, sized to match. But composelayer/passthrough objects have their
+`m_texture` aliased to `_rt_FullFrameBuffer` — a scene-wide render target
+whose dimensions are the **screen's** resolution, not this object's own
+footprint size. A debug print of `this->getImage ().size` (the raw `size`
+field parsed straight from `scene.json`, `ObjectParser.cpp:220`) showed
+**`1000×1000`** for object 3479 — the actual authored size, and also
+exactly the dimensions `m_mainFBO` was constructed with (the constructor
+calls `getSize()` *before* `detectTexture()` populates `m_texture`, so it
+incidentally reads the correct authored value at construction time only).
+The per-frame update path
+(`updateGeometryBuffers → resolveGeometrySize → getSize()`) runs *after*
+`m_texture` is resolved, so every frame it silently substitutes the wrong
+basis (`3840×2160`) for the right one (`1000×1000`), producing a footprint
+roughly 4× too large in area.
 
-**Scope estimate — genuinely small now**: the fix is very likely just
-changing the dummy-texture fallback's flag (the already-TODO-flagged
-~line 207 in `CImage.cpp`'s constructor) from `TextureFlags_NoFlags` to
-`TextureFlags_ClampUVs` (or `ClampUVsBorder`) so `CFBO.cpp` sets clamping
-instead of repeat for textureless passthrough objects. No shader changes
-needed at all. Still worth verifying this doesn't have unintended
-consequences for whatever the original `TODO` comment's context was
-concerned about, and worth checking the general bug class (fullscreenlayer/
-projectlayer + other UV-warping effects) isn't masking anything else once
-the specific fix is in.
+**Verification (not yet the fix — a crude, reversible one-line probe)**:
+temporarily forcing `resolveGeometrySize()`'s `size` to
+`this->getImage ().size` for object 3479 and re-dumping the same FBO
+showed the corrupted border shrink from covering ~40-60% of every edge to
+only two thin edges (top ~6%, left ~14% NDC overshoot; right and bottom
+edges became fully clean, reaching valid content all the way to the
+canvas boundary). This moved the real pixels in exactly the predicted
+direction, confirming the mechanism rather than just fitting the shape of
+the symptom. All debug instrumentation (numeric prints + `glReadPixels`
+dumps in `CPass::render()`) was fully reverted; rebuild confirmed clean.
 
-No code changes made yet — this was scoping only, across three full
-investigation passes. Ready to implement with high confidence next time.
+**Proposed fix (not yet implemented)**: give `CImage::getSize()` the same
+precedence the constructor gets "for free" by call-order accident — prefer
+the authored `image.size` field whenever it's actually set (non-zero),
+and only fall back to the texture's real dimensions when the author left
+`size` unset:
+```cpp
+glm::vec2 CImage::getSize () const {
+    if (this->getImage ().size.x != 0.0f && this->getImage ().size.y != 0.0f) {
+        return this->getImage ().size;
+    }
+    if (this->m_texture == nullptr) {
+        return this->getImage ().size;
+    }
+    return { this->m_texture->getRealWidth (), this->m_texture->getRealHeight () };
+}
+```
+This is narrowly scoped: `size` defaults to `(0,0)` when omitted in
+`scene.json` (`ObjectParser.cpp:179,220`), so ordinary texture-autosized
+images (the common case, where `size` is unset) are unaffected — only
+objects with an explicit non-zero authored `size` *and* a resolved texture
+whose real dimensions differ from it (i.e. exactly the composelayer/
+passthrough case) change behavior. `autosize` and `fullscreen` both
+already override `size` again downstream in the constructor and in
+`resolveGeometrySize()`, so this fix doesn't interfere with either.
+
+**Residual, smaller-magnitude open detail**: even after correcting `size`,
+a small NDC overshoot remained on two of the four corners (top/left, ~6-
+14%). This is much smaller and may not even be a bug — a passthrough
+object positioned such that its (correctly-sized) footprint genuinely
+extends slightly past the visible viewport will hit clamp-to-edge
+regardless, since `_rt_FullFrameBuffer` is exactly viewport-sized with no
+over-render margin. Worth a quick visual check after the `getSize()` fix
+lands, but not worth chasing further as a separate theory until then.
+
+**Full investigation trail, in order** (five earlier passes, all real,
+useful, closed work — kept for the record; each of the first four closed a
+wrong theory with real evidence, never left standing on inference alone):
+1. Composelayer hidden behind `ObjectParser.cpp`'s ignored `config` field
+   (unimplemented feature). **Wrong** — it's an ordinary image-type object,
+   fully parsed and rendered normally.
+2. An OpenGL feedback hazard sampling the live scene FBO while it's the
+   active render target, mirroring `CParticle`'s real REFRACT precedent.
+   **Wrong** — disproven via implementation + pixel-diff; `CImage`'s
+   pass-routing never sends composelayer's base pass to the live scene FBO
+   in the first place, so the theorized loop structurally cannot occur.
+3. A shader-transpilation bug in `common_perspective.h`'s `squareToQuad()`/
+   a custom `mat3 inverse()` gated behind `#if HLSL`. **Wrong** — disproven
+   by dumping the actual compiled GLSL sent to the driver; `HLSL` is never
+   `#define`d anywhere in this fork's pipeline, that code path is dead, and
+   the real (GLSL) math matches Heckbert's 1989 algorithm term-for-term.
+4. The dummy-texture fallback's `TextureFlags_NoFlags` causing `GL_REPEAT`
+   wrap-around. **Wrong** — disproven via a runtime flag check;
+   `detectTexture()`'s `_rt_`-prefix check resolves composelayer's texture
+   directly to the real scene FBO (already `ClampUVs` by default), so the
+   dummy-fallback branch that got "fixed" is never even reached for
+   composelayer.
+5. Corruption directly observed via temporary `glReadPixels` FBO dumps
+   (`RenderDoc` needs interactive `sudo`, unavailable in this sandbox) in
+   composelayer's own base-pass output, *before* Perspective ever runs —
+   a correctly-sized valid rectangle surrounded by `GL_CLAMP_TO_EDGE`
+   streaking. This cleared the Perspective effect entirely (it's warping an
+   already-broken input; the diagonal seam is just the warp reshaping
+   axis-aligned streaking) and confirmed the valid region's size is
+   transform-sensitive (zeroing object 3479's rotation changed the streak
+   angle). Exact arithmetic cause not yet isolated at the end of this pass.
+6. *(current)* Exact arithmetic isolated and pixel-verified — see above.
 
 **Still open, lower priority given the above**: the `copybackground` field
 (238/356 wallpapers, overwhelmingly `true`) remains completely unhandled in
-the codebase — revisit once this fix lands, since it may or may not be
-related to the same dummy-texture code path.
+the codebase — revisit once the transform/bounding-box bug is fixed.
 
 ### #3 — Real getTextureAnimation() implementation
 Currently a no-op stub. Real implementation requires per-object animation
