@@ -1,10 +1,8 @@
 # Wallpaper Engine Official Documentation — Reference Notes
 **Compiled:** 2026-07-04, for the Mural/linux-wallpaperengine fork project.
-**Updated:** 2026-07-05, composelayer mechanism description corrected
-across six investigation passes — UI-copy-vs-mechanism mismatch, four
-disproven theories (FBO feedback, shader math, wrap mode, an unpinned
-base-pass finding), then a pixel-verified arithmetic root cause. See §1's
-final update note.
+**Updated:** 2026-07-05, composelayer investigation complete — a real bug
+was found, root-caused, fixed, and thoroughly verified across six passes.
+See §1's final update note.
 **Sources:** docs.wallpaperengine.io (Designer Documentation — Scene Guide + Web Guide),
 official Wallpaper Engine UI translation strings (GitHub).
 
@@ -89,23 +87,23 @@ the object's own transform), not literally "render this object's children
 into an isolated offscreen texture" the way the UI description above implies.
 Treat the UI description as effect-level marketing copy, not a mechanism
 spec — the real technical behavior is closer to a heat-haze/refraction/portal
-primitive than an isolated compositing group. **Four follow-up
-investigations each disproved a plausible theory** (an OpenGL feedback
-hazard; a shader-transpilation bug in the perspective-warp math; a
-dummy-texture wrap-mode issue; and an initially-unpinned "corruption exists
-in composelayer's own base pass" finding) before a sixth pass **pixel-
-verified the actual arithmetic bug**: `CImage::getSize()` unconditionally
-prefers a resolved texture's real pixel dimensions over the object's
-authored `size` field — harmless for ordinary images, but composelayer's
-texture is aliased to the scene's full-resolution grab-buffer
-(`_rt_FullFrameBuffer`), so its footprint gets computed at the *screen's*
-resolution instead of its own authored size, inflating it ~4x and pushing
-its NDC corners far outside `±1`, producing exactly the observed
-clamp-to-edge streaking (later reshaped into a diagonal seam by whatever
-UV-warping effect is attached). Fix identified (prefer authored `size` when
-non-zero) and verified via a reversible probe against real FBO pixel dumps,
-but not yet implemented as a permanent change. See the dev plan's priority
-#1 for the full six-pass investigation trail.
+primitive than an isolated compositing group. **This fork's diagonal-split
+rendering bug on this feature is now fixed** (six investigation passes; four
+disproven theories — FBO feedback, shader math, wrap mode, an initially-
+unpinned base-pass finding — followed by a pixel-verified root cause and a
+shipped fix). Root cause: `CImage::getSize()` unconditionally preferred a
+resolved texture's real pixel dimensions over the object's authored `size`
+field — harmless for ordinary images, but composelayer's texture is aliased
+to the scene's full-resolution grab-buffer (`_rt_FullFrameBuffer`), so its
+footprint was computed at the *screen's* resolution instead of its own
+authored size, inflating it and pushing its NDC corners far outside `±1`,
+producing clamp-to-edge streaking later reshaped into a diagonal seam by
+whatever UV-warping effect was attached. Fixed by making `getSize()` prefer
+the authored size when non-zero (4-line change), verified against a real
+before/after screenshot, a full 356-wallpaper regression (no change from
+baseline), and a sweep of all 540 locally-installed workshop items to
+confirm no other wallpaper's rendering changed unexpectedly. See the dev
+plan's Completed Items §1 for the full six-pass investigation trail.
 
 **Scope note**: this fork already has FBO/render-target infrastructure for
 other effects (bloom: `_rt_4FrameBuffer`, `_rt_8FrameBuffer`, `_rt_Bloom` on
