@@ -1154,6 +1154,10 @@ void CImage::updateScreenSpacePosition () {
 const Image& CImage::getImage () const { return this->m_image; }
 
 glm::vec2 CImage::getSize () const {
+    if (this->getImage ().size.x != 0.0f && this->getImage ().size.y != 0.0f) {
+	return this->getImage ().size;
+    }
+
     if (this->m_texture == nullptr) {
 	return this->getImage ().size;
     }
