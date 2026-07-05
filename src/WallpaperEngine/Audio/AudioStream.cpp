@@ -449,6 +449,12 @@ void AudioStream::stop () {
     this->m_initialized = false;
 }
 
+void AudioStream::pause () { this->m_paused = true; }
+
+void AudioStream::resume () { this->m_paused = false; }
+
+bool AudioStream::isPaused () const { return this->m_paused; }
+
 int AudioStream::resampleAudio (uint8_t* out_buf, const int out_size) {
     int out_linesize = 0;
     int ret;

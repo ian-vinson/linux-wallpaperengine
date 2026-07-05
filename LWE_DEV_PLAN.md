@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-05 (composelayer diagonal-split fully fixed and verified — `CImage::getSize()`, 4-line change, six investigation passes; moved to Completed Items)
+**Last updated:** 2026-07-05 (ISoundLayer scripting implemented — `CSound` now scriptable with volume/isPlaying/play/stop/pause, new AudioStream pause/resume support, 356-wallpaper regression clean; composelayer diagonal-split also fully fixed this session — see Completed Items #1 and #10)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -364,36 +364,6 @@ live-reload and destroyLayer() work did, not a quick single-session add.
 ### #9 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
 
-
-### #10 — ISoundLayer: sound layers have zero scripting surface
-Found while cross-referencing the official WE documentation (see
-`WE_DOCS_REFERENCE.md` §16) against the #8 audit's own findings. Real WE
-has a documented `ISoundLayer` SceneScript class — `volume` (playback
-volume), `isPlaying()`, `play()` (starts if not already running), `stop()`
-(resets internal playback timer), `pause()` (holds current playback
-position). This fork's `CSound` object type does not extend
-`ScriptableObject` (confirmed during the #8 JS_Throw audit session), meaning
-**sound layers currently cannot be scripted at all** in this fork — no
-`thisLayer` binding, no `getLayer()`/`enumerateLayers()` visibility (they're
-filtered out the same way `getLayerCount()` had to learn to exclude them —
-see the #getLayerCount() commit entry above), nothing. Any real-world
-wallpaper script that tries to control sound playback (start/stop/pause a
-sound layer, adjust its volume dynamically, react to `isPlaying()`) would
-silently have no way to do so today.
-
-Scoping notes for whenever this gets picked up:
-- Would need `CSound` (or whatever this fork's actual sound-layer render
-  class is named — verify exact class name before assuming) to additionally
-  inherit `ScriptableObject`, following the same pattern already
-  established for `CImage`/`CParticle`/text layers.
-- The four methods map onto whatever this fork's actual audio-playback
-  backend already exposes for controlling a sound's play/pause/stop state
-  and volume — check what's already there before assuming new playback
-  infrastructure is needed; this may be substantially a wiring task (expose
-  existing playback control through the SceneScript API surface) rather
-  than a new-feature build, unlike the destroyLayer()/Mat4 situations.
-- Confirm whether `CSound` already tracks a "currently playing" boolean
-  internally (needed for `isPlaying()`) or whether that needs adding.
 
 ---
 
@@ -807,6 +777,109 @@ after this exact throw was added already came back 354/356 clean with zero
 new script-related errors — nothing in the real corpus relies on assigning
 arbitrary properties to a Vec instance. **Closed, no further action.**
 
+### #10 — DONE 2026-07-05: ISoundLayer scripting (`volume`/`isPlaying()`/`play()`/`stop()`/`pause()`)
+
+Implemented the full documented `ISoundLayer` surface (`WE_DOCS_REFERENCE.md`
+§16) on `CSound`, which previously extended only `CObject` and had zero
+scripting surface at all.
+
+**Multi-stream corpus check (Step 1)**: swept all 540 locally-installed
+workshop items — 412 `CSound` constructions logged, **393 (95.4%) have
+exactly one sound file**, the rest range up to 16 files on a single object.
+Confirmed the "treat the whole `CSound` as one logical playback unit"
+design assumption is right for the overwhelming common case, but the
+non-trivial multi-file tail means every operation (`play`/`stop`/`pause`/
+volume) has to iterate *all* managed streams uniformly, not just the first
+— which is how it's implemented (`std::map<int, AudioStream*>`, every
+method loops over `std::views::values`).
+
+**Design**: `CSound` now also inherits `ScriptableObject` (`virtual public
+CObject, public ScriptableObject`, matching `CImage`'s exact pattern). A
+new `PlaybackState { Stopped, Playing, Paused }` enum tracks real
+play/pause/stop state — deliberately *not* inferred from `AudioStream`'s
+own fields, which don't cleanly map to it (`AudioStream::isInitialized()`
+only distinguishes "ever started" from "permanently stopped", with no
+paused concept at all). `volume` is exposed as a plain registered
+`DynamicValue` property (identical mechanism to `origin`/`scale`/etc.),
+re-applied to every managed stream fresh each frame in `CSound::render()`
+— no bespoke JS glue needed for get/set, it Just Works through the
+existing generic property mechanism. `isPlaying()`/`play()`/`stop()`/
+`pause()` are new exotic methods added to
+`ScriptableObjectAdapter.cpp`'s shared `scriptableobject_property_get`
+dispatcher, gated on `is<CSound>()` so a non-sound layer's
+`.isPlaying`/`.play`/`.stop`/`.pause` correctly resolve to plain
+`undefined` (falling through to the generic property lookup) rather than
+a function that always throws when called — matching how a real `ILayer`
+without `ISoundLayer` wouldn't have these members at all.
+
+Also found and fixed a stale comment in `SceneObject.cpp` claiming
+`CSound` objects are filtered out of `getLayerCount()`/`enumerateLayers()`
+— true before this change (the filter is the generic `is<ScriptableObject>()`
+check, not a `CSound`-specific exclusion), now automatically false since
+`CSound` is `ScriptableObject`-derived; comment corrected to say so.
+
+**PCM-consumption point (Step 0) and pause() gating**: found in
+`SDLAudioDriver.cpp`'s `audio_callback()` — the exact point that already
+gated per-stream mixing on `buffer->stream->isInitialized()`. Added a new
+`AudioStream::pause()`/`resume()`/`isPaused()` trio (a plain `m_paused`
+flag) and a second gate right next to the existing one:
+`if (buffer->stream->isPaused()) { continue; }`. This skips mixing
+entirely for a paused stream — contributing silence (the buffer is
+memset to 0 at the top of the callback) — **without ever calling
+`decodeFrame()`/`dequeuePacket()`**, so decode/queue state is provably
+untouched while paused. `AudioStream::stop()` remains exactly as
+before (permanent — `m_initialized` never flips back to `true`, no
+restart path), confirmed unchanged.
+
+**play()-after-stop() verification**: `CSound::stop()` now stops, removes,
+deletes, and clears every managed `AudioStream` (refactoring the old
+destructor body into `stop()` itself; the destructor is now just
+`this->stop();`). `CSound::play()` branches on state — from `Paused`, it
+calls `resume()` on every stream (no rebuild, since `pause()` never
+touched anything destructively); from `Stopped`, it rebuilds via the
+same `load()` the constructor already uses (no new/duplicate creation
+path needed — `load()` was already the single reusable per-sound-file
+loop, just callable a second time now that `stop()` properly clears
+`m_audioStreams` first). Verified end-to-end with a synthetic test
+wallpaper (`camera`/`general`/one `Sound` object with a property-script
+attached to `volume`, real `ffmpeg`-synthesized tone.mp3, run via
+`--bg <dir> --noautomute`; `--noautomute` was necessary — the driver's
+existing "another app is already playing audio" / "something is
+fullscreen" automute detector was otherwise silently suppressing all
+mixing in this sandboxed environment, a real environmental confound
+unrelated to this feature, not a bug in the implementation). Script
+exercised the full sequence: `isPlaying()` → `pause()` → `play()`
+(resume) → `stop()` → `play()` (rebuild) → `volume` set/read-back →
+`pause()` again. Every transition reported exactly the expected
+`isPlaying()` value at every step, including **the specific
+play()-after-stop() case**: confirmed via a temporary cumulative
+"bytes decoded" counter that the post-`stop()` stream is a genuinely
+fresh, independently-decoding `AudioStream` (its decode-rate at an
+equivalent relative frame offset matched the original stream's,
+consistent with a real restart from scratch, not a stale/broken handle).
+
+**pause() position-preservation verification**: same temporary
+byte-counter, sampled at `pause()`, resumed at `play()`, and periodically
+every 10 frames throughout a 300+-frame (~10 second) pause window —
+**the counter stayed bit-for-bit frozen the entire time** (zero
+decode calls while paused), then continued correctly after `resume()`
+with the exact same cumulative count carried over (no reset, no data
+loss). The underlying stream's `isInitialized()` also stayed `true`
+throughout, confirming pause is non-destructive, and — as a bonus,
+unforced confirmation — the read thread kept filling the packet queue
+ahead during the pause window (queue size *grew*, never shrank),
+proving the *decode-ahead* pipeline kept running independently while
+only *output consumption* froze, exactly as designed. All temporary
+verification instrumentation (a `MULTISOUND` corpus-check log, a
+`debugBytesDecoded()` counter on `AudioStream`, and `SOUNDDEBUG` cross-check
+logs in `CSound`) was fully reverted before finalizing; final diff is
+only the real, permanent implementation.
+
+**Full 356-wallpaper regression**: **354 clean, 2 errors, 0 crashes** —
+exact match with the pre-existing baseline (`3420062133`, `3713073223`,
+same known-unrelated GLSL-compile issues as always). Zero new failures on
+any sound-bearing wallpaper.
+
 ---
 
 ## API Implementation Status (vs lib.sceneScript.d.ts v2.8)
@@ -837,7 +910,7 @@ arbitrary properties to a Vec instance. **Closed, no further action.**
 | ILayer.getTextureAnimation() | ⚠️ stub (no-op rate/play/stop/pause/setFrame) |
 | ILayer.getChildren() | ✅ |
 | ILayer.getParent() | ✅ |
-| ISoundLayer (volume/isPlaying/play/stop/pause) | ❌ — `CSound` doesn't extend `ScriptableObject`, zero scripting surface at all (not just `play()`); see priority #10 |
+| ISoundLayer (volume/isPlaying/play/stop/pause) | ✅ (2026-07-05, see #10 in Completed Items) |
 | createScriptProperties() builder (all add* methods + defaults) | ✅ |
 | WEMath (smoothStep, mix, deg2rad, rad2deg) | ✅ |
 | WEVector (angleVector2, vectorAngle2) | ✅ |

@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
+#include "WallpaperEngine/Render/Objects/CSound.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
 
@@ -130,6 +131,60 @@ JSValue scriptableobject_get_parent (JSContext* ctx, JSValueConst this_val, int 
     return JS_UNDEFINED;
 }
 
+// ISoundLayer's isPlaying()/play()/stop()/pause() (thisLayer on a sound-type layer). Only ever
+// attached by scriptableobject_property_get when the underlying object is a CSound, so the
+// is<CSound>() check here is a defensive backstop, not the primary gate.
+JSValue scriptableobject_sound_is_playing (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
+	|| !container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+	return JS_ThrowTypeError (ctx, "isPlaying() called on an invalid receiver");
+    }
+
+    return JS_NewBool (ctx, container->object.as<WallpaperEngine::Render::Objects::CSound> ()->isPlaying ());
+}
+
+JSValue scriptableobject_sound_play (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
+	|| !container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+	return JS_ThrowTypeError (ctx, "play() called on an invalid receiver");
+    }
+
+    container->object.as<WallpaperEngine::Render::Objects::CSound> ()->play ();
+    return JS_UNDEFINED;
+}
+
+JSValue scriptableobject_sound_stop (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
+	|| !container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+	return JS_ThrowTypeError (ctx, "stop() called on an invalid receiver");
+    }
+
+    container->object.as<WallpaperEngine::Render::Objects::CSound> ()->stop ();
+    return JS_UNDEFINED;
+}
+
+JSValue scriptableobject_sound_pause (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
+	|| !container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+	return JS_ThrowTypeError (ctx, "pause() called on an invalid receiver");
+    }
+
+    container->object.as<WallpaperEngine::Render::Objects::CSound> ()->pause ();
+    return JS_UNDEFINED;
+}
+
 JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst receiver) {
     JSClassID classId = 0;
 
@@ -157,6 +212,25 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
 
     if (strcmp (name, "getParent") == 0) {
 	return JS_NewCFunction (ctx, scriptableobject_get_parent, "getParent", 0);
+    }
+
+    // ISoundLayer surface — only meaningful (and only exposed) on sound-type layers, so a
+    // non-sound layer's `.isPlaying`/`.play`/`.stop`/`.pause` fall through to plain `undefined`
+    // below, same as any other nonexistent property, rather than resolving to a function that
+    // always throws when called.
+    if (container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+	if (strcmp (name, "isPlaying") == 0) {
+	    return JS_NewCFunction (ctx, scriptableobject_sound_is_playing, "isPlaying", 0);
+	}
+	if (strcmp (name, "play") == 0) {
+	    return JS_NewCFunction (ctx, scriptableobject_sound_play, "play", 0);
+	}
+	if (strcmp (name, "stop") == 0) {
+	    return JS_NewCFunction (ctx, scriptableobject_sound_stop, "stop", 0);
+	}
+	if (strcmp (name, "pause") == 0) {
+	    return JS_NewCFunction (ctx, scriptableobject_sound_pause, "pause", 0);
+	}
     }
 
     // Read-only scene.json metadata — not backed by a scriptable DynamicValue like

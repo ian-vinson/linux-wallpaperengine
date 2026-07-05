@@ -246,7 +246,8 @@ JSValue scene_enumerate_layers (JSContext* ctx, JSValueConst this_val, int argc,
 // thisScene.getLayerCount(): total number of layers currently in the scene, in the same
 // collection enumerateLayers() iterates. Filtered to ScriptableObject-derived objects, same as
 // enumerateLayers() — getObjectsByRenderOrder() also holds non-layer internal render objects
-// (the bloom composite object, CSound audio objects) that scripts can never see via ILayer.
+// (the bloom composite object) that scripts can never see via ILayer. CSound audio objects *are*
+// ScriptableObject-derived (ISoundLayer surface) and so are correctly included here.
 JSValue scene_get_layer_count (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     auto* container = get_opaque (this_val);
     uint32_t count = 0;

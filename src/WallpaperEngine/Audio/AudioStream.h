@@ -92,9 +92,26 @@ public:
      */
     [[nodiscard]] float getVolume () const;
     /**
-     * Stops decoding and playback of the stream
+     * Stops decoding and playback of the stream. Permanent for this instance — there is no
+     * restart path, m_initialized never gets set back to true. A stream that needs to play
+     * again after stop() must be destroyed and reconstructed.
      */
     void stop ();
+    /**
+     * Pauses playback: the audio driver's mixing callback will skip this stream (contributing
+     * silence) without calling decodeFrame()/dequeuePacket(), so decode/queue state — and thus
+     * the current playback position — is left completely untouched. Distinct from stop(), which
+     * is destructive; pause()/resume() can be toggled indefinitely.
+     */
+    void pause ();
+    /**
+     * Resumes a paused stream from exactly where it left off.
+     */
+    void resume ();
+    /**
+     * @return If the stream is currently paused
+     */
+    [[nodiscard]] bool isPaused () const;
     /**
      * @return The file data buffer
      */
@@ -173,6 +190,8 @@ private:
     bool m_initialized = false;
     /** Repeat enabled? */
     bool m_repeat = false;
+    /** Paused? Gates the audio driver's mixing callback only — decode/queue state is untouched */
+    bool m_paused = false;
     /** Per-stream volume scale [0.0, 1.0] */
     float m_volume = 1.0f;
     /** The codec context that contains the original audio format information */

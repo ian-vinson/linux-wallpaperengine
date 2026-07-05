@@ -29,6 +29,12 @@ void audio_callback (void* userdata, uint8_t* streamData, int length) {
 	    continue;
 	}
 
+	// paused: skip mixing (contributes silence) without touching decode/queue state at all,
+	// so playback resumes from the exact same position once unpaused
+	if (buffer->stream->isPaused ()) {
+	    continue;
+	}
+
 	// check if queue is empty and signal the read thread
 	if (buffer->stream->isQueueEmpty ()) {
 	    SDL_CondSignal (buffer->stream->getWaitCondition ());
