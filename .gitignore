@@ -11,3 +11,5 @@ packaging/archlinux/*
 *-protocol.c
 *-protocol.h
 AGENTS.md
+2026-*-*-*-continue-the-*.txt
+2026-*-*-*-audit-for-*.txt
