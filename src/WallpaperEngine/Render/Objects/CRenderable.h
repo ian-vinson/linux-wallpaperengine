@@ -20,6 +20,21 @@ public:
 
     [[nodiscard]] double getAnimationTime () const;
 
+    // ITextureAnimation scripting surface (thisLayer.getTextureAnimation(), see
+    // ScriptableObjectAdapter.cpp). getAnimationElapsedTime() replaces the global render clock
+    // as CPass::resolveTextureAnimationState()'s time source for frame selection.
+    [[nodiscard]] double getAnimationElapsedTime () const;
+    [[nodiscard]] float getAnimationRate () const;
+    void setAnimationRate (float rate);
+    [[nodiscard]] bool isAnimationPaused () const;
+    void setAnimationPaused (bool paused);
+    // Resets to frame 0 and pauses ("resets internal playback timer", matching ISoundLayer's
+    // stop() language) — a subsequent play() resumes advancing from there.
+    void stopAnimation ();
+    // Jumps to the given frame's cumulative start time without touching the paused state, so
+    // setFrame() while playing continues animating from the new position.
+    void setAnimationFrame (uint32_t frameNumber);
+
     void setup () override;
 
     [[nodiscard]] virtual const float& getBrightness () const = 0;
@@ -31,8 +46,15 @@ public:
 
 protected:
     void detectTexture ();
+    // Advances m_animationElapsedTime by this frame's real delta (scaled by m_animationRate)
+    // unless paused. Must be called once per object per frame from each concrete subclass's
+    // render() — there's no single shared render() override on CRenderable itself to hook.
+    void advanceAnimationTime ();
 
     double m_animationTime = 0.0;
+    double m_animationElapsedTime = 0.0;
+    float m_animationRate = 1.0f;
+    bool m_animationPaused = false;
 
     std::shared_ptr<const TextureProvider> m_texture = nullptr;
     const Material& m_material;

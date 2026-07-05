@@ -929,6 +929,10 @@ void CImage::pinpongFramebuffer (std::shared_ptr<const CFBO>* drawTo, std::share
 }
 
 void CImage::render () {
+    // Always advance, regardless of visibility/initialization — matches the old global-clock
+    // behavior, which never depended on either.
+    this->advanceAnimationTime ();
+
     // do not try to render something that did not initialize successfully
     if (!this->m_initialized) {
 	return;

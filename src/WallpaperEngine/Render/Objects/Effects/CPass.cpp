@@ -251,9 +251,7 @@ CPass::resolveTextureAnimationState (const std::shared_ptr<const TextureProvider
 	return state;
     }
 
-    double currentRenderTime = fmod (
-	static_cast<double> (this->getContext ().getDriver ().getRenderTime ()), this->m_renderable.getAnimationTime ()
-    );
+    double currentRenderTime = fmod (this->m_renderable.getAnimationElapsedTime (), this->m_renderable.getAnimationTime ());
 
     for (const auto& frameCur : texture->getFrames ()) {
 	currentRenderTime -= frameCur->frametime;

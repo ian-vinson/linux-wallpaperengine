@@ -170,6 +170,10 @@ void CParticle::setup () {
 }
 
 void CParticle::render () {
+    // Always advance, regardless of visibility/initialization — matches the old global-clock
+    // behavior, which never depended on either.
+    this->advanceAnimationTime ();
+
     if (!m_initialized || !m_particle.visible->value->getBool ()) {
 	return;
     }

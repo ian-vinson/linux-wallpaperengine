@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
+#include "WallpaperEngine/Render/Objects/CRenderable.h"
 #include "WallpaperEngine/Render/Objects/CSound.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
@@ -21,36 +22,169 @@ struct OpaqueScriptableObjectAdapter {
     WallpaperEngine::Scripting::ScriptableObject& object;
 };
 
-// no-op stand-in for ITextureAnimation.play()/stop()/pause() — see scriptableobject_get_texture_animation.
+// no-op stand-in for ITextureAnimation.play()/stop()/pause() on layer types that don't render
+// through CRenderable (CSound, CText) — see scriptableobject_get_texture_animation.
 JSValue scriptableobject_texture_animation_noop (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     return JS_UNDEFINED;
 }
 
+// Recovers the CRenderable a getTextureAnimation() controller was created for. The controller
+// functions are created with JS_NewCFunctionData() bound to the *original* thisLayer proxy
+// JSValue (which carries the real OpaqueScriptableObjectAdapter) as func_data[0] — not the
+// "anim" object itself, since a plain JS_NewObject() instance can't hold native opaque data
+// (JS_SetOpaque only works on objects of a registered custom class; see
+// ScriptableObjectAdapter::ScriptableObjectAdapter's registerType() call below).
+WallpaperEngine::Render::Objects::CRenderable* textureAnimationRenderableFromBoundData (JSValueConst* funcData) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (funcData[0], &classId));
+
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
+	|| !container->object.is<WallpaperEngine::Render::Objects::CRenderable> ()) {
+	return nullptr;
+    }
+
+    return container->object.as<WallpaperEngine::Render::Objects::CRenderable> ();
+}
+
+JSValue texture_animation_get_rate (
+    JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValueConst* funcData
+) {
+    auto* renderable = textureAnimationRenderableFromBoundData (funcData);
+
+    if (renderable == nullptr) {
+	return JS_ThrowTypeError (ctx, "getTextureAnimation().rate accessed on an invalid receiver");
+    }
+
+    return JS_NewFloat64 (ctx, renderable->getAnimationRate ());
+}
+
+JSValue texture_animation_set_rate (
+    JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValueConst* funcData
+) {
+    auto* renderable = textureAnimationRenderableFromBoundData (funcData);
+
+    if (renderable == nullptr) {
+	return JS_ThrowTypeError (ctx, "getTextureAnimation().rate assigned on an invalid receiver");
+    }
+
+    double rate = 1.0;
+    JS_ToFloat64 (ctx, &rate, argv[0]);
+    renderable->setAnimationRate (static_cast<float> (rate));
+
+    return JS_UNDEFINED;
+}
+
+JSValue texture_animation_play (
+    JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValueConst* funcData
+) {
+    auto* renderable = textureAnimationRenderableFromBoundData (funcData);
+
+    if (renderable == nullptr) {
+	return JS_ThrowTypeError (ctx, "getTextureAnimation().play() called on an invalid receiver");
+    }
+
+    renderable->setAnimationPaused (false);
+    return JS_UNDEFINED;
+}
+
+JSValue texture_animation_pause (
+    JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValueConst* funcData
+) {
+    auto* renderable = textureAnimationRenderableFromBoundData (funcData);
+
+    if (renderable == nullptr) {
+	return JS_ThrowTypeError (ctx, "getTextureAnimation().pause() called on an invalid receiver");
+    }
+
+    renderable->setAnimationPaused (true);
+    return JS_UNDEFINED;
+}
+
+JSValue texture_animation_stop (
+    JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValueConst* funcData
+) {
+    auto* renderable = textureAnimationRenderableFromBoundData (funcData);
+
+    if (renderable == nullptr) {
+	return JS_ThrowTypeError (ctx, "getTextureAnimation().stop() called on an invalid receiver");
+    }
+
+    renderable->stopAnimation ();
+    return JS_UNDEFINED;
+}
+
+JSValue texture_animation_set_frame (
+    JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValueConst* funcData
+) {
+    auto* renderable = textureAnimationRenderableFromBoundData (funcData);
+
+    if (renderable == nullptr) {
+	return JS_ThrowTypeError (ctx, "getTextureAnimation().setFrame() called on an invalid receiver");
+    }
+
+    if (argc < 1) {
+	return JS_ThrowTypeError (ctx, "setFrame() expects one argument");
+    }
+
+    int frame = 0;
+    JS_ToInt32 (ctx, &frame, argv[0]);
+
+    if (frame < 0) {
+	return JS_ThrowTypeError (ctx, "setFrame() expects a non-negative frame index");
+    }
+
+    renderable->setAnimationFrame (static_cast<uint32_t> (frame));
+    return JS_UNDEFINED;
+}
+
 // thisLayer.getTextureAnimation(): real Wallpaper Engine returns an ITextureAnimation controller
-// ({rate, play(), stop(), pause(), setFrame()}) that drives sprite-sheet playback. lwe's frame
-// selection (CPass.cpp) picks the current frame from the scene's single global render clock
-// modulo the texture's total animation duration — there is no per-object rate/pause/frame state
-// anywhere in the rendering pipeline to hook into, and wiring one in would mean changing that
-// shared timing logic for every renderable object, not just this API. So this returns an inert
-// stub object: `.rate` is a plain read/write number with no effect on playback, and
-// play/stop/pause/setFrame are no-ops. This is enough to stop `getTextureAnimation().stop()`-style
-// calls from throwing "not a function" and crashing scripts that use them, but does not actually
-// pause, seek, or change the speed of the rendered animation.
+// ({rate, play(), stop(), pause(), setFrame()}) that drives sprite-sheet playback. Backed by real
+// per-object state on CRenderable (m_animationElapsedTime/m_animationRate/m_animationPaused) —
+// CPass::resolveTextureAnimationState() reads that state instead of the scene's global render
+// clock for frame selection. Only CImage/CParticle inherit CRenderable; CSound/CText (any other
+// ScriptableObject) fall back to the original inert no-op stub, since they have no texture
+// animation state to control.
 JSValue scriptableobject_get_texture_animation (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+    const bool isRenderable
+	= container && container->magic == SCRIPTABLE_OPAQUE_MAGIC
+	&& container->object.is<WallpaperEngine::Render::Objects::CRenderable> ();
+
     JSValue anim = JS_NewObject (ctx);
 
-    JS_SetPropertyStr (ctx, anim, "rate", JS_NewFloat64 (ctx, 1.0));
-    JS_SetPropertyStr (
-	ctx, anim, "play", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "play", 0)
+    if (!isRenderable) {
+	JS_SetPropertyStr (ctx, anim, "rate", JS_NewFloat64 (ctx, 1.0));
+	JS_SetPropertyStr (
+	    ctx, anim, "play", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "play", 0)
+	);
+	JS_SetPropertyStr (
+	    ctx, anim, "stop", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "stop", 0)
+	);
+	JS_SetPropertyStr (
+	    ctx, anim, "pause", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "pause", 0)
+	);
+	JS_SetPropertyStr (
+	    ctx, anim, "setFrame", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "setFrame", 1)
+	);
+
+	return anim;
+    }
+
+    // JS_NewCFunctionData dups each bound JSValueConst internally, so passing this_val (borrowed
+    // from the caller) here is safe — the closure keeps its own reference.
+    JSValueConst boundData[] = { this_val };
+
+    JS_DefinePropertyGetSet (
+	ctx, anim, JS_NewAtom (ctx, "rate"),
+	JS_NewCFunctionData (ctx, texture_animation_get_rate, 0, 0, 1, boundData),
+	JS_NewCFunctionData (ctx, texture_animation_set_rate, 1, 0, 1, boundData), JS_PROP_ENUMERABLE
     );
+    JS_SetPropertyStr (ctx, anim, "play", JS_NewCFunctionData (ctx, texture_animation_play, 0, 0, 1, boundData));
+    JS_SetPropertyStr (ctx, anim, "pause", JS_NewCFunctionData (ctx, texture_animation_pause, 0, 0, 1, boundData));
+    JS_SetPropertyStr (ctx, anim, "stop", JS_NewCFunctionData (ctx, texture_animation_stop, 0, 0, 1, boundData));
     JS_SetPropertyStr (
-	ctx, anim, "stop", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "stop", 0)
-    );
-    JS_SetPropertyStr (
-	ctx, anim, "pause", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "pause", 0)
-    );
-    JS_SetPropertyStr (
-	ctx, anim, "setFrame", JS_NewCFunction (ctx, scriptableobject_texture_animation_noop, "setFrame", 1)
+	ctx, anim, "setFrame", JS_NewCFunctionData (ctx, texture_animation_set_frame, 1, 0, 1, boundData)
     );
 
     return anim;

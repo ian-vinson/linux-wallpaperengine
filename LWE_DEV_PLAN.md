@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-05 (ISoundLayer scripting implemented — `CSound` now scriptable with volume/isPlaying/play/stop/pause, new AudioStream pause/resume support, 356-wallpaper regression clean; composelayer diagonal-split also fully fixed this session — see Completed Items #1 and #10)
+**Last updated:** 2026-07-05 (real ITextureAnimation scripting implemented — CRenderable gains per-object rate/pause/elapsed-time state, CPass frame selection now reads it instead of the global clock; ISoundLayer scripting and the composelayer diagonal-split fix also landed this session — see Completed Items #1, #3, #10)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,11 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #3 — Real getTextureAnimation() implementation
-Currently a no-op stub. Real implementation requires per-object animation
-rate/pause state in the rendering pipeline (CPass.cpp).
-
-
 ### #4 — thisScene.destroyLayer()
 `getLayerCount()` implemented and verified 2026-07-04 (see commit table).
 `destroyLayer(layer: String|Number|ILayer): Boolean` remains — deliberately
@@ -363,7 +358,6 @@ live-reload and destroyLayer() work did, not a quick single-session add.
 
 ### #9 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
-
 
 ---
 
@@ -880,6 +874,127 @@ exact match with the pre-existing baseline (`3420062133`, `3713073223`,
 same known-unrelated GLSL-compile issues as always). Zero new failures on
 any sound-bearing wallpaper.
 
+### #3 — DONE 2026-07-05: real `getTextureAnimation()` implementation
+
+Replaced the inert no-op stub (`{rate, play(), stop(), pause(), setFrame()}`
+all doing nothing) with a real controller backed by new per-object state on
+`CRenderable`, matching the play/pause/stop rigor established this session
+for ISoundLayer (see #10).
+
+**Design**: added `m_animationRate` (float, default 1.0), `m_animationPaused`
+(bool), and `m_animationElapsedTime` (double, a *new* per-object virtual
+clock) to `CRenderable`. A new `advanceAnimationTime()` (called once per
+frame, as literally the first line of both `CImage::render()` and
+`CParticle::render()` — the only two `CRenderable` subclasses, confirmed via
+grep — *before* their own visibility/initialization early-returns, so it
+always runs regardless of visibility, matching the old global-clock
+behavior which never depended on either) adds `(g_Time - g_TimeLast) *
+m_animationRate` unless paused. `CPass::resolveTextureAnimationState()`
+now reads `fmod(m_renderable.getAnimationElapsedTime(), animationTime)`
+instead of `fmod(getDriver().getRenderTime(), animationTime)` — a
+one-line change; the frame-selection loop itself is untouched.
+
+**Backward-compatibility seeding (the key correctness trick)**:
+`CRenderable::setup()` seeds `m_animationElapsedTime = g_Time` (the
+*current* global clock value, not `0.0`) at setup time. Since every frame
+afterward adds the exact same delta `g_Time` itself advances by (at
+rate=1.0, never paused), this keeps `elapsed == g_Time` at all times *by
+construction* — not by coincidence — which is what guarantees default
+(unscripted) playback stays identical to the old global-clock-only
+behavior. This correctly handles both objects present at scene load
+(`g_Time == 0` at setup, same as an implicit `0.0` default) and objects
+created later via `thisScene.createLayer()` (`g_Time` already nonzero at
+that point, avoiding a phase-shift bug a naive `= 0.0` default would have
+introduced for dynamically-created layers).
+
+**Binding pattern**: the returned `anim` object's `rate` getter/setter and
+`play()`/`stop()`/`pause()`/`setFrame()` methods are created via
+`JS_NewCFunctionData()`, each bound (via QuickJS's data-closure mechanism,
+not a new adapter class) to the *original* `thisLayer` proxy `JSValue`
+(the one with the real `OpaqueScriptableObjectAdapter` opaque data) —
+necessary because a plain `JS_NewObject()`-created object like `anim`
+cannot itself hold native opaque data (`JS_SetOpaque()` only works on
+objects of a registered custom class, per `quickjs.c`'s
+`p->class_id >= JS_CLASS_INIT_COUNT` check; confirmed by reading the
+engine source directly rather than assuming). Gated on
+`is<CRenderable>()`: only `CImage`/`CParticle` get the real controller;
+`CSound`/`CText` (any other `ScriptableObject`) still get the original
+inert stub, since they have no texture animation state to control.
+
+**Design correction made mid-implementation**: initially assumed
+`setFrame(n)` should match `Frame::frameNumber == n`. Reading the real
+corpus data disproved this — `Frame::frameNumber` is documented as "the
+image index of this frame" (which atlas texture/mip to bind) and was
+observed to be `0` for *every* frame of a real 48-frame animation (a
+single shared atlas image, frames differentiated only by their per-frame
+UV sub-rect: `x`/`y`/`width1`/`width2`/`height1`/`height2`). `setFrame(n)`
+now walks to the *n*th list *position* in `texture->getFrames()` and sums
+`frametime` up to (not including) that position — matching the same
+"list order = playback order" convention `CPass`'s own frame-selection
+loop already relies on, not the unrelated `frameNumber` field.
+
+**Verification**: found a real 48-frame animated wallpaper in the corpus
+(`1442092399`, "Pixel Cyberpunk Coffee", `animTime=1.72s`) via a temporary
+corpus sweep, extracted its packed `.pkg` assets directly (using the
+documented format from `PackageParser.cpp`'s own `dumpPkg()`/`--pkg-validate`
+output — an unpadded `[nameLen][name][relOffset][size]` table) to attach a
+property-script for testing, since real WE scene.json script fields hold
+*inline JS source*, not file paths (confirmed the hard way: pointing
+`"script"` at a file path string produced `ReferenceError: scripts is not
+defined` — the string gets `eval`'d directly, so `scripts/foo.js` parses
+as the expression `scripts / foo . js`).
+- **Default-behavior-unchanged**: a naive before/after screenshot diff
+  initially looked alarming (real pixel differences at frame 90), but this
+  wallpaper has continuously-simulated rain/pedestrian content — a
+  same-code old-vs-old noise-floor comparison (two independent runs of the
+  *unmodified* binary) showed **more** natural run-to-run divergence
+  (111,627 differing samples) than old-vs-new (51,932), proving the change
+  adds no divergence beyond the scene's own inherent non-determinism —
+  consistent with the seeding proof above.
+- **pause() freeze**: screenshots taken at frame-delays 100 and 350 (a
+  250-frame / ~8s gap, spanning >19 would-be loop cycles at the 4x rate
+  active at the time) after a `pause()` at frame 60 were **byte-for-byte
+  identical** (matching MD5).
+- **stop() reset**: direct internal-state logging (elapsed/paused/selected
+  list-index/UV-rect — more reliable than full-scene screenshots here,
+  since this busy demo scene's camera parallax is mouse-position- and
+  timing-dependent and produced whole-scene pixel differences unrelated to
+  the sprite itself between temporally-separated runs) confirmed
+  `stop()` produces the *exact* identical state (`elapsed=0`, `paused=1`,
+  list-index `0`, UV rect `x=0,y=0,w1=1100,h1=582`) in two independently-
+  triggered test histories (one with a prior `rate=4` history, one at
+  default `rate=1`) — proving the reset is deterministic and
+  history-independent.
+- **play() after stop()**: confirmed `elapsed` counts up from `0` again
+  immediately after (`0.94` five frames later), not stuck and not resuming
+  from a stale value.
+- **rate**: confirmed exactly — over a 15-frame/0.5s-real-time window at
+  `rate=4`, elapsed advanced by exactly `2.01` (predicted: `0.5 * 4 =
+  2.0`).
+- **setFrame(20)**: manually computed the expected cumulative time from
+  the real per-frame `frametime` dump (20 frames × `0.03` = `0.6`) and the
+  expected list index after 5 more real frames at `rate=4`
+  (`0.6 + 5/30*4 ≈ 1.27`, landing ~23 frames into the `0.04`-frametime
+  tail past index 20 ⇒ predicted index ≈43) — the actual logged state
+  showed **`elapsed=1.54`, `selectedListIndex=43`**, matching the
+  prediction almost exactly (small gap from real per-frame timing not
+  being exactly `1/30s`).
+
+All temporary instrumentation (`ANIMPROBE`/`ANIMFRAMES`/`ANIMSTATE` debug
+logs in `CPass.cpp`) was fully reverted; final diff is only the real
+implementation.
+
+**Full 356-wallpaper regression**: **354 clean, 2 errors, 0 crashes**.
+The specific two failing IDs shifted this run (`2430021386` newly
+appeared, `3713073223` happened to pass) — investigated directly rather
+than assumed: both `2430021386`'s failure (`Could not find where to place
+includes for shader unit commands/copy`) and `3713073223`'s failure
+reproduce **identically on the unmodified pre-session baseline binary**
+(confirmed via `git stash` + rebuild + direct re-run of each), confirming
+this is pre-existing GLSL-compiler flakiness (already documented in this
+plan's history as non-deterministic) unrelated to this change, not a
+regression. Clean count stayed exactly 354/356 either way.
+
 ---
 
 ## API Implementation Status (vs lib.sceneScript.d.ts v2.8)
@@ -907,7 +1022,7 @@ any sound-bearing wallpaper.
 | cursorDown/Up/Move/Click event dispatch | ✅ |
 | ILayer.origin/scale/angles/visible/alpha/parallaxDepth | ✅ (now actually writes through to render state) |
 | ILayer.name / ILayer.id | ✅ |
-| ILayer.getTextureAnimation() | ⚠️ stub (no-op rate/play/stop/pause/setFrame) |
+| ILayer.getTextureAnimation() | ✅ (2026-07-05, real rate/play/stop/pause/setFrame — see #3 in Completed Items; CImage/CParticle only, other layer types keep the inert stub) |
 | ILayer.getChildren() | ✅ |
 | ILayer.getParent() | ✅ |
 | ISoundLayer (volume/isPlaying/play/stop/pause) | ✅ (2026-07-05, see #10 in Completed Items) |
