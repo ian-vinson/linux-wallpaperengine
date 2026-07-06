@@ -268,6 +268,16 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
 	    return nullptr;
 	}
 
+	// CParticle's constructor unconditionally dereferences *particleData.material->material in
+	// its member-initializer list (to build CRenderable's base), which can't contain a null
+	// check of its own. A particle definition with a missing/malformed "material" reference
+	// (e.g. MaterialParser::load() throwing, caught upstream in ObjectParser::parseParticle()
+	// leaving this null) must be rejected here, before ever reaching that constructor.
+	if (particleData.material == nullptr || particleData.material->material == nullptr) {
+	    sLog.error ("Particle system has no valid material, skipping: ", particleData.name);
+	    return nullptr;
+	}
+
 	renderObject = new Objects::CParticle (*this, particleData);
     } else if (object.is<CameraObject> ()) {
 	const auto& cam = *object.as<CameraObject> ();

@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (getTransformMatrix()/getAttachmentMatrix() shipped — CParticle real+parent-guarded, honest stubs elsewhere; closes #5's practically-achievable scope. One new bug found and tracked, not fixed: #11, a CParticle SIGSEGV on a null particle material)
+**Last updated:** 2026-07-06 (#11 done — CParticle null-material SIGSEGV fixed upstream in dispatchObjectType(), real crash reproduction before/after, code-proven disableParticles path unaffected; only #9 remains active)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -298,18 +298,6 @@ number always means the same thing across the whole document's history.
 
 ### #9 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
-
-### #11 — `CParticle` constructor SIGSEGV on a null/failed particle material
-Found 2026-07-06 as a side-effect of #5b's verification work, not fixed
-(kept strictly out of scope for that task). `CParticle::CParticle()`
-unconditionally dereferences `*particle.material->material` with no null
-check. If a particle's material fails to load (e.g. a parse exception
-swallowed upstream, leaving it null), this is a hard `SIGSEGV` at
-construction time rather than a graceful skip/error. Not observed in the
-real 356-wallpaper corpus (every wallpaper's particle materials happen to
-load successfully today), so this is a latent risk rather than a live
-symptom — but a real one, worth a defensive null check whenever picked up.
-Small, well-understood, likely a quick fix whenever it's picked up.
 
 ---
 
@@ -1264,6 +1252,80 @@ types, plus the entire attachment/bone-rig system — are all genuinely
 larger, separate undertakings, not follow-ups expected soon. No new
 priority item was opened for these; revisit only if a concrete need
 surfaces.
+
+### #11 — DONE 2026-07-06: `CParticle` constructor SIGSEGV on a null/failed particle material
+
+`CParticle::CParticle()` unconditionally dereferences
+`*particle.material->material` in its member-initializer list (building
+`CRenderable`'s base) — a location that structurally can't contain a null
+check of its own, so the fix had to live upstream, in
+`CScene::dispatchObjectType()`, the exact function deciding whether to
+construct a `CParticle` at all. It already had the right pattern one
+branch away: the `disableParticles` check does `sLog.debug(...); return
+nullptr;` before ever calling `new Objects::CParticle(...)`, and the
+caller (`createObject()`) already handles a `nullptr` return gracefully.
+Added a second check right next to it:
+```cpp
+if (particleData.material == nullptr || particleData.material->material == nullptr) {
+    sLog.error ("Particle system has no valid material, skipping: ", particleData.name);
+    return nullptr;
+}
+```
+Confirmed the real types first rather than assuming: `ParticleData::material`
+is `ModelUniquePtr` (`std::unique_ptr<ModelStruct>`), `ModelStruct::material`
+is `MaterialUniquePtr` (`std::unique_ptr<Material>`) — both genuinely
+null-checkable. The first is null when `ObjectParser::parseParticle()`'s
+`is_string()` branch is never taken (malformed/missing `"particle"`
+field); the second is null when `MaterialParser::load()` throws
+(caught and logged upstream, leaving a `ModelStruct` with no material).
+Uses `sLog.error()` (never compiled out) rather than `sLog.debug()`
+(compiled to nothing under this release build's `NDEBUG`) — deliberately
+distinguishing "a real broken asset" from `disableParticles`' intentional,
+silent, user-configured skip.
+
+**Verification — real crash reproduction, not just code review**:
+reconstructed the exact malformed fixture from #5b's original discovery
+(`"particle": ["particles/example.json"]` — an array where the parser
+expects a plain string, so `parseParticle()`'s JSON stays empty and no
+material ever loads) alongside a second, correctly-formed particle object
+in the same scene. `git stash`'d the fix, rebuilt, ran it: **reproduced
+the exact original SIGSEGV** — confirming the bug is real and this
+fixture genuinely triggers it, not assumed from the code alone. Restored
+the fix, rebuilt, ran again: no crash — `Particle system has no valid
+material, skipping: BrokenParticle`, followed by the second, valid
+particle object loading and initializing completely normally in the same
+scene. Confirmed both "broken system skipped" and "rest of the scene
+unaffected."
+
+**`disableParticles` path confirmed unaffected by code proof, not just
+testing**: `sLog.debug()` (`Log.h`) compiles to a complete no-op under
+`NDEBUG`, and this is a release (`-DNDEBUG`) build — since that branch is
+completely untouched and still returns `nullptr` via the same
+debug-logged path, its behavior is provably byte-for-byte identical
+before and after this change, confirmed further by running with
+`--disable-particles` directly and observing no "valid material" error
+line (consistent with the debug-only branch being taken instead, as
+expected).
+
+**Full 356-wallpaper regression: 354 clean, 2 errors, 0 crashes** — same
+count as the immediately prior baseline, but the specific pair of failing
+wallpapers was investigated individually rather than accepted on count
+alone (matching this session's established pattern of run-to-run
+shader-pipeline flakiness in *which* wallpapers fail, not just *how
+many*): one was the same documented pre-existing GLSL flake
+(`3420062133`); the other, new to this specific run (`3450697231`,
+"Horror Anime Girl"), traced to a third-party shader's malformed JSON
+combo metadata (`json.exception.parse_error.101`, matched twice by
+`batch_test.py`'s regex table against two different substrings of the
+same single error) — confirmed this fix's own new log line never appears
+anywhere in that wallpaper's output, zero involvement. Separately,
+`2430021386` (flagged in #5b's own regression run) happened not to appear
+in *this* run's failure list — rather than read that as "fixed by
+coincidence," re-reproduced its exact original failure in isolation
+immediately afterward and confirmed it's still broken, identically,
+regardless of this change — consistent with the already-established
+environment/load-order-sensitive flakiness in exactly which shader-setup
+failures surface on a given run, not a real fluctuation in root causes.
 
 
 
