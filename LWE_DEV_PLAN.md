@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#9a done — CEF ICU bootstrap crash fixed, real root cause was a build-tree RPATH ordering bug found via a custom open()-tracing shim, not the CefSettings fields initially suspected; #9 itself stays open — most web wallpapers now boot without crashing but render solid black, a separate undiagnosed problem, plus the 14th wallpaper's unrelated JSON parsing bug remains untouched)
+**Last updated:** 2026-07-06 (#9: the "black rendering" issue investigated and refuted — not a real bug in this fork's CEF integration at all, but a screenshot-timing race in the diagnostic methodology plus a subset of wallpapers that are correctly black by their own config; CEF's GPU/compositor pipeline directly proven working via a real dumped WebGL frame. Web wallpaper support may be more functional than believed — real next step is re-verifying with a correct wait mechanism, not yet done. #9a's ICU/RPATH fix remains the only shipped code change)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -356,33 +356,73 @@ directly (not just 2-3)**:
   a `project.json`/property-schema parsing exception, deterministic across
   3 reruns, completely unrelated to the CEF/ICU issue.
 
-**Status update 2026-07-06**: the ICU bootstrap crash (the 13-wallpaper
-shared blocker) is **fixed and verified — see #9a in Completed Items**.
-`#9` itself stays open, because fixing that crash did not make web
-wallpapers actually work — it revealed a **separate, deeper, still-
-undiagnosed problem**: most of the 13 now boot without crashing but render
-**solid black**, with zero errors logged. Only one of ~9 checked so far
-(a Minecraft redstone-clock wallpaper) shows genuine rendered content,
-which is enough to prove the CEF→texture→screen pipeline mechanism works
-end-to-end in principle — the black-rendering issue is affecting most
-content, not the whole pipeline being broken. Leading hypothesis, not yet
-investigated: CEF's own internal GPU/compositor process silently failing
-to produce a frame in this sandboxed Wayland/NVIDIA environment (would be
-consistent with limitations already noted in earlier `WE_DOCS_REFERENCE.md`
-research), but this is genuinely unconfirmed — could equally be something
-else specific to this fork's `RenderHandler::OnPaint` texture upload path,
-or something else entirely. The 14th wallpaper's separate JSON
-type-coercion parsing bug also remains untouched, confirmed still failing
-identically, unrelated to any of this.
+**Status update 2026-07-06 (part 1)**: the ICU bootstrap crash (the
+13-wallpaper shared blocker) is **fixed and verified — see #9a in
+Completed Items**.
 
-**Revised scope estimate, updated**: what remains is genuinely a fresh
-investigation — real root-cause work into why CEF renders black for most
-(not all) content in this environment, plus the small, separate,
-still-unattempted JSON parsing fix for the 14th wallpaper. Given how the
-ICU crash investigation went (initial hypothesis tested and found to do
-nothing, real cause found through actual tracing rather than more
-guessing), treat the black-rendering issue with the same expectation —
-it may not be what it first appears to be either.
+**Status update 2026-07-06 (part 2) — the "black rendering" issue was
+never a real bug in this fork's CEF integration.** Investigated with the
+same rigor as the ICU crash (differential comparison, real CEF-side
+diagnostic visibility this fork never had before, direct pixel-level
+instrumentation) and the leading GPU/compositor-failure hypothesis was
+**refuted by direct, positive evidence**, not just found unlikely:
+- Content complexity was ruled out first — the *simplest* wallpaper
+  checked (two plain `<img>` tags, no canvas, no video) also rendered
+  black, disproving "GPU-accelerated content is the problem."
+- Added a temporary `CefDisplayHandler` (`OnConsoleMessage`/`OnLoadError`)
+  — this fork had **zero visibility into CEF's own console/load
+  diagnostics** before this. Revealed several "black" wallpapers
+  (`864286576`/"Nervous Dog", the "Audio Visualizer"/"canvas_circle"
+  wallpapers) have `backgroundcolor: "0 0 0"` with an **empty**
+  `backgroundimage` by their own configuration — their black appearance
+  is genuinely correct, expected behavior for that config, not a
+  rendering defect at all.
+- For a wallpaper loading real external content (`"Cat"`, loading
+  three.js/TweenMax from CDN URLs with no bundled local assets), dumped
+  `RenderHandler::OnPaint`'s raw buffer to a real PNG and confirmed CEF
+  renders a **complete, correct, full-color 3D WebGL scene** — direct
+  positive proof the GPU/compositor pipeline works correctly in this
+  environment. Independently confirmed via `glGetTexImage` (reading GL's
+  own texture storage, not CEF's buffer) that the upload into the shared
+  texture also succeeded with zero GL errors and real pixel data.
+- Yet `WallpaperApplication::takeScreenshot()`'s own `glReadPixels` on
+  that *exact same* texture/FBO returned all zero. Adding wall-clock
+  timestamps resolved the contradiction: **the screenshot was firing
+  before CEF had painted anything at all**. `--screenshot-delay` counts
+  this fork's own render-loop frames, which run in an unthrottled burst
+  during early startup — elapsing in a tiny fraction of real wall-clock
+  time, nowhere near enough for CEF's genuinely async (sometimes
+  network-round-trip-dependent) page load to finish. The one wallpaper
+  that appeared to "work" in the prior session's checks only did so
+  because it happened to finish loading fast enough to beat the premature
+  screenshot in that specific run — confirmed by rerunning it with a
+  smaller delay, where it **also** came back black.
+
+**This means web wallpaper support may already be substantially more
+functional than believed** — the apparent "most wallpapers render black"
+symptom was a diagnostic-methodology artifact (frame-count delay racing
+against real async load time), mixed with a subset of wallpapers that are
+correctly, by-design, black. All temporary instrumentation
+(`RenderHandler.cpp`, `CWallpaper.cpp`, `WallpaperApplication.cpp`,
+`BrowserClient.h/.cpp`) was fully reverted; the tree is back to exactly
+the prior committed (#9a) state, rebuilt clean, confirmed via empty
+`git status`.
+
+**Real next step, not yet done**: re-verify actual web wallpaper
+rendering with a *correct* wait mechanism — either a genuine wall-clock
+delay, or waiting for `OnLoadEnd`/a stable frame count before taking a
+screenshot, instead of the current frame-counted `--screenshot-delay`.
+This would reveal the TRUE current state of web wallpaper rendering
+across the local corpus, which is now genuinely unknown in either
+direction — could turn out to be mostly working already, or could surface
+real remaining bugs once measured properly. The frame-counted
+`--screenshot-delay` race is itself arguably a real, separate, smaller
+bug worth its own fix (a diagnostic-tooling issue, not something affecting
+real interactive use — a live-running wallpaper isn't racing against a
+one-shot startup screenshot the way this specific verification flow is),
+but wasn't touched here since this was discovery/diagnosis only. The 14th
+wallpaper's separate JSON type-coercion parsing bug also remains
+untouched, confirmed unrelated to any of this.
 
 ---
 
