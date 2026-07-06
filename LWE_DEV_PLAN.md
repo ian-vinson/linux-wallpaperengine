@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#11 done — CParticle null-material SIGSEGV fixed upstream in dispatchObjectType(), real crash reproduction before/after, code-proven disableParticles path unaffected; only #9 remains active)
+**Last updated:** 2026-07-06 (#9 completely re-scoped — "T7" untraceable/likely stale external reference; real investigation found web wallpaper support is genuine and mostly working, with the actual blocker being two specific bugs: a likely-small CEF resource-path fix unlocking 13/14 local web wallpapers sharing one root cause, plus a separate small JSON parsing bug for the 14th. Note: a subagent flagged a prompt-injection artifact found in a tool result during this investigation — correctly ignored, worth being aware of)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,8 +296,76 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #9 — T7 upstream rebase (web wallpapers)
-14+ web wallpapers blocked. Large dedicated session.
+### #9 — REVISED 2026-07-06: not "T7 upstream rebase" — two specific, much smaller bugs found instead
+
+**"T7" could not be determined and is likely a stale/external reference.**
+Checked all git history/branches/tags on this fork and its upstream
+(Almamu/linux-wallpaperengine) — nothing. Checked the web — nothing. Traced
+the phrase back to the very first commit that ever created this dev plan
+file, meaning it predates all AI-assisted work on this repo entirely — it
+was seeded from something external (a personal note, an external tracker)
+that isn't recoverable from the repo or public information. If it matters,
+it needs to come from Ian directly; not guessed at further.
+
+**Real investigation found the actual scope is much smaller and better
+defined than the old framing suggested.** Web wallpaper support in this
+fork is genuinely real, not dead scaffolding: `CWeb`
+(`Render/Wallpapers/CWeb.h/.cpp`) is a full `CWallpaper` subclass alongside
+`CScene`/`CVideo` — creates a real offscreen CEF browser
+(`CefBrowserHost::CreateBrowserSync`), loads the wallpaper's `index.html`
+through a custom `wp<id>://` scheme handler backed by the real asset
+locator, uploads CEF's framebuffer into the same GL-texture/FBO pipeline
+scene wallpapers use (`RenderHandler::OnPaint`), forwards mouse events, and
+injects both `applyUserProperties` and a 128-value audio-spectrum shim as
+JS. Dispatch is symmetric with scene/video
+(`ProjectParser::parseType` → `Project::Type_Web` → `WallpaperParser::parseWeb`
+→ `CWallpaper::fromWallpaper`'s `is<Web>()` branch), with
+`WallpaperApplication::setupBrowser()`/`ensureBrowserForProject()` lazily
+constructing the CEF context only when a web project is actually loaded —
+no special-cased error path anywhere. Two known, smaller gaps noted along
+the way: media-integration and RGB-hardware plugin listeners (both
+documented in real WE's API per `WE_DOCS_REFERENCE.md`) are entirely
+absent from `CWeb`, and `CWeb.cpp` has a self-acknowledged
+flicker/frame-timing compromise in its own comments — neither investigated
+further, both smaller/separate from the main blocker below.
+
+**Also worth noting**: `batch_test.py`'s regression (run constantly all
+session as the trusted "354-356/356 clean" baseline) **only ever tests
+`type == "scene"` wallpapers** — web wallpapers have never been covered by
+any of this session's verification runs at all. Not a bug in the harness,
+just a real scope gap worth being aware of.
+
+**The actual blocker, found by running all 14 local web wallpapers
+directly (not just 2-3)**:
+- **13 of 14 crash identically, deterministically, with the exact same
+  backtrace, every time** — a single shared root cause, not 13 separate
+  content bugs. A Chromium `CHECK()` failure in
+  `InitializeICUFromDataFile()` (`base/i18n/icu_util.cc:297`) —
+  *"Invalid file descriptor to ICU data received"* — inside
+  `CefInitialize()`, called from `WebBrowserContext`'s constructor, at
+  browser bootstrap, before any wallpaper-specific content is ever
+  touched. `icudtl.dat` (10MB) does physically exist right next to the
+  binary — this is a resource-*path-resolution* problem, not a
+  missing-file problem. Strong, specific lead already spotted:
+  `WebBrowserContext.cpp` has `resources_dir_path`/`locales_dir_path`/
+  `framework_dir_path` all commented out (lines 79-82), leaving CEF to its
+  own (evidently failing) default resource-path resolution.
+- **The 14th (`1747779570`, "2AM Cyberpunk City") fails differently and
+  earlier**, before ever reaching CEF at all:
+  `[json.exception.type_error.302] type must be string, but is boolean` —
+  a `project.json`/property-schema parsing exception, deterministic across
+  3 reruns, completely unrelated to the CEF/ICU issue.
+
+**Revised scope estimate**: this now looks like two specific, independently
+tractable bugs rather than one large "rebase" project — (1) a likely-small
+CEF resource-path configuration fix (filling in the three commented-out
+paths correctly) that could plausibly unlock all 13 wallpapers sharing that
+one root cause at once, and (2) a separate, unrelated small JSON
+type-coercion parsing bug for the 14th. Neither has been touched yet — this
+was discovery only. Given how much smaller and more specific this now
+looks compared to the original framing, this is a strong candidate to
+actually pick up soon rather than remain indefinitely deferred as "large
+dedicated session."
 
 ---
 
