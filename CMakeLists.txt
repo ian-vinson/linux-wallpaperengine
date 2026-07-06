@@ -527,6 +527,10 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Scripting/Adapters/VectorAdapter.cpp
     src/WallpaperEngine/Scripting/Adapters/ScriptableObjectAdapter.h
     src/WallpaperEngine/Scripting/Adapters/ScriptableObjectAdapter.cpp
+    src/WallpaperEngine/Scripting/Adapters/Mat4Adapter.h
+    src/WallpaperEngine/Scripting/Adapters/Mat4Adapter.cpp
+    src/WallpaperEngine/Scripting/Adapters/Mat3Adapter.h
+    src/WallpaperEngine/Scripting/Adapters/Mat3Adapter.cpp
 
     src/WallpaperEngine/Scripting/Modules/ColorModule.h
     src/WallpaperEngine/Scripting/Modules/ColorModule.cpp

@@ -1,5 +1,7 @@
 #include "ScriptEngine.h"
 
+#include "Adapters/Mat3Adapter.h"
+#include "Adapters/Mat4Adapter.h"
 #include "Adapters/ScriptableObjectAdapter.h"
 #include "Modules/ColorModule.h"
 #include "Modules/MathModule.h"
@@ -223,6 +225,9 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
 	.vec2 = std::unique_ptr<Adapters::VectorAdapter<2>> (new Adapters::VectorAdapter<2> (*this)),
 	.object
 	= std::unique_ptr<Adapters::ScriptableObjectAdapter> (new Adapters::ScriptableObjectAdapter (*this, "ILayer")),
+	// Mat4 must exist before Mat3 — Mat3::fromMat4() reads back through m_adapters.mat4.
+	.mat4 = std::unique_ptr<Adapters::Mat4Adapter> (new Adapters::Mat4Adapter (*this)),
+	.mat3 = std::unique_ptr<Adapters::Mat3Adapter> (new Adapters::Mat3Adapter (*this)),
     };
 
     this->m_engineObject = std::make_unique<EngineObject> (*this, scene);
@@ -274,21 +279,26 @@ ScriptEngine::~ScriptEngine () {
 
     JS_FreeValue (this->m_context, this->m_globalThis);
 
-    // Release each vector adapter's own reference to its prototype object now, but do NOT
+    // Release each vector/matrix adapter's own reference to its prototype object now, but do NOT
     // destroy the adapters themselves yet (see note below).
     this->m_adapters.vec4->releaseBeforeRuntimeShutdown ();
     this->m_adapters.vec3->releaseBeforeRuntimeShutdown ();
     this->m_adapters.vec2->releaseBeforeRuntimeShutdown ();
+    this->m_adapters.mat4->releaseBeforeRuntimeShutdown ();
+    this->m_adapters.mat3->releaseBeforeRuntimeShutdown ();
 
-    // Note: m_adapters (vec2/vec3/vec4/object) is intentionally NOT reset here. JS_FreeRuntime()
-    // below runs a final GC pass that finalizes any still-alive Vec2/Vec3/Vec4/ILayer JS objects.
-    // Vec2/3/4's finalizer calls back into its adapter (VectorAdapter::free(), to drop the
-    // adapter-owned temporal DynamicValue). ILayer's finalizer does not need to call back into
-    // ScriptableObjectAdapter — it only frees its own small opaque wrapper struct, which never
-    // owned the underlying CObject (that's owned by CScene) — but the adapters must still stay
-    // alive until after JS_FreeRuntime() returns regardless, since the wrapper's own `adapter`
-    // reference and exotic-method function pointers are only valid while it does. They are torn
-    // down automatically afterwards as ScriptEngine's members are destructed.
+    // Note: m_adapters (vec2/vec3/vec4/object/mat4/mat3) is intentionally NOT reset here.
+    // JS_FreeRuntime() below runs a final GC pass that finalizes any still-alive
+    // Vec2/Vec3/Vec4/ILayer/Mat4/Mat3 JS objects. Vec2/3/4's finalizer calls back into its
+    // adapter (VectorAdapter::free(), to drop the adapter-owned temporal DynamicValue). ILayer's
+    // finalizer does not need to call back into ScriptableObjectAdapter — it only frees its own
+    // small opaque wrapper struct, which never owned the underlying CObject (that's owned by
+    // CScene). Mat4/Mat3's finalizer doesn't call back into its adapter either — the opaque
+    // struct embeds the glm::mat4/mat3 by value, so freeing it needs nothing from the adapter.
+    // Regardless, all adapters must still stay alive until after JS_FreeRuntime() returns, since
+    // the wrapper's own `adapter` reference and exotic-method function pointers are only valid
+    // while it does. They are torn down automatically afterwards as ScriptEngine's members are
+    // destructed.
 
     this->m_consoleObject.reset ();
     this->m_engineObject.reset ();

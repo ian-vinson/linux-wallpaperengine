@@ -37,6 +37,8 @@ namespace WallpaperEngine::Scripting {
 class ScriptPropertiesObject;
 namespace Adapters {
     class ScriptableObjectAdapter;
+    class Mat4Adapter;
+    class Mat3Adapter;
 }
 using namespace WallpaperEngine::Data::Model;
 
@@ -56,6 +58,8 @@ public:
 	std::unique_ptr<Adapters::VectorAdapter<3>> vec3;
 	std::unique_ptr<Adapters::VectorAdapter<2>> vec2;
 	std::unique_ptr<Adapters::ScriptableObjectAdapter> object;
+	std::unique_ptr<Adapters::Mat4Adapter> mat4;
+	std::unique_ptr<Adapters::Mat3Adapter> mat3;
     };
 
     ~ScriptEngine ();

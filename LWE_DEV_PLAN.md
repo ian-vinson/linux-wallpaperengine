@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (thisScene.destroyLayer() implemented with full lifecycle-safety design — real deferred semantics, stale-reference safety via id re-resolution, plus two independently-discovered bugs fixed as prerequisites: a permanent ScriptableObjectAdapter opaque-wrapper leak and a missing FBOProvider removal path; see Completed Items #4)
+**Last updated:** 2026-07-06 (Mat4/Mat3 shipped as real standalone SceneScript classes, closing the biggest blocker in #5's original scope — getTransformMatrix()/attachments remain, now genuinely smaller; also corrected a stale API-status row for media event hooks found while updating this table)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,34 +296,29 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #5 — ILayer.getTransformMatrix() / getAttachmentMatrix() / getAttachmentOrigin() / getAttachmentAngles() — SCOPE MUCH BIGGER THAN EXPECTED, DEFERRED
-Originally scoped (incorrectly) as a small task alongside getParent(). Actual
-investigation (2026-07-04) found:
-- `Mat4` is a full-featured JS class per lib.sceneScript.d.ts — 1 constructor,
-  7 static factories (identity/fromTranslation/fromScale/fromRotation/
-  fromEuler/fromBasis/lookAt/compose), and ~20 instance methods (translation/
-  right/up/forward accessors, add/subtract/multiply, translate/rotate/scale,
-  transformPoint/transformDirection, transpose/inverse/determinant/
-  extractEuler/normalMatrix/decompose/copy/equals/toString). `normalMatrix()`
-  returns a *separate* `Mat3` class, also undefined in this codebase.
-  Comparable in scope to the entire VectorAdapter (Vec2/3/4) effort from the
-  July 3 session — arguably bigger. Confirmed via repo-wide grep: zero Mat4/
-  glm::mat4 exposure anywhere in Scripting/, so this is a from-scratch build,
-  not a small addition.
-- getTransformMatrix() itself only becomes trivial AFTER Mat4 exists, and
-  even then needs per-object-type verification (CParticle has stored
-  m_modelMatrix; CImage/CText's model matrix source wasn't confirmed —
-  needs checking whether it's computed and stored the same way or built
-  inline without persistent storage).
-- getAttachmentMatrix()/getAttachmentOrigin()/getAttachmentAngles() are
-  blocked entirely on a bone/puppet-warp rig system — confirmed via
-  repo-wide grep that zero attachment/puppet/bone infrastructure exists in
-  this fork at all. These would need to be honest stubs (undefined/clear
-  "not supported" error) rather than real implementations, unless building
-  actual puppet-warp support becomes its own dedicated project.
+### #5 — PARTIALLY DONE: `Mat4`/`Mat3` shipped 2026-07-06; `getTransformMatrix()`/attachments remain, now genuinely smaller
 
-Deferred — needs its own dedicated multi-session scoping the same way the
-live-reload and destroyLayer() work did, not a quick single-session add.
+**`Mat4`/`Mat3` as standalone JS classes: DONE, see #5a in Completed
+Items.** This was the biggest, previously-blocking piece of this item's
+original scope — with real matrix math now available, the remaining work
+is meaningfully smaller than the original "SCOPE MUCH BIGGER THAN
+EXPECTED" framing suggested, though still real work, not trivial:
+
+- `ILayer.getTransformMatrix()` is now unblocked in principle (`Mat4`
+  exists to wrap the result in), but still needs the per-object-type
+  verification flagged originally: confirm whether `CImage`/`CText` store
+  a persistent model matrix the same way `CParticle` does
+  (`m_modelMatrix`), or build one inline without persistent storage —
+  not yet checked.
+- `getAttachmentMatrix()`/`getAttachmentOrigin()`/`getAttachmentAngles()`
+  remain **fully blocked** on a bone/puppet-warp rig system — confirmed via
+  repo-wide grep (as of 2026-07-04) that zero attachment/puppet/bone
+  infrastructure exists in this fork at all. These still need to be honest
+  stubs (undefined/clear "not supported" error) rather than real
+  implementations, unless building actual puppet-warp support becomes its
+  own dedicated project — that part of the original scope is unchanged and
+  still deferred indefinitely.
+
 
 
 ### #9 — T7 upstream rebase (web wallpapers)
@@ -1100,6 +1095,89 @@ positive, not an actual leftover `TEMP` marker). No design assumptions
 broke during implementation — the reviewed plan held up exactly as
 written.
 
+### #5a — DONE 2026-07-06: `Mat4`/`Mat3` shipped as real, standalone SceneScript classes
+
+Implemented as the deliberately-scoped first slice of #5 (matrix math
+only — `getTransformMatrix()`/attachments left for a later slice). Built
+against the exact authoritative spec in `lib.sceneScript.d.ts` (now
+tracked in the repo root as of this session, rather than only existing as
+an ad-hoc upload) — `Mat4` (8 static factories, 21 instance methods) and
+`Mat3` (7 static factories, 17 instance methods, with a real
+cross-dependency: `Mat3.fromMat4()` takes a `Mat4`; `Mat4.normalMatrix()`
+returns a `Mat3`).
+
+**Pattern**: read all 1,625 lines of `VectorAdapter.h`/`.cpp` first and
+followed its established conventions directly — the opaque-struct-with-
+magic pattern, `ObjectAdapter::registerType()`/`JS_NewClassID`/
+`JS_NewClass` registration, `JS_NewCFunctionMagic` + `JS_SetConstructor`,
+and critically the `container->adapter` back-reference trick that lets
+instance methods build new results without any magic/map lookup (only the
+constructor and static factories need the
+`g_mat4AdapterInstances`/`g_mat3AdapterInstances` maps, mirroring
+`vectorAdapterInstances<N>`). Two deliberate, justified departures from
+the `Vec2/3/4` pattern: (1) no exotic get/set property methods needed —
+`Vec` needs them because `x`/`y`/`z`/`w` collide with many prototype
+method names, but `Mat4`/`Mat3` have exactly one non-method property
+(`m`), so an ordinary `JS_DefinePropertyGetSet` pair on the prototype is
+simpler and avoids `Vec`'s "exotic get falls back to the prototype chain"
+machinery entirely; (2) the opaque struct embeds `glm::mat4`/`glm::mat3`
+directly by value rather than referencing a `DynamicValue` — confirmed via
+grep that `DynamicValue.h` has zero `Mat4`/`Mat3` support (no
+scene-property use case exists for a raw matrix), so there's no
+`m_values`/`free(id)` tracking needed; the finalizer just deletes the
+container. `m`'s array layout is GLM's native column-major flat order,
+confirmed matching `CPass.cpp`'s existing `glUniformMatrix4fv(...,
+GL_FALSE, glm::value_ptr(mat))` convention (no-transpose upload) — the
+established codebase convention, not an arbitrary choice.
+
+**Verification — every requested category, with real computed values,
+not just pass/fail**, run against the actual compiled binary via a real
+scratch wallpaper project:
+- `fromTranslation((1,2,3)).transformPoint((0,0,0))` → `(1,2,3)` ✓
+- `fromScale(2)` / `fromScale((2,3,4))` on `(1,1,1)` → `(2,2,2)` /
+  `(2,3,4)` ✓
+- `fromRotation(90°, Z)` on `(1,0,0)` → `(0,1,0)` ✓ (standard right-hand
+  rule)
+- `fromEuler(0,0,90)` on `(1,0,0)` → `(0,1,0)` ✓; `fromEuler`/
+  `extractEuler` round-trips `(12,-34,56)` → `(12,-34,56)` ✓
+- `fromBasis(identity)`, `lookAt(eye).transformPoint(eye)` → no-op /
+  `(0,0,0)` ✓
+- `translation()` as getter/setter: getter reads `(1,2,3)`; after
+  `.translation((9,8,7))`, both the return value and `m[12..14]` read back
+  `(9,8,7)` — the setter genuinely mutates, not just returns a value ✓
+- `multiply()` polymorphism: `Mat4×Mat4` → `(1,1,0)`; `Mat4×Vec4` (scale
+  2) → `(2,2,2,1)`; `Mat4×Number` (2) → `diag(2,2,2,2)` — all three
+  argument-type branches confirmed distinctly ✓
+- **`normalMatrix()` vs `Mat3.fromMat4()` on the same source matrix
+  (`fromScale(2,3,4)`)** — the specific test designed to prove these
+  aren't accidentally aliased: `normalMatrix()` → `diag(0.5, 0.333,
+  0.25)`, `fromMat4()` → `diag(2, 3, 4)` — genuinely, provably different
+  operations ✓
+- `decompose(compose(t,r,s))` round-trip:
+  `t=(5,-3,2)/r=(10,20,30)/s=(1.5,2,0.5)` all recovered exactly within
+  tolerance ✓
+- `m.multiply(m.inverse())` → `diag(1,1,1,1)`, `.equals(identity)` → `true`
+  ✓
+- `equals()`: `true` for an equal-but-differently-constructed matrix,
+  `false` for one differing by `0.5` in a single component ✓
+- `Mat3`'s full analogous 2D suite (translation, rotation/`angle()`,
+  decompose/compose, inverse, equals, toString) — all passed with the same
+  rigor ✓
+
+Build clean under this project's `-Wall -Werror`. **Full 356-wallpaper
+regression: 355 clean, 1 error, 0 crashes** — the single failure
+(`3420062133`, "Chainsaw Man",
+`GLSL_ERROR/OBJECT_SETUP_FAIL/SHADER_IMPLICIT_CAST`) is a shader-compile
+issue with zero scripting involvement, confirmed identical across at
+least three prior regression runs this session as pre-existing,
+already-documented flakiness — not a regression. Zero new failures
+anywhere in the corpus, consistent with this being a purely additive
+change.
+
+**Remaining from the original #5 scope**: see the still-active entry
+above — `getTransformMatrix()` wiring and the full attachment/bone-rig
+system are separate, not addressed by this slice.
+
 
 
 ---
@@ -1139,9 +1217,13 @@ written.
 | WEColor (hsv2rgb, rgb2hsv, normalizeColor, expandColor) | ✅ |
 | Vec2/3/4 constructors (all args read correctly) | ✅ |
 | Vec2/3/4 prototype methods (full set) | ✅ |
+| Mat4 (8 static factories + 21 instance methods) | ✅ (2026-07-06, see #5a in Completed Items) |
+| Mat3 (7 static factories + 17 instance methods) | ✅ (2026-07-06, see #5a in Completed Items) |
+| ILayer.getTransformMatrix() | ❌ (unblocked in principle now Mat4 exists, but needs per-object-type model-matrix verification — see #5) |
+| ILayer.getAttachmentMatrix() / getAttachmentOrigin() / getAttachmentAngles() | ❌ (blocked on a bone/puppet-warp rig system that doesn't exist in this fork at all — see #5) |
 | applyUserProperties(changedProps) | ✅ (load-time full-set + live changed-only via --properties-file/SIGUSR1, fully verified end-to-end 2026-07-04) |
 | resizeScreen(size) / destroy() | ❌ |
-| media* event hooks | ❌ |
+| media* event hooks (mediaPropertiesChanged/mediaPlaybackChanged/mediaTimelineChanged/mediaThumbnailChanged) | ✅ (confirmed working end-to-end 2026-07-04 with real MPRIS playback — this row was stale, see #2 in Completed Items) |
 
 ---
 
