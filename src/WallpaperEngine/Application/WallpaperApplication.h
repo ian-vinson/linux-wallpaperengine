@@ -162,6 +162,15 @@ private:
      */
     void takeScreenshot (const std::filesystem::path& filename) const;
 
+    /**
+     * Whether every currently-active CWeb wallpaper has finished loading its main frame
+     * (CefLoadHandler::OnLoadEnd). Always true if there are no web wallpapers active. CEF's page
+     * load is async and can take real wall-clock time with no fixed relationship to this app's
+     * own render-loop frame count, so --screenshot must not assume a frame-count delay alone
+     * means a web wallpaper's content actually exists yet — see m_nextFrameScreenshot's use.
+     */
+    [[nodiscard]] bool allWebWallpapersLoaded () const;
+
     struct ActivePlaylist {
 	ApplicationContext::PlaylistDefinition definition;
 	std::vector<std::size_t> order;
@@ -202,6 +211,19 @@ private:
     bool m_isPaused = false;
     bool m_screenShotTaken = false;
     uint32_t m_nextFrameScreenshot = 0;
+    // Hard cap on how many extra frames --screenshot will wait for web wallpapers to finish
+    // loading beyond m_nextFrameScreenshot, so a wallpaper whose page never fires OnLoadEnd
+    // (broken content, network never resolving, etc.) can't stall the screenshot forever.
+    static constexpr uint32_t MAX_WEB_LOAD_WAIT_FRAMES = 600;
+    // CefLoadHandler::OnLoadEnd only means the HTML/JS/CSS document itself finished loading —
+    // many real pages then do further async work afterward (fetching a 3D model, waiting on a
+    // WebGL/canvas init) before anything is actually visible. Give the page this many additional
+    // frames after OnLoadEnd fires to let that settle before capturing.
+    static constexpr uint32_t WEB_SETTLE_FRAMES = 90;
+    // 0 = not yet observed loaded for the current screenshot request; set the first time
+    // allWebWallpapersLoaded() returns true, so WEB_SETTLE_FRAMES is measured from actual load
+    // completion rather than from process start.
+    uint32_t m_webWallpapersLoadedAtFrame = 0;
     std::chrono::steady_clock::time_point m_pauseStart {};
     GLuint m_destinationFramebuffer = 0;
 };

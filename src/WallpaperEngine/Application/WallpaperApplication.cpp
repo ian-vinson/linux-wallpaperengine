@@ -19,6 +19,7 @@
 #include "WallpaperEngine/FileSystem/Adapters/MediaCover.h"
 #include "WallpaperEngine/Media/DBusMediaSource.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
+#include "WallpaperEngine/Render/Wallpapers/CWeb.h"
 
 #if DEMOMODE
 #include "recording.h"
@@ -27,6 +28,7 @@
 #include <algorithm>
 #include <climits>
 #include <csignal>
+#include <cstdio>
 #include <fstream>
 #include <numeric>
 #include <unistd.h>
@@ -253,6 +255,7 @@ ProjectUniquePtr WallpaperApplication::loadBackground (const std::string& bg) {
 	}
 
 	this->m_screenShotTaken = false;
+	this->m_webWallpapersLoadedAtFrame = 0;
     }
 
     return WallpaperEngine::Data::Parsers::ProjectParser::parse (json, std::move (container));
@@ -636,6 +639,16 @@ void WallpaperApplication::setupBrowser () {
     }
 
     this->m_browserContext = std::make_unique<WebBrowser::WebBrowserContext> (*this);
+}
+
+bool WallpaperApplication::allWebWallpapersLoaded () const {
+    for (const auto& wallpaper : this->m_renderContext->getWallpapers () | std::views::values) {
+	if (wallpaper->is<Render::Wallpapers::CWeb> () && !wallpaper->as<Render::Wallpapers::CWeb> ()->isPageLoaded ()) {
+	    return false;
+	}
+    }
+
+    return true;
 }
 
 void WallpaperApplication::takeScreenshot (const std::filesystem::path& filename) const {
@@ -1046,6 +1059,31 @@ void WallpaperApplication::render () {
 
     if (this->m_videoDriver->getFrameCounter () < this->m_nextFrameScreenshot) {
 	return;
+    }
+
+    // The configured delay only guarantees enough of THIS app's own render frames have passed —
+    // for web wallpapers that says nothing about whether CEF's async page load (subprocess
+    // spin-up, network fetches) has actually finished, since the two aren't tied together. Wait
+    // for real completion instead, bounded so a wallpaper that never fires OnLoadEnd can't stall
+    // the screenshot forever.
+    const uint32_t frameCounter = this->m_videoDriver->getFrameCounter ();
+
+    if (!this->allWebWallpapersLoaded ()) {
+	if (frameCounter < this->m_nextFrameScreenshot + MAX_WEB_LOAD_WAIT_FRAMES) {
+	    return;
+	}
+	// Timed out waiting for a page to finish loading — capture whatever's there rather than
+	// stalling forever on a broken/never-resolving wallpaper.
+    } else {
+	// OnLoadEnd firing only means the document itself loaded — pages commonly do further
+	// async work afterward (fetching a 3D model, initializing WebGL) before anything is
+	// actually visible, so give it a settle window measured from real load completion.
+	if (this->m_webWallpapersLoadedAtFrame == 0) {
+	    this->m_webWallpapersLoadedAtFrame = frameCounter;
+	}
+	if (frameCounter < this->m_webWallpapersLoadedAtFrame + WEB_SETTLE_FRAMES) {
+	    return;
+	}
     }
 
     this->takeScreenshot (this->m_context.settings.screenshot.path);

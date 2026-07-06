@@ -37,6 +37,13 @@ public:
     void setSize (int width, int height);
     void setPropertyValue (const std::string& key, const std::string& value);
 
+    // Whether CEF has finished loading the main frame (CefLoadHandler::OnLoadEnd fired). CEF's
+    // page load is async and can take real wall-clock time (network fetches, subprocess
+    // spin-up) that has no fixed relationship to this app's own render-loop frame count — callers
+    // that need to know "has this web wallpaper actually produced real content yet" (e.g. the
+    // --screenshot flow) should check this rather than assuming a frame-count delay is enough.
+    [[nodiscard]] bool isPageLoaded () const { return this->m_client != nullptr && this->m_client->isPageLoaded (); }
+
 protected:
     void renderFrame (const glm::ivec4& viewport) override;
     void updateMouse (const glm::ivec4& viewport);

@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#9: the "black rendering" issue investigated and refuted — not a real bug in this fork's CEF integration at all, but a screenshot-timing race in the diagnostic methodology plus a subset of wallpapers that are correctly black by their own config; CEF's GPU/compositor pipeline directly proven working via a real dumped WebGL frame. Web wallpaper support may be more functional than believed — real next step is re-verifying with a correct wait mechanism, not yet done. #9a's ICU/RPATH fix remains the only shipped code change)
+**Last updated:** 2026-07-06 (#9 fully resolved and closed — screenshot-timing race fixed with a real, reusable wait mechanism; final accurate count is 12 of 14 web wallpapers render correctly, the other 2 are non-bugs (correctly-black-by-config, and a small separate JSON parsing bug now tracked as #12). Active Priority Order is down to just #12)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,7 +296,29 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #9 — REVISED 2026-07-06: not "T7 upstream rebase" — two specific, much smaller bugs found instead
+### #12 — 2AM Cyberpunk City web wallpaper (1747779570): JSON type-coercion parsing bug
+Found during #9's investigation, precisely scoped, not yet fixed. Fails
+with `[json.exception.type_error.302] type must be string, but is
+boolean` — a `project.json`/property-schema parsing exception, occurring
+before the web browser is ever reached, unrelated to CEF/web-wallpaper
+internals specifically. Confirmed deterministic and unchanged across
+every check in the #9 investigation arc. Small, well-understood scope —
+likely a quick fix once picked up: find where this wallpaper's
+`project.json` declares a property with a boolean value where the parser
+expects a string (or vice versa) and make that parsing path tolerant of
+the type mismatch, matching whatever this fork's real-world convention
+already is for similar coercion cases elsewhere.
+
+---
+
+## Completed Items (done/closed/resolved — moved here for readability)
+
+These were originally tracked in Priority Order above but are finished —
+kept here as a record of what was investigated/fixed and why, rather than
+mixed in with items that still need work. Numbers match their original
+Priority Order identifiers.
+
+### #9 — DONE 2026-07-06: not "T7 upstream rebase" — resolved as two real, now-fixed bugs plus one small separate item (#12)
 
 **"T7" could not be determined and is likely a stale/external reference.**
 Checked all git history/branches/tags on this fork and its upstream
@@ -408,30 +430,59 @@ correctly, by-design, black. All temporary instrumentation
 the prior committed (#9a) state, rebuilt clean, confirmed via empty
 `git status`.
 
-**Real next step, not yet done**: re-verify actual web wallpaper
-rendering with a *correct* wait mechanism — either a genuine wall-clock
-delay, or waiting for `OnLoadEnd`/a stable frame count before taking a
-screenshot, instead of the current frame-counted `--screenshot-delay`.
-This would reveal the TRUE current state of web wallpaper rendering
-across the local corpus, which is now genuinely unknown in either
-direction — could turn out to be mostly working already, or could surface
-real remaining bugs once measured properly. The frame-counted
-`--screenshot-delay` race is itself arguably a real, separate, smaller
-bug worth its own fix (a diagnostic-tooling issue, not something affecting
-real interactive use — a live-running wallpaper isn't racing against a
-one-shot startup screenshot the way this specific verification flow is),
-but wasn't touched here since this was discovery/diagnosis only. The 14th
-wallpaper's separate JSON type-coercion parsing bug also remains
-untouched, confirmed unrelated to any of this.
+**Status update 2026-07-06 (part 3) — RESOLVED. The screenshot-timing race
+was fixed properly, and the true state of web wallpaper support is now
+known: 12 of 14 render correctly.** Implemented a real, reusable fix, not
+a one-off hack for this one investigation: `CWeb::isPageLoaded()`
+(delegating to `BrowserClient`'s existing `OnLoadEnd` tracking), a new
+`WallpaperApplication::allWebWallpapersLoaded()`, and a rewired screenshot
+gate that (1) still respects the configured `--screenshot-delay` as a
+floor, (2) then waits for real `OnLoadEnd`, (3) then adds a 90-frame
+settle window measured from actual load completion — added after
+empirically discovering, via the "Cat" wallpaper, that `OnLoadEnd` alone
+wasn't sufficient (it only means the HTML/JS document itself finished
+loading; this page's own JS then does further async work afterward,
+fetching a 3D model, before anything is visible) — (4) bounded by a
+600-frame hard cap so a wallpaper that never fires `OnLoadEnd` (broken
+content, a network request that never resolves) can't stall the
+screenshot forever.
 
----
+**Sanity check passed directly**: the "Cat" WebGL wallpaper — already
+proven via last session's raw GPU-buffer dump to render correctly, but
+whose old frame-counted screenshot always came back solid black — now
+produces a **correct on-screen screenshot**, the full scene, byte-for-byte
+matching what was already confirmed sitting in the GPU texture. This
+directly confirms the wait mechanism was the actual defect all along, not
+something else.
 
-## Completed Items (done/closed/resolved — moved here for readability)
+**Final, accurate per-wallpaper results, all 14**: **12 render correctly**
+(`864286576` Cat, `1520828134` Bongo Cat, `1731760875` Minecraft redstone
+clock, `1491259571` Girls' Frontline, `2717323779` Nervous Dog Bouncing
+DVD, `1403160205` Rainy Day, `1551961057` a bilibili audio-reactive
+wallpaper, `3406740580`/`3526628021` two 360° panoramas, `835186492` Time
+lapse, `853411033` canvas_circle, `884307090` Perfect Wallpaper). The
+remaining 2 are **not bugs**: `893418273` ("Audio Visualizer") renders
+solid black, but that exactly matches its own declared
+`backgroundcolor: "0 0 0"`/empty-`backgroundimage` defaults, for an
+audio-reactive wallpaper with no real audio playing in this headless
+test — correctly black by configuration, same category identified
+earlier this session for other wallpapers. `1747779570` ("2AM Cyberpunk
+City") still fails with its own separate, already-identified, precisely
+scoped `[json.exception.type_error.302] type must be string, but is
+boolean` — a `project.json`/property-schema parsing exception, unrelated
+to CEF, occurring before the browser is ever reached, confirmed unchanged
+across every check this whole investigation.
 
-These were originally tracked in Priority Order above but are finished —
-kept here as a record of what was investigated/fixed and why, rather than
-mixed in with items that still need work. Numbers match their original
-Priority Order identifiers.
+**Bottom line, closing this entire investigation arc**: what started as
+"T7 upstream rebase, 14+ web wallpapers blocked, large dedicated session"
+turned out to be an untraceable stale reference attached to already-
+substantial, genuinely working web wallpaper support, blocked by exactly
+two real, fixable bugs — a build-tree RPATH ordering bug (`#9a`) and a
+screenshot-timing race in the verification tooling itself (this entry) —
+plus one small, separate, precisely-scoped JSON parsing bug for a single
+wallpaper, tracked on its own below as `#12`. All temporary diagnostic
+instrumentation from every pass of this investigation has been reverted;
+only the real, permanent fixes remain in the tree.
 
 ### #9a — DONE 2026-07-06: CEF ICU bootstrap crash fixed — root cause was a build-tree RPATH ordering bug, not the CefSettings fields initially suspected
 
