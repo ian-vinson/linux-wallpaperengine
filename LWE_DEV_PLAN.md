@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#9 completely re-scoped — "T7" untraceable/likely stale external reference; real investigation found web wallpaper support is genuine and mostly working, with the actual blocker being two specific bugs: a likely-small CEF resource-path fix unlocking 13/14 local web wallpapers sharing one root cause, plus a separate small JSON parsing bug for the 14th. Note: a subagent flagged a prompt-injection artifact found in a tool result during this investigation — correctly ignored, worth being aware of)
+**Last updated:** 2026-07-06 (#9a done — CEF ICU bootstrap crash fixed, real root cause was a build-tree RPATH ordering bug found via a custom open()-tracing shim, not the CefSettings fields initially suspected; #9 itself stays open — most web wallpapers now boot without crashing but render solid black, a separate undiagnosed problem, plus the 14th wallpaper's unrelated JSON parsing bug remains untouched)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -356,16 +356,33 @@ directly (not just 2-3)**:
   a `project.json`/property-schema parsing exception, deterministic across
   3 reruns, completely unrelated to the CEF/ICU issue.
 
-**Revised scope estimate**: this now looks like two specific, independently
-tractable bugs rather than one large "rebase" project — (1) a likely-small
-CEF resource-path configuration fix (filling in the three commented-out
-paths correctly) that could plausibly unlock all 13 wallpapers sharing that
-one root cause at once, and (2) a separate, unrelated small JSON
-type-coercion parsing bug for the 14th. Neither has been touched yet — this
-was discovery only. Given how much smaller and more specific this now
-looks compared to the original framing, this is a strong candidate to
-actually pick up soon rather than remain indefinitely deferred as "large
-dedicated session."
+**Status update 2026-07-06**: the ICU bootstrap crash (the 13-wallpaper
+shared blocker) is **fixed and verified — see #9a in Completed Items**.
+`#9` itself stays open, because fixing that crash did not make web
+wallpapers actually work — it revealed a **separate, deeper, still-
+undiagnosed problem**: most of the 13 now boot without crashing but render
+**solid black**, with zero errors logged. Only one of ~9 checked so far
+(a Minecraft redstone-clock wallpaper) shows genuine rendered content,
+which is enough to prove the CEF→texture→screen pipeline mechanism works
+end-to-end in principle — the black-rendering issue is affecting most
+content, not the whole pipeline being broken. Leading hypothesis, not yet
+investigated: CEF's own internal GPU/compositor process silently failing
+to produce a frame in this sandboxed Wayland/NVIDIA environment (would be
+consistent with limitations already noted in earlier `WE_DOCS_REFERENCE.md`
+research), but this is genuinely unconfirmed — could equally be something
+else specific to this fork's `RenderHandler::OnPaint` texture upload path,
+or something else entirely. The 14th wallpaper's separate JSON
+type-coercion parsing bug also remains untouched, confirmed still failing
+identically, unrelated to any of this.
+
+**Revised scope estimate, updated**: what remains is genuinely a fresh
+investigation — real root-cause work into why CEF renders black for most
+(not all) content in this environment, plus the small, separate,
+still-unattempted JSON parsing fix for the 14th wallpaper. Given how the
+ICU crash investigation went (initial hypothesis tested and found to do
+nothing, real cause found through actual tracing rather than more
+guessing), treat the black-rendering issue with the same expectation —
+it may not be what it first appears to be either.
 
 ---
 
@@ -375,6 +392,85 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #9a — DONE 2026-07-06: CEF ICU bootstrap crash fixed — root cause was a build-tree RPATH ordering bug, not the CefSettings fields initially suspected
+
+Fixed and verified across all 13 previously-crashing local web wallpapers.
+**The real root cause pivoted away from the initial hypothesis, verified
+empirically before proceeding** — the same discipline as every major
+investigation this session.
+
+**Initial hypothesis (from discovery)**: `WebBrowserContext.cpp`'s
+commented-out `resources_dir_path`/`locales_dir_path`/`framework_dir_path`
+`CefSettings` fields. Checked `cef_types.h` directly: `resources_dir_path`
+and `locales_dir_path` both require an **absolute** path when set
+(defaulting to "the module directory" when left empty);
+`framework_dir_path`/`main_bundle_path` are explicitly macOS-only, not
+applicable here; `browser_subprocess_path` was deliberately left unset
+since this app already re-executes itself (the existing `HasSwitch("type")`
+branch) rather than shipping a separate subprocess binary. Filled in
+`resources_dir_path`/`locales_dir_path` using this codebase's existing
+`std::filesystem::canonical("/proc/self/exe").parent_path()` pattern
+(already used in `ApplicationContext.cpp`/`WallpaperApplication.cpp`),
+rebuilt, reran — **the crash was completely unchanged, identical
+backtrace**. Rather than declare either success or defeat, kept digging.
+
+**The real root cause, found through actual tracing, not more guessing**:
+no `strace` available in this environment, so a small custom `LD_PRELOAD`
+shim was compiled to trace `open`/`openat` calls directly. It showed the
+process was trying to open `icudtl.dat` from the **raw CEF distribution's
+build-tree directory** (`build/cef/cef_binary_.../Release/`), not
+`build/output/` where all resource files (`icudtl.dat`, `*.pak`,
+`locales/`) actually get copied. `readelf -d` confirmed why: the
+executable's `RUNPATH` listed the CEF distribution's own `Release/`
+directory *before* `build/output/`, so `libcef.so` itself loaded from the
+wrong copy — one with no resource files sitting next to it (confirmed
+that file genuinely doesn't exist there). CEF resolves its bundled
+resource files relative to wherever `libcef.so` itself was loaded from,
+so the `CefSettings` override was structurally irrelevant to this specific
+failure — a completely different library instance was running, one that
+was never going to find the right files regardless of what paths were
+passed to it.
+
+**Fix**: `CMakeLists.txt` — added `set(CMAKE_BUILD_RPATH
+"${TARGET_OUTPUT_DIRECTORY}")`, which CMake wasn't setting automatically
+for the build-tree RPATH the way it was for the install-tree one,
+prioritizing the correctly-resourced build output directory over the raw
+CEF extraction directory. Verified via `readelf`/`ldd` that `libcef.so`
+now loads from `build/output/`. Kept the `resources_dir_path`/
+`locales_dir_path` `CefSettings` fields too (they're independently correct
+per CEF's own documented recommendation, and now confirmed doing real
+work — subprocess command lines show `--resources-dir-path=`/
+`--locales-dir-path=` being correctly passed down once the base library
+itself resolves correctly). Went back afterward and **corrected the code
+comment** to accurately credit the RPATH fix as the real root cause,
+rather than leave a comment that implied the `CefSettings` fields alone
+were the fix, once that was known to be only part of the picture.
+
+**Verification**: build clean throughout. All 13 previously-crashing
+wallpapers individually re-tested — zero ICU errors across the board,
+all now progressing to launching real utility/network subprocesses (a
+qualitatively different, much further failure point than before, when
+they crashed instantly at bootstrap). Real content rendering confirmed
+for at least one (a "Minecraft redstone clock" wallpaper — a genuine,
+live LED-digit display, confirmed via actual pixel-value extrema, R
+channel up to 188, not just eyeballing a screenshot), proving the full
+CEF→texture→screen pipeline works end-to-end. The 14th wallpaper
+(`1747779570`) confirmed still failing with its exact original, separate
+JSON error — untouched by this fix, as expected. Full 356-wallpaper scene
+regression: 355 clean, 1 error (the same documented pre-existing GLSL
+flakiness case), 0 crashes — zero impact on scene wallpapers from a
+CEF/web-specific change.
+
+**Reported honestly, not rounded up**: of ~9 web wallpapers checked after
+this fix, only the one above showed genuine non-black content — the
+other ~8 render **exactly uniform black**, zero errors logged, even after
+generous wait times (up to 27s). This is a **separate, real, undiagnosed
+problem** this fix did not resolve and does not explain — not something
+this fix reintroduced or left broken, since the black-rendering wallpapers
+never got past the ICU crash before to be compared against. Tracked as
+the still-open remainder of `#9` above; not chased further here since it's
+a distinct problem outside this specific crash-fix's scope.
 
 ### #1 — DONE (2026-07-05): `CImage::getSize()` fixed — composelayer diagonal-split resolved after six investigation passes
 

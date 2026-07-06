@@ -76,11 +76,26 @@ WebBrowserContext::WebBrowserContext (WallpaperEngine::Application::WallpaperApp
     // Configurate Chromium
     CefSettings settings;
     std::string cache_path = (std::filesystem::temp_directory_path () / uuid::generate_uuid_v4 ()).string ();
-    // CefString(&settings.locales_dir_path) = "OffScreenCEF/godot/locales";
-    // CefString(&settings.resources_dir_path) = "OffScreenCEF/godot/";
-    // CefString(&settings.framework_dir_path) = "OffScreenCEF/godot/";
-    // CefString(&settings.cache_path) = "OffScreenCEF/godot/";
-    //  CefString(&settings.browser_subprocess_path) = "path/to/client"
+
+    // resources_dir_path/locales_dir_path both require an ABSOLUTE path when set (relative paths
+    // are invalid per CEF's own documentation). The actual fix for the "Invalid file descriptor to
+    // ICU data received" CHECK() crash in Chromium's InitializeICUFromDataFile() was a build-tree
+    // RPATH ordering bug (see CMakeLists.txt's CMAKE_BUILD_RPATH comment) that made the wrong
+    // libcef.so load — one with no icudtl.dat/*.pak/locales copied next to it. These two fields
+    // are set explicitly anyway, matching CEF's own documented recommendation, so subprocess
+    // launches (confirmed via their --resources-dir-path/--locales-dir-path command-line args)
+    // don't depend on rediscovering the module directory correctly on their own. Derived via the
+    // same /proc/self/exe pattern this codebase already uses elsewhere (see
+    // ApplicationContext::validateAssets/WallpaperApplication) rather than CWD or a hardcoded path.
+    const auto moduleDir = std::filesystem::canonical ("/proc/self/exe").parent_path ();
+    const std::string resourcesDir = moduleDir.string ();
+    const std::string localesDir = (moduleDir / "locales").string ();
+
+    CefString (&settings.resources_dir_path) = resourcesDir;
+    CefString (&settings.locales_dir_path) = localesDir;
+    // framework_dir_path/main_bundle_path are macOS-only (see cef_types.h) — not applicable here.
+    // browser_subprocess_path is intentionally left unset: this app re-executes itself (see the
+    // HasSwitch("type") branch above) rather than shipping a separate subprocess binary.
     cef_string_utf8_to_utf16 (cache_path.c_str (), cache_path.length (), &settings.root_cache_path);
     settings.windowless_rendering_enabled = true;
 #if defined(CEF_NO_SANDBOX)

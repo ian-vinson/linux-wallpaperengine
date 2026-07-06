@@ -140,6 +140,14 @@ set(TARGET_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
 set(CMAKE_INSTALL_RPATH "\$ORIGIN;\$ORIGIN/lib;\$ORIGIN/lib64")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH FALSE)
+# Without this, CMake's automatically-computed build-tree RPATH points libcef.so's NEEDED entry
+# at wherever it was originally extracted (.../cef/cef_binary_.../Release), not at
+# TARGET_OUTPUT_DIRECTORY where CEF_BINARY_FILES (icudtl.dat, *.pak, locales/) actually get copied
+# to sit alongside it. libcef.so resolves those resource files relative to its own on-disk
+# location, so loading the wrong copy makes CEF's ICU/locale bootstrap fail even though the
+# correct, complete set of resource files exists right next to the built executable. Prepending
+# TARGET_OUTPUT_DIRECTORY here makes the dynamic linker prefer the co-located libcef.so.
+set(CMAKE_BUILD_RPATH "${TARGET_OUTPUT_DIRECTORY}")
 
 add_subdirectory(${CEF_LIBCEF_DLL_WRAPPER_PATH} libcef_dll_wrapper)
 add_subdirectory(src/External/glslang-WallpaperEngine glslang)
