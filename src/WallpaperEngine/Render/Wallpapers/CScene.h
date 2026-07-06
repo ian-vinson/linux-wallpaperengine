@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unordered_set>
+
 #include "WallpaperEngine/Render/Camera.h"
 
 #include "WallpaperEngine/Render/CWallpaper.h"
@@ -64,6 +66,17 @@ public:
     /** Moves the layer to the given index in render order, clamping to the valid range. */
     void setRenderOrderIndex (CObject& object, int index);
 
+    /**
+     * Marks the given object id for deferred destruction — matches real Wallpaper Engine's own
+     * documented removeLayer() semantics ("the layer will actually be removed in a deferred
+     * manner"). The object remains fully alive/functional for the rest of the current tick();
+     * actual teardown happens once, in processPendingDestructions(), right after tick() returns.
+     * Internal name deliberately NOT "destroyLayer" — ScriptEngine::destroyLayer(ScriptLayerHandle)
+     * already exists as a wholly unrelated mechanism (CText's per-object text-script sandboxes).
+     * @return true if `id` resolved to a live object (and was marked); false if not found.
+     */
+    bool destroyObject (int id);
+
 protected:
     void renderFrame (const glm::ivec4& viewport) override;
     void updateMouse (const glm::ivec4& viewport);
@@ -75,6 +88,10 @@ private:
     Render::CObject* dispatchObjectType (const Object& object);
     void addObjectToRenderOrder (const Object& object);
 
+    /** Drains m_pendingDestruction, actually tearing down each marked object. Called once per
+     * frame from renderFrame(), immediately after tick() returns. */
+    void processPendingDestructions ();
+
     std::unique_ptr<Scripting::ScriptEngine> m_scriptEngine;
     std::unique_ptr<Camera> m_camera;
     ObjectUniquePtr m_bloomObjectData;
@@ -83,6 +100,7 @@ private:
     int m_nextDynamicObjectId = -1000000;
     std::map<int, CObject*> m_objects = {};
     std::vector<CObject*> m_objectsByRenderOrder = {};
+    std::unordered_set<int> m_pendingDestruction = {};
     std::vector<DynamicValue*> m_scriptedValues = {};
     glm::vec2 m_mousePosition = {};
     glm::vec2 m_mousePositionLast = {};

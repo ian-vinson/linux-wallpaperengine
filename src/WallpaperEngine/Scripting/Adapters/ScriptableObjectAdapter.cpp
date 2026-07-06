@@ -16,11 +16,52 @@ using namespace WallpaperEngine::Scripting::Adapters;
 
 #define SCRIPTABLE_OPAQUE_MAGIC 0xdeadbeef
 
+// Deliberately does NOT hold a direct reference to the underlying ScriptableObject — objects can
+// now be destroyed mid-session (thisScene.destroyLayer()), while a JS-side reference to this
+// wrapper can outlive that (a script capturing `let saved = thisLayer;` in module-level state).
+// Holding `scene` + `objectId` instead means every access re-resolves fresh via
+// CScene::getObject(), which safely returns nullptr once the object is gone — no dangling
+// reference is ever dereferenced. `scene` itself only dies at full wallpaper teardown, matching
+// the JS runtime's own lifetime, so this reference is always safe to hold long-term.
 struct OpaqueScriptableObjectAdapter {
     unsigned int magic;
     ScriptableObjectAdapter& adapter;
-    WallpaperEngine::Scripting::ScriptableObject& object;
+    WallpaperEngine::Render::Wallpapers::CScene& scene;
+    int objectId;
 };
+
+// Resolves the opaque wrapper back to its underlying ScriptableObject, or nullptr if the
+// container is invalid OR the underlying object has since been destroyed
+// (thisScene.destroyLayer()). Every exotic dispatch function in this file must go through this
+// rather than caching/dereferencing anything from a previous call — see the struct comment above.
+WallpaperEngine::Scripting::ScriptableObject* resolveScriptableObject (OpaqueScriptableObjectAdapter* container) {
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
+	return nullptr;
+    }
+
+    const auto* object = container->scene.getObject (container->objectId);
+
+    if (object == nullptr || !object->is<WallpaperEngine::Scripting::ScriptableObject> ()) {
+	return nullptr;
+    }
+
+    return const_cast<WallpaperEngine::Scripting::ScriptableObject*> (
+	object->as<WallpaperEngine::Scripting::ScriptableObject> ()
+    );
+}
+
+void scriptableobject_finalizer (JSRuntime* rt, JSValueConst val) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (val, &classId));
+
+    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
+	return;
+    }
+
+    // Only ever frees the small wrapper struct itself — it never owned the underlying
+    // ScriptableObject (that's owned by CScene), so there's nothing else to clean up here.
+    delete container;
+}
 
 // no-op stand-in for ITextureAnimation.play()/stop()/pause() on layer types that don't render
 // through CRenderable (CSound, CText) — see scriptableobject_get_texture_animation.
@@ -37,13 +78,13 @@ JSValue scriptableobject_texture_animation_noop (JSContext* ctx, JSValueConst th
 WallpaperEngine::Render::Objects::CRenderable* textureAnimationRenderableFromBoundData (JSValueConst* funcData) {
     JSClassID classId = 0;
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (funcData[0], &classId));
+    auto* object = resolveScriptableObject (container);
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
-	|| !container->object.is<WallpaperEngine::Render::Objects::CRenderable> ()) {
+    if (object == nullptr || !object->is<WallpaperEngine::Render::Objects::CRenderable> ()) {
 	return nullptr;
     }
 
-    return container->object.as<WallpaperEngine::Render::Objects::CRenderable> ();
+    return object->as<WallpaperEngine::Render::Objects::CRenderable> ();
 }
 
 JSValue texture_animation_get_rate (
@@ -147,9 +188,8 @@ JSValue texture_animation_set_frame (
 JSValue scriptableobject_get_texture_animation (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSClassID classId = 0;
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
-    const bool isRenderable
-	= container && container->magic == SCRIPTABLE_OPAQUE_MAGIC
-	&& container->object.is<WallpaperEngine::Render::Objects::CRenderable> ();
+    auto* object = resolveScriptableObject (container);
+    const bool isRenderable = object != nullptr && object->is<WallpaperEngine::Render::Objects::CRenderable> ();
 
     JSValue anim = JS_NewObject (ctx);
 
@@ -199,16 +239,17 @@ JSValue scriptableobject_get_texture_animation (JSContext* ctx, JSValueConst thi
 JSValue scriptableobject_get_children (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSClassID classId = 0;
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+    auto* self = resolveScriptableObject (container);
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
+    if (self == nullptr) {
 	return JS_ThrowTypeError (ctx, "getChildren() called on an invalid receiver");
     }
 
     JSValue array = JS_NewArray (ctx);
     uint32_t index = 0;
-    const int parentId = container->object.getId ();
+    const int parentId = self->getId ();
 
-    for (auto* candidate : container->object.getScene ().getObjectsByRenderOrder ()) {
+    for (auto* candidate : container->scene.getObjectsByRenderOrder ()) {
 	const auto& parent = candidate->getObject ().parent;
 
 	if (!parent.has_value () || parent.value () != parentId) {
@@ -237,12 +278,13 @@ JSValue scriptableobject_get_children (JSContext* ctx, JSValueConst this_val, in
 JSValue scriptableobject_get_parent (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSClassID classId = 0;
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+    auto* self = resolveScriptableObject (container);
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
+    if (self == nullptr) {
 	return JS_ThrowTypeError (ctx, "getParent() called on an invalid receiver");
     }
 
-    const auto& parent = container->object.getObject ().parent;
+    const auto& parent = self->getObject ().parent;
 
     if (!parent.has_value ()) {
 	return JS_UNDEFINED;
@@ -250,7 +292,7 @@ JSValue scriptableobject_get_parent (JSContext* ctx, JSValueConst this_val, int 
 
     const int parentId = parent.value ();
 
-    for (auto* candidate : container->object.getScene ().getObjectsByRenderOrder ()) {
+    for (auto* candidate : container->scene.getObjectsByRenderOrder ()) {
 	if (candidate->getId () != parentId) {
 	    continue;
 	}
@@ -271,51 +313,51 @@ JSValue scriptableobject_get_parent (JSContext* ctx, JSValueConst this_val, int 
 JSValue scriptableobject_sound_is_playing (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSClassID classId = 0;
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+    auto* object = resolveScriptableObject (container);
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
-	|| !container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+    if (object == nullptr || !object->is<WallpaperEngine::Render::Objects::CSound> ()) {
 	return JS_ThrowTypeError (ctx, "isPlaying() called on an invalid receiver");
     }
 
-    return JS_NewBool (ctx, container->object.as<WallpaperEngine::Render::Objects::CSound> ()->isPlaying ());
+    return JS_NewBool (ctx, object->as<WallpaperEngine::Render::Objects::CSound> ()->isPlaying ());
 }
 
 JSValue scriptableobject_sound_play (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSClassID classId = 0;
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+    auto* object = resolveScriptableObject (container);
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
-	|| !container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+    if (object == nullptr || !object->is<WallpaperEngine::Render::Objects::CSound> ()) {
 	return JS_ThrowTypeError (ctx, "play() called on an invalid receiver");
     }
 
-    container->object.as<WallpaperEngine::Render::Objects::CSound> ()->play ();
+    object->as<WallpaperEngine::Render::Objects::CSound> ()->play ();
     return JS_UNDEFINED;
 }
 
 JSValue scriptableobject_sound_stop (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSClassID classId = 0;
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+    auto* object = resolveScriptableObject (container);
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
-	|| !container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+    if (object == nullptr || !object->is<WallpaperEngine::Render::Objects::CSound> ()) {
 	return JS_ThrowTypeError (ctx, "stop() called on an invalid receiver");
     }
 
-    container->object.as<WallpaperEngine::Render::Objects::CSound> ()->stop ();
+    object->as<WallpaperEngine::Render::Objects::CSound> ()->stop ();
     return JS_UNDEFINED;
 }
 
 JSValue scriptableobject_sound_pause (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     JSClassID classId = 0;
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+    auto* object = resolveScriptableObject (container);
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC
-	|| !container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+    if (object == nullptr || !object->is<WallpaperEngine::Render::Objects::CSound> ()) {
 	return JS_ThrowTypeError (ctx, "pause() called on an invalid receiver");
     }
 
-    container->object.as<WallpaperEngine::Render::Objects::CSound> ()->pause ();
+    object->as<WallpaperEngine::Render::Objects::CSound> ()->pause ();
     return JS_UNDEFINED;
 }
 
@@ -323,9 +365,13 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     JSClassID classId = 0;
 
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (obj_val, &classId));
+    auto* self = resolveScriptableObject (container);
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
-	return JS_ThrowTypeError (ctx, "invalid receiver for property access");
+    // The underlying object may have been destroyed (thisScene.destroyLayer()) since this JS
+    // wrapper was handed to a script — treat it exactly like any other missing property (below)
+    // rather than throwing, so `if (savedLayer.someProp === undefined)`-style guards keep working.
+    if (self == nullptr) {
+	return JS_UNDEFINED;
     }
 
     const char* name = JS_AtomToCString (ctx, atom);
@@ -352,7 +398,7 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     // non-sound layer's `.isPlaying`/`.play`/`.stop`/`.pause` fall through to plain `undefined`
     // below, same as any other nonexistent property, rather than resolving to a function that
     // always throws when called.
-    if (container->object.is<WallpaperEngine::Render::Objects::CSound> ()) {
+    if (self->is<WallpaperEngine::Render::Objects::CSound> ()) {
 	if (strcmp (name, "isPlaying") == 0) {
 	    return JS_NewCFunction (ctx, scriptableobject_sound_is_playing, "isPlaying", 0);
 	}
@@ -371,15 +417,15 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     // origin/scale/angles/visible/etc. are, so getProperty() below would never find them.
     // Needed by scripts that filter thisScene.enumerateLayers()/getLayer() results by name or id.
     if (strcmp (name, "name") == 0) {
-	return JS_NewString (ctx, container->object.getObject ().name.c_str ());
+	return JS_NewString (ctx, self->getObject ().name.c_str ());
     }
     if (strcmp (name, "id") == 0) {
-	return JS_NewInt32 (ctx, container->object.getId ());
+	return JS_NewInt32 (ctx, self->getId ());
     }
 
     try {
 	// find the property inside, otherwise return undefined
-	auto& property = container->object.getProperty (name);
+	auto& property = self->getProperty (name);
 
 	return container->adapter.getEngine ().dynamicToJs (property);
     } catch (const std::exception& e) {
@@ -393,8 +439,9 @@ int scriptableobject_property_set (
     JSClassID classId = 0;
 
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (obj_val, &classId));
+    auto* self = resolveScriptableObject (container);
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
+    if (self == nullptr) {
 	JS_ThrowTypeError (ctx, "invalid receiver for property assignment");
 	return -1;
     }
@@ -408,7 +455,7 @@ int scriptableobject_property_set (
     ScopeGuard nameGuard ([=] { JS_FreeCString (ctx, name); });
 
     try {
-	auto& property = container->object.getProperty (name);
+	auto& property = self->getProperty (name);
 	container->adapter.getEngine ().jsToDynamic (val, property);
 	return 1;
     } catch (const std::exception& e) {
@@ -429,6 +476,7 @@ ScriptableObjectAdapter::ScriptableObjectAdapter (ScriptEngine& engine, std::str
     this->registerType (
 	{
 	    .class_name = m_name.c_str (),
+	    .finalizer = scriptableobject_finalizer,
 	    .exotic = &m_exoticMethods,
 	}
     );
@@ -438,7 +486,10 @@ JSValue ScriptableObjectAdapter::instantiate (ScriptableObject& object) {
     JSValue result = this->ObjectAdapter::instantiate (object);
     JS_SetOpaque (
 	result,
-	new OpaqueScriptableObjectAdapter { .magic = SCRIPTABLE_OPAQUE_MAGIC, .adapter = *this, .object = object }
+	new OpaqueScriptableObjectAdapter {
+	    .magic = SCRIPTABLE_OPAQUE_MAGIC, .adapter = *this, .scene = object.getScene (),
+	    .objectId = object.getId ()
+	}
     );
 
     return result;
@@ -452,9 +503,5 @@ WallpaperEngine::Scripting::ScriptableObject* ScriptableObjectAdapter::extract (
     JSClassID classId = 0;
     auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (value, &classId));
 
-    if (!container || container->magic != SCRIPTABLE_OPAQUE_MAGIC) {
-	return nullptr;
-    }
-
-    return &container->object;
+    return resolveScriptableObject (container);
 }

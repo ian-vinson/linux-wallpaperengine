@@ -105,6 +105,15 @@ public:
     void notifyUserPropertiesChanged (const std::map<std::string, PropertySharedPtr>& changed);
 
     /**
+     * Erases every property-script entry belonging to the given object from m_scriptModules,
+     * freeing each entry's JS module value first. Must be called before the object itself is
+     * deleted (as part of CScene::destroyObject()'s teardown) — tick() dereferences every
+     * m_scriptModules entry's object reference unconditionally, every frame, so a stale entry
+     * left behind would crash/UB on the very next tick() regardless of any JS-side reference.
+     */
+    void forgetObject (const ScriptableObject& object);
+
+    /**
      * Runs a frame tick in the javascript engine. Dispatches any pending events,
      * timeouts, intervals AND calls any update() functions.
      */

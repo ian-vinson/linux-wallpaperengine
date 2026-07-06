@@ -387,6 +387,79 @@ void CScene::setRenderOrderIndex (CObject& object, int index) {
     this->m_objectsByRenderOrder.insert (this->m_objectsByRenderOrder.begin () + index, &object);
 }
 
+bool CScene::destroyObject (int id) {
+    if (this->m_pendingDestruction.contains (id)) {
+	return true; // already marked, dedupe repeat calls in the same frame
+    }
+
+    if (!this->m_objects.contains (id)) {
+	return false;
+    }
+
+    this->m_pendingDestruction.insert (id);
+    return true;
+}
+
+void CScene::processPendingDestructions () {
+    if (this->m_pendingDestruction.empty ()) {
+	return;
+    }
+
+    // Snapshot-and-clear rather than iterate m_pendingDestruction directly: nothing currently
+    // marks further objects for destruction from within this loop, but this keeps the same
+    // "drain what's here, don't get confused by concurrent mutation" shape as
+    // ScriptEngine::runPendingInits()'s own snapshot-and-clear, for the same reason (defensive
+    // against a future destructor path that itself calls destroyObject() on something else).
+    const auto ids = std::move (this->m_pendingDestruction);
+    this->m_pendingDestruction.clear ();
+
+    for (const int id : ids) {
+	const auto it = this->m_objects.find (id);
+
+	if (it == this->m_objects.end ()) {
+	    continue; // already gone somehow — nothing to do
+	}
+
+	CObject* object = it->second;
+
+	// (b) Forget this object's property-scripts BEFORE deleting it — tick() dereferences
+	// every m_scriptModules entry's object reference unconditionally, every frame, so a
+	// stale entry left behind would crash/UB on the very next tick(), independent of any
+	// JS-side reference to the object.
+	if (object->is<Scripting::ScriptableObject> ()) {
+	    this->getScriptEngine ().forgetObject (*object->as<Scripting::ScriptableObject> ());
+	}
+
+	// (c) Remove from both containers that let anything else find this object by id or by
+	// render-order scan (getLayer/getLayerByID/enumerateLayers/getChildren/getParent/
+	// getObject all go through one of these two).
+	this->m_objects.erase (it);
+
+	if (const auto renderIt = std::ranges::find (this->m_objectsByRenderOrder, object);
+	    renderIt != this->m_objectsByRenderOrder.end ()) {
+	    this->m_objectsByRenderOrder.erase (renderIt);
+	}
+
+	// (d) Drop this scene's own FBOProvider references to any scene-level FBOs this object
+	// registered — currently only CImage does this (its own main/sub composite FBOs,
+	// registered via scene.create() in its constructor as "_rt_imageLayerComposite_<id>_a"/
+	// "_b"). Without this, this scene's own FBOProvider::m_fbos map would keep an
+	// independent shared_ptr<CFBO> alive forever, leaking the GPU texture even after the
+	// CImage itself is deleted below.
+	if (object->is<Objects::CImage> ()) {
+	    const std::string base = "_rt_imageLayerComposite_" + std::to_string (object->getId ());
+	    this->remove (base + "_a");
+	    this->remove (base + "_b");
+	}
+
+	// (e) Finally, delete the object itself. Its own destructor cascade already does the
+	// right thing (CText's script handle via ScriptEngine::destroyLayer(), CSound's
+	// AudioStreams via stop(), CImage's VBOs/passes/own FBO shared_ptr members, GL cleanup)
+	// — no changes needed there.
+	delete object;
+    }
+}
+
 ScriptEngine& CScene::getScriptEngine () const { return *this->m_scriptEngine; }
 Camera& CScene::getCamera () const { return *this->m_camera; }
 
@@ -442,6 +515,12 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 
     // run a tick in the javascript logic
     this->getScriptEngine ().tick ();
+
+    // Actually tear down anything thisScene.destroyLayer() marked during the tick just above —
+    // deliberately after tick() (every script this frame, including the one that called
+    // destroyLayer() on itself or another object, has already run against fully-alive state) and
+    // before anything below that iterates m_objectsByRenderOrder.
+    this->processPendingDestructions ();
 
     // update main textures for images
     for (const auto& cur : this->m_objectsByRenderOrder) {

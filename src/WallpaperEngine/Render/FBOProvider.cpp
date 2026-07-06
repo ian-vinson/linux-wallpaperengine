@@ -39,3 +39,10 @@ std::shared_ptr<CFBO> FBOProvider::find (const std::string& name) const {
 
     return this->m_parent->find (name);
 }
+
+bool FBOProvider::remove (const std::string& name) {
+    // Only ever erases from this provider's own registry — never the parent's — matching find()'s
+    // own "check mine first, then defer upward" scoping, since removal should only affect entries
+    // this specific provider actually owns.
+    return this->m_fbos.erase (name) > 0;
+}

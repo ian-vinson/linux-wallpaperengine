@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-05 (real ITextureAnimation scripting implemented — CRenderable gains per-object rate/pause/elapsed-time state, CPass frame selection now reads it instead of the global clock; ISoundLayer scripting and the composelayer diagonal-split fix also landed this session — see Completed Items #1, #3, #10)
+**Last updated:** 2026-07-06 (thisScene.destroyLayer() implemented with full lifecycle-safety design — real deferred semantics, stale-reference safety via id re-resolution, plus two independently-discovered bugs fixed as prerequisites: a permanent ScriptableObjectAdapter opaque-wrapper leak and a missing FBOProvider removal path; see Completed Items #4)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -295,36 +295,6 @@ messages, API status table) — gaps (#2, #6, #7, #8) are items that were
 completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
-
-### #4 — thisScene.destroyLayer()
-`getLayerCount()` implemented and verified 2026-07-04 (see commit table).
-`destroyLayer(layer: String|Number|ILayer): Boolean` remains — deliberately
-deferred, since it's the first genuinely destructive lifecycle operation in
-this API surface (everything implemented so far has been read-only or
-additive) and this codebase has **zero existing removal infrastructure**
-to build on (confirmed via repo-wide grep — createLayer() only ever adds;
-nothing has ever needed to tear a CObject back down). Needs its own
-dedicated design pass covering:
-- CObject ownership/lifetime: raw pointers in m_objects/m_objectsByRenderOrder,
-  actual delete presumably happens in CScene's destructor today — need to
-  trace exactly where `new CObject` happens (inside dispatchObjectType()) to
-  know what a safe mid-run teardown actually requires (GPU resource release,
-  etc.)
-- Deferred-removal semantics per spec ("removed after all scripts on that
-  frame updated") — needs a pending-destroy queue, likely mirroring the
-  existing m_pendingInitKeys snapshot-and-clear pattern in ScriptEngine, but
-  for teardown instead of construction
-- Stale-reference safety: if a script already holds a live ILayer JS object
-  (from getChildren()/getLayer()/enumerateLayers()) pointing at the object
-  being destroyed, that JS wrapper's opaque CObject* would dangle after
-  C++-side deletion unless something defensively flags "destroyed" and
-  checked on every subsequent property access — no such mechanism exists yet
-- Whether ScriptEngine has any per-object cached state (m_scriptModules
-  entries for property scripts on that object, m_layerInitialized for text
-  layers) that needs cleanup too, to avoid leaving dangling entries keyed by
-  a destroyed object's id
-- Polymorphic argument handling (name string, numeric id, or ILayer object)
-
 
 ### #5 — ILayer.getTransformMatrix() / getAttachmentMatrix() / getAttachmentOrigin() / getAttachmentAngles() — SCOPE MUCH BIGGER THAN EXPECTED, DEFERRED
 Originally scoped (incorrectly) as a small task alongside getParent(). Actual
@@ -995,6 +965,143 @@ this is pre-existing GLSL-compiler flakiness (already documented in this
 plan's history as non-deterministic) unrelated to this change, not a
 regression. Clean count stayed exactly 354/356 either way.
 
+### #4 — DONE 2026-07-06: `thisScene.destroyLayer()` — first destructive lifecycle operation, with two independent bugs fixed as real prerequisites
+
+Implemented after a dedicated design-review pass (memory-safety-critical,
+reviewed in full before any code was written — the same discipline as the
+composelayer investigation). The design surfaced two genuinely new,
+previously-unknown bugs that turned out to be real prerequisites, not
+scope creep: fixed together as one reviewed change, since they're
+interdependent with the destroy path itself.
+
+**1. `OpaqueScriptableObjectAdapter` redesigned for safety.** Previously
+held `ScriptableObject& object` directly — a reference that would dangle
+the instant the underlying `CObject` was deleted, with no safe way to
+detect this (a "destroyed flag" checked *on* a deleted object is itself
+undefined behavior, not a safe `false` — this was the key correction to
+the original proposed design). Now holds `CScene& scene, int objectId`
+instead; every exotic dispatch site (property get/set, `getChildren()`/
+`getParent()`, this session's sound and texture-animation controllers)
+re-resolves via `scene.getObject(objectId)` at call time rather than
+dereferencing a cached reference — returning `JS_UNDEFINED` (property
+reads) or a clean `JS_ThrowTypeError` (method calls/assignment) when the
+id no longer resolves, never touching freed memory. One centralized fix
+that automatically makes every existing and future exotic method safe.
+
+**2. Bonus bug #1 (found during design): missing finalizer.**
+`ScriptableObjectAdapter`'s `JSClassDef` had no `.finalizer` at all —
+unlike `VectorAdapter`'s and `ScriptPropertiesObject`'s, which both have
+one. Every opaque wrapper struct (allocated fresh every `tick()`, for
+every property-script, every frame) leaked permanently, independent of
+`destroyLayer()` entirely — `ScriptEngine::~ScriptEngine()`'s own comment
+incorrectly claimed this already happened for `ILayer` objects; corrected.
+Added a real finalizer freeing the small wrapper (it never owned the
+`CObject`, nothing else to clean up). **Leak-closure proof, not just
+"finalizer exists"**: built a 50-scripted-object synthetic wallpaper,
+sampled RSS every second for 40s. Pre-fix (`git stash`'d to baseline):
+flat during ~10s startup, then a steady **~93 KB/s** climb for the
+remaining 18s — quantitatively consistent with 50 objects × 60fps × a
+~32-byte struct. Post-fix: identical startup profile, then **exactly flat
+(zero growth)** for the remaining 29s. Leak fully closed.
+
+**3. Bonus bug #2 (found during design): `FBOProvider` had no removal
+method.** Only `create()`/`alias()`/`find()` existed — meaning even with
+the object itself correctly deleted, a scene-level FBO registration
+(`CImage`'s own composite FBOs, registered via `scene.create()` in its
+constructor) would keep an independent `shared_ptr<CFBO>` alive in the
+scene's registry forever, leaking the GPU texture. Added
+`FBOProvider::remove(name)`. **Proof, not just "didn't crash"**: captured
+the FBO's `shared_ptr` before removal (`use_count=4`), called `remove()`,
+checked the same held copy again — **dropped to `use_count=3`**, and
+`find()` now returned nothing. Direct, quantitative confirmation the
+registry's own reference was actually dropped.
+
+**4. `CScene::destroyObject(int id)`** (internal name — deliberately
+*not* `destroyLayer`, since `ScriptEngine::destroyLayer(ScriptLayerHandle)`
+already exists as a **completely unrelated** pre-existing mechanism for
+`CText`'s dynamic text script sandboxes; a real naming collision caught
+and avoided before it caused confusion). Maintains a dedupe-safe
+`std::unordered_set<int> m_pendingDestruction`. Matches real WE's own
+documented `removeLayer()` behavior (`WE_DOCS_REFERENCE.md` §3.2: "the
+layer will actually be removed in a deferred manner") — marking is
+instant and returns immediately, but actual teardown is drained exactly
+once, in a new `processPendingDestructions()`, called from
+`CScene::renderFrame()` immediately after `this->getScriptEngine().tick()`
+returns and before anything iterates `m_objectsByRenderOrder`. This one
+ordering decision is what delivers the deferred semantics: every script
+running in the same frame (including the one that called `destroyLayer()`
+on itself or another object) sees the target as fully alive and
+functional for the remainder of that tick; it's only gone starting the
+next frame. Teardown order per marked id: forget its
+`ScriptEngine::m_scriptModules` entries first (freeing each `.module`
+`JSValue`) — required *before* delete, since `tick()` dereferences these
+unconditionally every frame regardless of any JS-side reference, so a
+stale entry left behind would crash on the very next tick with zero
+script involvement — then erase from `m_objectsByRenderOrder`/`m_objects`,
+then drop any scene-level FBO registrations via the new `remove()`, then
+`delete` the object (its existing destructor cascade — `CText`'s script
+handle, `CSound`'s `AudioStream`s via `stop()`, `CImage`'s VBOs/passes/FBOs
+— already does the right thing, confirmed during this session's own
+`ISoundLayer`/`getTextureAnimation` work, no changes needed there).
+
+**5. `thisScene.destroyLayer(layer: String|Number|ILayer): Boolean`** —
+the actual SceneScript-facing function. Combines the two argument-handling
+conventions that already existed separately (`getLayer()`'s number→id/
+string→name-scan, `getLayerIndex()`/`sortLayer()`'s ILayer-object handling
+via `ScriptableObjectAdapter::extract()`) rather than inventing a third.
+Resolves to an id, marks it via `destroyObject()`, returns `false` only if
+the argument couldn't be resolved to a live object at all.
+
+**Verification — all 9 points from the review, each with real evidence**:
+1. Clean build.
+2. All three argument forms (name/id/`ILayer` object) tested via a real
+   `createLayer()`/destroy script: identical correct results across all
+   three — count drops from 3→2 the frame *after* destruction,
+   `enumerateLayers()` correctly excludes it.
+3. Deferred semantics confirmed for **both** the calling script and a
+   second, independently-ordered observer script (deliberately keyed to
+   sort after the destroyer in `m_scriptModules`'s iteration order) — both
+   saw the pre-destruction count in the same tick; only the next frame
+   showed the drop.
+4. Stale-reference safety: a script-held cross-frame reference
+   (`let createdLayer = ...`) correctly read `undefined` for `.name`,
+   threw a clean `TypeError: not a function` calling
+   `.getTextureAnimation()`, and threw a clean, explicit
+   `TypeError: invalid receiver for property assignment` on
+   `createdLayer.visible = false` — no native code ever touches freed
+   memory in any case. Re-ran all three argument-form tests under glibc's
+   `MALLOC_PERTURB_` (freed-memory poisoning) as a reasoned substitute for
+   `valgrind`/ASan, both genuinely unavailable in this environment
+   (`valgrind` not installed; a full ASan rebuild would require
+   re-instrumenting the entire CEF/glslang/spirv-cross dependency tree) —
+   flagged honestly rather than silently skipped. All three modes still
+   passed identically under poisoning.
+5. Finalizer leak-closure — see above, real RSS measurement.
+6. `FBOProvider::remove()` — see above, real `use_count` measurement.
+7. Parent-with-live-children (flagged in the design as reasoned-about but
+   untested): destroying a parent mid-tick from a child's own script —
+   `getParent()` still returned the parent in the same frame (deferred),
+   `undefined` the next frame, child itself fully functional throughout —
+   now empirically confirmed, not just code-reading confidence.
+8. `CText`'s unrelated `ScriptEngine::destroyLayer(ScriptLayerHandle)`
+   mechanism confirmed completely undisturbed via a real dynamic-text
+   wallpaper — zero errors, screenshot confirmed text genuinely still
+   updates frame-to-frame.
+9. Full 356-wallpaper regression: **355 clean, 1 error, 0 crashes** — the
+   single failure (`3420062133`) is one of the two already-documented,
+   pre-existing GLSL-compiler flakiness cases (confirmed earlier this
+   session to reproduce identically on the unmodified baseline). Zero new
+   failures anywhere in the corpus, including every sound/text/particle-
+   scripted wallpaper.
+
+Final diff: 8 files, +284/-43, confirmed no debug-instrumentation leftovers
+(a stray grep hit on "temporal" was correctly identified as a false
+positive, not an actual leftover `TEMP` marker). No design assumptions
+broke during implementation — the reviewed plan held up exactly as
+written.
+
+
+
 ---
 
 ## API Implementation Status (vs lib.sceneScript.d.ts v2.8)
@@ -1017,7 +1124,7 @@ regression. Clean count stayed exactly 354/356 either way.
 | thisScene.createLayer() | ✅ |
 | thisScene.enumerateLayers() | ✅ |
 | thisScene.getLayerCount() | ✅ (filtered to ScriptableObject, verified consistent with enumerateLayers() including on a real scene with sound objects) |
-| thisScene.destroyLayer() | ❌ (deliberately deferred — needs dedicated design pass, see priority #4) |
+| thisScene.destroyLayer() | ✅ (2026-07-06, deferred semantics matching real WE's documented removeLayer() behavior — see #4 in Completed Items) |
 | input.cursorWorldPosition/cursorScreenPosition/cursorLeftDown | ✅ |
 | cursorDown/Up/Move/Click event dispatch | ✅ |
 | ILayer.origin/scale/angles/visible/alpha/parallaxDepth | ✅ (now actually writes through to render state) |

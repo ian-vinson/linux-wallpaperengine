@@ -281,10 +281,14 @@ ScriptEngine::~ScriptEngine () {
     this->m_adapters.vec2->releaseBeforeRuntimeShutdown ();
 
     // Note: m_adapters (vec2/vec3/vec4/object) is intentionally NOT reset here. JS_FreeRuntime()
-    // below runs a final GC pass that finalizes any still-alive Vec2/Vec3/Vec4/ILayer JS objects,
-    // and those finalizers call back into the corresponding adapter (e.g.
-    // VectorAdapter::free()). The adapters must stay alive until after JS_FreeRuntime() returns;
-    // they are torn down automatically afterwards as ScriptEngine's members are destructed.
+    // below runs a final GC pass that finalizes any still-alive Vec2/Vec3/Vec4/ILayer JS objects.
+    // Vec2/3/4's finalizer calls back into its adapter (VectorAdapter::free(), to drop the
+    // adapter-owned temporal DynamicValue). ILayer's finalizer does not need to call back into
+    // ScriptableObjectAdapter — it only frees its own small opaque wrapper struct, which never
+    // owned the underlying CObject (that's owned by CScene) — but the adapters must still stay
+    // alive until after JS_FreeRuntime() returns regardless, since the wrapper's own `adapter`
+    // reference and exotic-method function pointers are only valid while it does. They are torn
+    // down automatically afterwards as ScriptEngine's members are destructed.
 
     this->m_consoleObject.reset ();
     this->m_engineObject.reset ();
@@ -778,6 +782,20 @@ void ScriptEngine::notifyUserPropertiesChanged (const std::map<std::string, Prop
     }
 
     this->m_runningModule = nullptr;
+}
+
+void ScriptEngine::forgetObject (const ScriptableObject& object) {
+    for (auto it = this->m_scriptModules.begin (); it != this->m_scriptModules.end ();) {
+	if (&it->second.object != &object) {
+	    ++it;
+	    continue;
+	}
+
+	// A leftover key in m_pendingInitKeys pointing at this now-erased entry is safe to leave:
+	// runPendingInits() already gracefully skips any key it can't find in m_scriptModules.
+	JS_FreeValue (this->m_context, it->second.module);
+	it = this->m_scriptModules.erase (it);
+    }
 }
 
 void ScriptEngine::runPendingInits () {

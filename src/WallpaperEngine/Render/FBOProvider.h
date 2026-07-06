@@ -19,6 +19,11 @@ public:
     );
     std::shared_ptr<CFBO> alias (const std::string& newName, const std::string& original);
     [[nodiscard]] std::shared_ptr<CFBO> find (const std::string& name) const;
+    /**
+     * Erases the named FBO from this provider's own registry (not any parent's), dropping this
+     * registry's shared_ptr<CFBO> reference. @return true if an entry was actually erased.
+     */
+    bool remove (const std::string& name);
 
 private:
     const FBOProvider* m_parent;

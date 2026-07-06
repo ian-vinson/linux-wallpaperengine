@@ -193,6 +193,60 @@ JSValue get_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst
     return JS_ThrowTypeError (ctx, "getLayer() argument must be a number or string");
 }
 
+// thisScene.destroyLayer(layer: String|Number|ILayer): Boolean. Real Wallpaper Engine's own
+// removeLayer() is documented as deferred ("the layer will actually be removed in a deferred
+// manner so consider this when expecting scripts to stop or destroy on that layer") — this
+// matches that: resolves `layer` the same way getLayer() (number -> id, string -> name scan) and
+// getLayerIndex()/sortLayer() (ILayer object -> ScriptableObjectAdapter::extract()) already do,
+// combining both existing conventions rather than inventing a third, then marks the resolved id
+// for destruction via CScene::destroyObject(). The object remains fully alive/functional for the
+// rest of the current tick() — actual teardown happens once, right after tick() returns
+// (CScene::processPendingDestructions()). Returns false if `layer` couldn't be resolved to a live
+// object at all; true otherwise (including if it was already marked this same frame).
+JSValue scene_destroy_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc != 1) {
+	return JS_ThrowTypeError (ctx, "destroyLayer() expects exactly one argument");
+    }
+
+    auto* container = get_opaque (this_val);
+    JSValue layer = argv[0];
+    int id = 0;
+    bool resolved = false;
+
+    if (JS_IsNumber (layer)) {
+	resolved = JS_ToInt32 (ctx, &id, layer) == 0;
+    } else if (JS_IsString (layer)) {
+	const char* result = JS_ToCString (ctx, layer);
+
+	if (result != nullptr) {
+	    ScopeGuard guard ([=] { JS_FreeCString (ctx, result); });
+
+	    for (auto* object : container->getScene ().getObjectsByRenderOrder ()) {
+		if (object->getObject ().name != result) {
+		    continue;
+		}
+
+		id = object->getId ();
+		resolved = true;
+		break;
+	    }
+	}
+    } else {
+	auto* scriptable = WallpaperEngine::Scripting::Adapters::ScriptableObjectAdapter::extract (layer);
+
+	if (scriptable != nullptr) {
+	    id = scriptable->getId ();
+	    resolved = true;
+	}
+    }
+
+    if (!resolved) {
+	return JS_NewBool (ctx, false);
+    }
+
+    return JS_NewBool (ctx, container->getMutableScene ().destroyObject (id));
+}
+
 // thisScene.getLayerByID(id): same lookup as get_layer()'s numeric-id branch, but coerces its
 // argument to a number regardless of how it arrives — generated "attachment" scripts call this
 // with a template-substituted numeric-looking *string* (e.g. getLayerByID('123')), which would
@@ -466,6 +520,10 @@ SceneObject::SceneObject (ScriptEngine& engine, Render::Wallpapers::CScene& scen
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_instance, "sortLayer",
 	JS_NewCFunction (this->m_engine.getContext (), scene_sort_layer, "sortLayer", 2), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), this->m_instance, "destroyLayer",
+	JS_NewCFunction (this->m_engine.getContext (), scene_destroy_layer, "destroyLayer", 1), JS_PROP_ENUMERABLE
     );
 }
 
