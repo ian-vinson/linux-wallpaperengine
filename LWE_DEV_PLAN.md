@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#9 fully resolved and closed — screenshot-timing race fixed with a real, reusable wait mechanism; final accurate count is 12 of 14 web wallpapers render correctly, the other 2 are non-bugs (correctly-black-by-config, and a small separate JSON parsing bug now tracked as #12). Active Priority Order is down to just #12)
+**Last updated:** 2026-07-06 (61-wallpaper corpus check — corrected from a stated 64 due to a real type-case-sensitivity detection issue, now tracked as #13; #12 upgraded from "one wallpaper's isolated bug" to a general JSON parsing robustness gap that includes a real uncaught crash on one wallpaper. 54/61 render real content. Full JS interactive-API usage inventory built: user properties 40/61, mouse/click 34/61, audio viz 22/61, media integration 4/61, RGB hardware 1/61 — ready to inform targeted interaction testing next)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,18 +296,54 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #12 — 2AM Cyberpunk City web wallpaper (1747779570): JSON type-coercion parsing bug
-Found during #9's investigation, precisely scoped, not yet fixed. Fails
-with `[json.exception.type_error.302] type must be string, but is
-boolean` — a `project.json`/property-schema parsing exception, occurring
-before the web browser is ever reached, unrelated to CEF/web-wallpaper
-internals specifically. Confirmed deterministic and unchanged across
-every check in the #9 investigation arc. Small, well-understood scope —
-likely a quick fix once picked up: find where this wallpaper's
-`project.json` declares a property with a boolean value where the parser
-expects a string (or vice versa) and make that parsing path tolerant of
-the type mismatch, matching whatever this fork's real-world convention
-already is for similar coercion cases elsewhere.
+### #12 — UPGRADED 2026-07-06: general `project.json`/property-schema JSON type-coercion robustness gap — includes a real uncaught crash, not just one wallpaper's isolated bug
+
+**Originally scoped too narrowly.** First identified during `#9`'s
+investigation as one isolated bug in a single wallpaper
+(`1747779570`, "2AM Cyberpunk City"). A wider 61-wallpaper corpus check
+(2026-07-06) found this is actually a **general parsing robustness gap**,
+hitting at least 3 wallpapers with different specific type mismatches:
+- `1747779570` ("2AM Cyberpunk City") and `1685364754`: both
+  `[json.exception.type_error.302] type must be string, but is boolean`
+  — **caught**, clean exit.
+- `793602574`: `[json.exception.type_error.302] type must be boolean,
+  but is number` — **NOT caught. `terminate()`, core dump.** This is a
+  real crash on malformed/type-mismatched input, not just a clean error
+  exit — meaningfully more severe than the original single-wallpaper
+  framing suggested.
+
+**Revised scope**: this needs a real fix to whatever JSON
+property-schema parsing path reads user-property type declarations from
+`project.json` (likely in the same area as this fork's other property
+parsers — check for the specific `.get<std::string>()`/`.get<bool>()`-
+style direct-type-assumption calls that `nlohmann::json` throws
+`type_error.302` for on a mismatch), making it tolerant of type
+mismatches (coerce where sensible, skip the malformed property with a
+clear log message otherwise) — not just special-casing one wallpaper's
+specific field. The uncaught crash case in particular needs its own
+explicit fix (wrap in a try/catch at minimum, ideally coerce), since an
+uncaught exception crashing the whole process on one malformed property
+is a real severity difference from the other two wallpapers' clean exits.
+
+**Open, not yet investigated**: exactly which property/field triggers
+each of the 3 known cases (not yet traced to a specific line), and
+whether other type-mismatch shapes (e.g. object-expected-got-array, the
+kind of malformed `"particle"` field encountered during `#11`'s
+investigation, though that was a different data path) might exist
+elsewhere in the same corpus but weren't hit by these specific 3
+wallpapers' specific property configurations.
+
+### #13 — verify `"type": "Web"` (capitalized) is genuinely handled correctly, not just accidentally not erroring
+Found during the 61-wallpaper corpus scan: 13 of 61 local web wallpapers
+declare `"type": "Web"` (capital W) rather than `"type": "web"`. All 61
+were included in the render-pass testing and none hit an "unsupported
+project type" error, so *empirically* the engine accepts it — but
+whether `ProjectParser::parseType`'s comparison is genuinely
+case-insensitive by design, or something else is masking a real
+case-sensitivity bug (e.g. falling through to a default/lenient branch
+for an unrecognized value rather than actually recognizing "Web" as
+"web"), was not verified. Small, quick to check once picked up — read
+the actual comparison logic and confirm which of these it actually is.
 
 ---
 
