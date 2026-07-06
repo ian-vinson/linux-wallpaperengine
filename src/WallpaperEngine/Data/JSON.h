@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "WallpaperEngine/Data/Builders/UserSettingBuilder.h"
@@ -79,6 +80,31 @@ public:
 
 	return result;
     }
+    // Coerces obviously-intended values that don't exactly match the requested type (a "bool"
+    // property authored as 0/1, a string-typed field authored as true/false or a bare number) —
+    // this is the one place practically every property parser (color/bool/slider/text/file/...)
+    // ultimately routes through, so fixing it here covers all of them at once. Returns false if
+    // there's no sensible interpretation, leaving the caller to fall back to a default.
+    template <typename T> [[nodiscard]] static bool coerce (const base_type& value, T& out) noexcept {
+	if constexpr (std::is_same_v<T, bool>) {
+	    if (value.is_number ()) {
+		out = value.template get<double> () != 0.0;
+		return true;
+	    }
+	} else if constexpr (std::is_same_v<T, std::string>) {
+	    if (value.is_boolean ()) {
+		out = value.template get<bool> () ? "true" : "false";
+		return true;
+	    }
+	    if (value.is_number ()) {
+		out = value.dump ();
+		return true;
+	    }
+	}
+
+	return false;
+    }
+
     template <typename T> [[nodiscard]] std::optional<T> optional (const std::string& key) const noexcept {
 	auto base = this->base ();
 	const auto it = base.find (key);
@@ -87,7 +113,24 @@ public:
 	    return std::nullopt;
 	}
 
-	return *it;
+	try {
+	    // static_cast (rather than .get<T>()) so this goes through exactly the same
+	    // conversion path (including the custom operator T()/glm-vector overloads below)
+	    // that a plain `return (*it);` would have used.
+	    return static_cast<T> (*it);
+	} catch (const nlohmann::json::exception& e) {
+	    T coerced {};
+
+	    if (coerce (*it, coerced)) {
+		return coerced;
+	    }
+
+	    sLog.error (
+		"Property '", key, "' has an unexpected value type (", it->type_name (), "), ignoring: ", e.what ()
+	    );
+
+	    return std::nullopt;
+	}
     }
     template <typename T> [[nodiscard]] T optional (const std::string& key, T defaultValue) const noexcept {
 	auto base = this->base ();
@@ -97,7 +140,25 @@ public:
 	    return defaultValue;
 	}
 
-	return (*it);
+	try {
+	    // static_cast (rather than .get<T>()) so this goes through exactly the same
+	    // conversion path (including the custom operator T()/glm-vector overloads below)
+	    // that a plain `return (*it);` would have used.
+	    return static_cast<T> (*it);
+	} catch (const nlohmann::json::exception& e) {
+	    T coerced {};
+
+	    if (coerce (*it, coerced)) {
+		return coerced;
+	    }
+
+	    sLog.error (
+		"Property '", key, "' has an unexpected value type (", it->type_name (),
+		"), using default value instead: ", e.what ()
+	    );
+
+	    return defaultValue;
+	}
     }
     [[nodiscard]] UserSettingUniquePtr user (const std::string& key, const Properties& properties) const;
     template <typename T>

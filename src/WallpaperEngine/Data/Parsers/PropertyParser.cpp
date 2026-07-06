@@ -5,6 +5,29 @@
 using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Data::Model;
 
+namespace {
+// Combo option/property values are conventionally numbers or strings, but real-world
+// wallpapers sometimes author them as booleans instead (e.g. a two-way toggle expressed as a
+// combo with true/false options rather than a proper "bool" property). Coerce those rather
+// than blindly calling .get<std::string>() on a JSON boolean, which throws.
+std::string comboValueToString (const JSON& value, const std::string& propertyName) {
+    if (value.is_number ()) {
+	return std::to_string (value.get<int> ());
+    }
+    if (value.is_string ()) {
+	return value.get<std::string> ();
+    }
+    if (value.is_boolean ()) {
+	return value.get<bool> () ? "1" : "0";
+    }
+
+    std::cerr << "WARNING: Property '" << propertyName << "' has a combo value of unexpected type ("
+	      << value.type_name () << "), defaulting to \"0\"" << std::endl;
+
+    return "0";
+}
+} // namespace
+
 PropertySharedPtr PropertyParser::parse (const JSON& it, const std::string& name) {
     // type might not be included, in which case means the same as a group
     const auto type = it.optional ("type");
@@ -61,10 +84,7 @@ PropertySharedPtr PropertyParser::parseCombo (const JSON& it, const std::string&
 
 	const auto value = cur.require ("value", "Combo option must have a value");
 
-	optionsMap.emplace (
-	    value.is_number () ? std::to_string (value.get<int> ()) : value.get<std::string> (),
-	    cur.require ("label", "Combo option must have a label")
-	);
+	optionsMap.emplace (comboValueToString (value, name), cur.require ("label", "Combo option must have a label"));
     }
 
     const auto value = it.require ("value", "Combo property must have a value");
@@ -75,7 +95,7 @@ PropertySharedPtr PropertyParser::parseCombo (const JSON& it, const std::string&
 	    .text = it.optional<std::string> ("text", ""),
 	},
 	ComboData { .values = optionsMap },
-	value.is_number () ? std::to_string (value.get<int> ()) : value.get<std::string> ()
+	comboValueToString (value, name)
     );
 }
 

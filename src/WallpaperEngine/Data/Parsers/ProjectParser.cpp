@@ -76,14 +76,22 @@ Properties ProjectParser::parseProperties (const std::optional<JSON>& data) {
     Properties result = {};
 
     for (const auto& cur : properties.value ().items ()) {
-	const auto& property = PropertyParser::parse (cur.value (), cur.key ());
+	// Baseline safety net: a single malformed property (an unexpected value type not already
+	// coerced/handled inside PropertyParser) must never take down the whole wallpaper. Skip
+	// just that property and keep going, rather than letting the exception propagate and abort
+	// loading everything else.
+	try {
+	    const auto& property = PropertyParser::parse (cur.value (), cur.key ());
 
-	// ignore properties that failed, these are generally groups
-	if (property == nullptr) {
-	    continue;
+	    // ignore properties that failed, these are generally groups
+	    if (property == nullptr) {
+		continue;
+	    }
+
+	    result.emplace (cur.key (), property);
+	} catch (const std::exception& e) {
+	    sLog.error ("Skipping malformed property '", cur.key (), "': ", e.what ());
 	}
-
-	result.emplace (cur.key (), property);
     }
 
     return result;

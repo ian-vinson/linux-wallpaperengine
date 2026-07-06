@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (61-wallpaper corpus check — corrected from a stated 64 due to a real type-case-sensitivity detection issue, now tracked as #13; #12 upgraded from "one wallpaper's isolated bug" to a general JSON parsing robustness gap that includes a real uncaught crash on one wallpaper. 54/61 render real content. Full JS interactive-API usage inventory built: user properties 40/61, mouse/click 34/61, audio viz 22/61, media integration 4/61, RGB hardware 1/61 — ready to inform targeted interaction testing next)
+**Last updated:** 2026-07-06 (#12 fixed — traced the uncaught crash to a noexcept-boundary violation, fixed with a systemic coercion fix plus a general safety net; #13 resolved as a non-issue (type is already lowercased). Web corpus now at 57/61 rendering real content, zero crashes. New #14 opened: a separate, pre-existing CEF teardown-on-SIGTERM crash affecting nearly every web wallpaper, surfaced because these 3 now survive long enough to reach it. Active Priority Order is down to just #14)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,54 +296,26 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #12 — UPGRADED 2026-07-06: general `project.json`/property-schema JSON type-coercion robustness gap — includes a real uncaught crash, not just one wallpaper's isolated bug
+### #14 — CEF teardown-on-SIGTERM crash ("pure virtual method called") affecting nearly every web wallpaper when killed via timeout
 
-**Originally scoped too narrowly.** First identified during `#9`'s
-investigation as one isolated bug in a single wallpaper
-(`1747779570`, "2AM Cyberpunk City"). A wider 61-wallpaper corpus check
-(2026-07-06) found this is actually a **general parsing robustness gap**,
-hitting at least 3 wallpapers with different specific type mismatches:
-- `1747779570` ("2AM Cyberpunk City") and `1685364754`: both
-  `[json.exception.type_error.302] type must be string, but is boolean`
-  — **caught**, clean exit.
-- `793602574`: `[json.exception.type_error.302] type must be boolean,
-  but is number` — **NOT caught. `terminate()`, core dump.** This is a
-  real crash on malformed/type-mismatched input, not just a clean error
-  exit — meaningfully more severe than the original single-wallpaper
-  framing suggested.
-
-**Revised scope**: this needs a real fix to whatever JSON
-property-schema parsing path reads user-property type declarations from
-`project.json` (likely in the same area as this fork's other property
-parsers — check for the specific `.get<std::string>()`/`.get<bool>()`-
-style direct-type-assumption calls that `nlohmann::json` throws
-`type_error.302` for on a mismatch), making it tolerant of type
-mismatches (coerce where sensible, skip the malformed property with a
-clear log message otherwise) — not just special-casing one wallpaper's
-specific field. The uncaught crash case in particular needs its own
-explicit fix (wrap in a try/catch at minimum, ideally coerce), since an
-uncaught exception crashing the whole process on one malformed property
-is a real severity difference from the other two wallpapers' clean exits.
-
-**Open, not yet investigated**: exactly which property/field triggers
-each of the 3 known cases (not yet traced to a specific line), and
-whether other type-mismatch shapes (e.g. object-expected-got-array, the
-kind of malformed `"particle"` field encountered during `#11`'s
-investigation, though that was a different data path) might exist
-elsewhere in the same corpus but weren't hit by these specific 3
-wallpapers' specific property configurations.
-
-### #13 — verify `"type": "Web"` (capitalized) is genuinely handled correctly, not just accidentally not erroring
-Found during the 61-wallpaper corpus scan: 13 of 61 local web wallpapers
-declare `"type": "Web"` (capital W) rather than `"type": "web"`. All 61
-were included in the render-pass testing and none hit an "unsupported
-project type" error, so *empirically* the engine accepts it — but
-whether `ProjectParser::parseType`'s comparison is genuinely
-case-insensitive by design, or something else is masking a real
-case-sensitivity bug (e.g. falling through to a default/lenient branch
-for an unrecognized value rather than actually recognizing "Web" as
-"web"), was not verified. Small, quick to check once picked up — read
-the actual comparison logic and confirm which of these it actually is.
+Found 2026-07-06 as a side effect of `#12`'s verification, not fixed
+(kept out of scope for that task — a genuinely separate, pre-existing
+bug). Every web wallpaper tested with a `timeout <N>` wrapper (the
+standard verification pattern this whole session) now reaches — because
+they survive long enough to get there, post-`#12`'s fix — a crash on
+shutdown: `pure virtual method called`, terminating via `abort()`. This
+is a C++ object-lifetime bug during CEF's teardown sequence on
+`SIGTERM` — something is calling a virtual method on an object whose
+most-derived part has already been destructed (classically: a base
+class's destructor, or something reachable from it, invoking a virtual
+function that only the derived class overrides). Affects nearly every
+web wallpaper in this fork's corpus, not something specific to the 3
+wallpapers that surfaced it — they just happened to be the ones that
+previously crashed *before* reaching this point. Not yet traced to a
+specific class/destructor. Worth real investigation given how broadly it
+applies — likely affects any real-world use of this fork where a running
+web wallpaper process gets terminated normally (not just this session's
+own `timeout`-wrapped testing).
 
 ---
 
@@ -354,7 +326,104 @@ kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
 
-### #9 — DONE 2026-07-06: not "T7 upstream rebase" — resolved as two real, now-fixed bugs plus one small separate item (#12)
+### #12 — DONE 2026-07-06: general JSON type-coercion robustness fix, including the root cause of the one uncaught crash
+
+Traced all 3 known cases to their real source with `gdb` (pending
+breakpoints + reading arguments directly out of calling-convention
+registers, since this is a release build with no debug symbols) —
+confirmed they are **genuinely two different call sites**, not the same
+bug manifesting twice:
+- **`793602574` (the uncaught `terminate()`/core dump)**: traced to
+  `PropertyParser::parseBoolean()` → `JsonExtensions::optional<bool>
+  ("value", false)`. **Root cause of why this one specifically was
+  uncaught**: that template is declared `noexcept`, but its body does an
+  implicit type conversion that can throw — an exception crossing a
+  `noexcept` function boundary calls `std::terminate()` immediately,
+  regardless of any `try`/`catch` anywhere else in the program. A subtle,
+  real C++ correctness bug (a mismatched `noexcept` contract), not just
+  "a missing try/catch" — worth remembering that any other function in
+  this codebase marked `noexcept` while calling something that can throw
+  has the same latent risk, though none other than this one was found or
+  chased this round. The wallpaper's own data: `solarOn`/`starsOn`/
+  `themeOn` declared `type: "bool"` with values `1`/`1`/`0` — JSON
+  numbers, not JSON booleans.
+- **`1747779570` and `1685364754` (caught, clean `exit(1)`)**: both trace
+  to `PropertyParser::parseCombo()`'s separate, hand-written
+  `value.is_number() ? std::to_string(value.get<int>()) :
+  value.get<std::string>()` ternary, hit by combo options/values declared
+  as JSON booleans (a boolean-only two-way toggle authored as a combo
+  rather than a proper `bool` property — e.g. `hideWhenSilent`'s
+  `{"value": false}`/`{"value": true}` options). Lives entirely outside
+  any `noexcept` function, so the exception propagates normally to
+  `main()`'s top-level catch — a genuinely different failure mode,
+  confirming these are not the same call site as the first case.
+
+**Fix, three layered changes matching the three distinct places found**:
+1. `JsonExtensions::optional<T>()` (both overloads, `JSON.h`) — the one
+   shared helper nearly every property type (bool/slider/color/text/
+   file/scenetexture/textinput) ultimately routes through, making this
+   the systemic fix rather than a point patch. Wrapped the conversion in
+   `try`/`catch`, added a `coerce()` helper handling the two unambiguous
+   real-world cases (a bool-typed field authored as a number → nonzero
+   test; a string-typed field authored as a bool/number → stringify),
+   falling back to the caller's `defaultValue` with a logged warning
+   (property name, expected vs. actual JSON type) when no sensible
+   coercion applies.
+2. `PropertyParser::parseCombo()` — extracted a `comboValueToString()`
+   helper (number/string/bool all handled explicitly, anything else logs
+   a warning and defaults to `"0"`), used at both call sites (option
+   values and the property's own value).
+3. `ProjectParser::parseProperties()` — wrapped the per-property
+   `PropertyParser::parse()` call in `try`/`catch`, logging and skipping
+   just that one malformed property. This is the explicit **baseline
+   safety net** — the piece that generalizes protection to any future
+   malformed-input shape this fork hasn't encountered yet, not just the 3
+   known cases.
+
+Chose coercion-where-obvious + catch-and-skip-with-log over a stricter
+schema validator, since it matches the real failure mode (authors
+clearly intend a boolean/number/string value, just serialize it loosely)
+and needed no new abstractions — all three changes reuse this file's own
+existing conventions (`sLog.error`, the existing "Unknown property type"
+warning style).
+
+**Verification**: clean build (this recompiled ~80 translation units,
+since `JSON.h` is widely included — itself a good confirmation the
+change is source-compatible everywhere). All 3 known wallpapers confirmed
+fixed: zero JSON exceptions from any of them, all three now load
+properties successfully and produce real rendered screenshots —
+`793602574` specifically went from `terminate()`/core-dump straight to
+real varied rendered content, the priority deliverable. **Full
+61-wallpaper web re-check: zero regressions, net improvement** — 54→57
+render real content (the 3 fixed ones joined the group), 3
+correctly-black-by-config unchanged, 1 borderline-uniform unchanged
+(`3747222633`, still not conclusively resolved either way — genuinely
+open, not swept under this fix), 3→0 crashes. **Full 356-wallpaper scene
+regression: 354 clean, 2 errors, 0 crashes** — one is the long-standing
+documented Chainsaw Man GLSL flake, the other (`3510729512`) is the same
+already-proven-nondeterministic "Could not find where to place includes
+for shader unit commands/copy" shader-pipeline flake (a different
+wallpaper trips it each run) — confirmed via direct reproduction with
+zero JSON-related connection.
+
+**Real, separate bug surfaced along the way, deliberately not fixed
+here — see #14 below**: all 3 wallpapers, now surviving long enough to
+be killed by this session's standard `timeout`-wrapped test pattern,
+hit a pre-existing CEF teardown-on-`SIGTERM` crash (`pure virtual method
+called`) — confirmed unrelated to this fix and affecting nearly every
+web wallpaper in the corpus, not just these 3.
+
+### #13 — DONE 2026-07-06: `"type": "Web"` case-sensitivity confirmed to be a non-issue by design
+
+Resolved as a side effect of `#12`'s investigation. `ProjectParser`
+already lowercases the `type` field before dispatch — confirmed by
+direct code reading, not inference. `"Web"` and `"web"` were never
+actually at risk of being treated differently; the empirical "none of
+the 13 capitalized wallpapers hit an unsupported-type error" observation
+from the corpus scan reflected genuinely correct, intentional handling,
+not an accident or a masked bug. No code change needed.
+
+### #9 — DONE 2026-07-06: not "T7 upstream rebase" — resolved as two real, now-fixed bugs (see also #12, also since fixed)
 
 **"T7" could not be determined and is likely a stale/external reference.**
 Checked all git history/branches/tags on this fork and its upstream
