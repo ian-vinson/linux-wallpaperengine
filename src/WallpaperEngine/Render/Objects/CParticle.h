@@ -125,6 +125,11 @@ public:
     [[nodiscard]] glm::vec4 getColor4 () const override;
     [[nodiscard]] const glm::vec3& getCompositeColor () const override;
 
+    // World-space TRS matrix (translation from origin, then Z/Y/X rotation, then scale) — see
+    // updateMatrices(). Does NOT walk the parent chain, so it's only a true world matrix when
+    // this object is unparented; callers (ILayer.getTransformMatrix()) must check that themselves.
+    [[nodiscard]] const glm::mat4& getModelMatrix () const { return m_modelMatrix; }
+
 protected:
     void setupEmitters ();
     void setupInitializers ();

@@ -5,8 +5,10 @@
 #include <utility>
 
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
+#include "WallpaperEngine/Render/Objects/CParticle.h"
 #include "WallpaperEngine/Render/Objects/CRenderable.h"
 #include "WallpaperEngine/Render/Objects/CSound.h"
+#include "WallpaperEngine/Scripting/Adapters/Mat4Adapter.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
 
@@ -361,6 +363,52 @@ JSValue scriptableobject_sound_pause (JSContext* ctx, JSValueConst this_val, int
     return JS_UNDEFINED;
 }
 
+// thisLayer.getTransformMatrix(): real Wallpaper Engine returns the object's world-space
+// transform. Only CParticle has a genuine, well-formed TRS matrix available (m_modelMatrix) —
+// CImage/CText's rotation tracking silently drops any X/Y angle components (a separate,
+// independent correctness gap out of scope here), so they honestly return undefined rather than
+// a plausible-looking but incomplete result. CParticle's own m_modelMatrix never walks the
+// parent chain either (confirmed: its origin comes directly from Particle::origin, no parent
+// lookup), so it's only genuinely a WORLD matrix when the object is unparented — a parented
+// particle also returns undefined rather than silently handing back a local-only matrix under
+// the documented "world transform" name.
+JSValue scriptableobject_get_transform_matrix (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* container = static_cast<OpaqueScriptableObjectAdapter*> (JS_GetAnyOpaque (this_val, &classId));
+    auto* object = resolveScriptableObject (container);
+
+    if (object == nullptr || !object->is<WallpaperEngine::Render::Objects::CParticle> ()) {
+        return JS_UNDEFINED;
+    }
+
+    if (object->getObject ().parent.has_value ()) {
+        return JS_UNDEFINED;
+    }
+
+    const auto* particle = object->as<WallpaperEngine::Render::Objects::CParticle> ();
+
+    return container->adapter.getEngine ().getAdapters ().mat4->wrap (particle->getModelMatrix ());
+}
+
+// thisLayer.getAttachmentMatrix()/getAttachmentOrigin()/getAttachmentAngles(): real Wallpaper
+// Engine's puppet-warp/bone attachment API. This fork has zero attachment/puppet/bone
+// infrastructure (confirmed by repo-wide search), so these can't be implemented — but they're
+// still exposed as real, callable functions (matching real WE's API surface, so
+// `typeof thisLayer.getAttachmentMatrix === 'function'` succeeds) that throw a clear, specific
+// error when actually called, rather than being silently missing or returning undefined for a
+// script to fail on confusingly later (e.g. `undefined.transformPoint(...)`).
+JSValue scriptableobject_get_attachment_matrix (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return JS_ThrowTypeError (ctx, "getAttachmentMatrix() is not supported: this build has no puppet-warp/attachment system");
+}
+
+JSValue scriptableobject_get_attachment_origin (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return JS_ThrowTypeError (ctx, "getAttachmentOrigin() is not supported: this build has no puppet-warp/attachment system");
+}
+
+JSValue scriptableobject_get_attachment_angles (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    return JS_ThrowTypeError (ctx, "getAttachmentAngles() is not supported: this build has no puppet-warp/attachment system");
+}
+
 JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst receiver) {
     JSClassID classId = 0;
 
@@ -392,6 +440,22 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
 
     if (strcmp (name, "getParent") == 0) {
 	return JS_NewCFunction (ctx, scriptableobject_get_parent, "getParent", 0);
+    }
+
+    if (strcmp (name, "getTransformMatrix") == 0) {
+	return JS_NewCFunction (ctx, scriptableobject_get_transform_matrix, "getTransformMatrix", 0);
+    }
+
+    if (strcmp (name, "getAttachmentMatrix") == 0) {
+	return JS_NewCFunction (ctx, scriptableobject_get_attachment_matrix, "getAttachmentMatrix", 1);
+    }
+
+    if (strcmp (name, "getAttachmentOrigin") == 0) {
+	return JS_NewCFunction (ctx, scriptableobject_get_attachment_origin, "getAttachmentOrigin", 1);
+    }
+
+    if (strcmp (name, "getAttachmentAngles") == 0) {
+	return JS_NewCFunction (ctx, scriptableobject_get_attachment_angles, "getAttachmentAngles", 1);
     }
 
     // ISoundLayer surface — only meaningful (and only exposed) on sound-type layers, so a
