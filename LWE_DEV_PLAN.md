@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (Mat4/Mat3 shipped as real standalone SceneScript classes, closing the biggest blocker in #5's original scope — getTransformMatrix()/attachments remain, now genuinely smaller; also corrected a stale API-status row for media event hooks found while updating this table)
+**Last updated:** 2026-07-06 (getTransformMatrix()/getAttachmentMatrix() shipped — CParticle real+parent-guarded, honest stubs elsewhere; closes #5's practically-achievable scope. One new bug found and tracked, not fixed: #11, a CParticle SIGSEGV on a null particle material)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,33 +296,20 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #5 — PARTIALLY DONE: `Mat4`/`Mat3` shipped 2026-07-06; `getTransformMatrix()`/attachments remain, now genuinely smaller
-
-**`Mat4`/`Mat3` as standalone JS classes: DONE, see #5a in Completed
-Items.** This was the biggest, previously-blocking piece of this item's
-original scope — with real matrix math now available, the remaining work
-is meaningfully smaller than the original "SCOPE MUCH BIGGER THAN
-EXPECTED" framing suggested, though still real work, not trivial:
-
-- `ILayer.getTransformMatrix()` is now unblocked in principle (`Mat4`
-  exists to wrap the result in), but still needs the per-object-type
-  verification flagged originally: confirm whether `CImage`/`CText` store
-  a persistent model matrix the same way `CParticle` does
-  (`m_modelMatrix`), or build one inline without persistent storage —
-  not yet checked.
-- `getAttachmentMatrix()`/`getAttachmentOrigin()`/`getAttachmentAngles()`
-  remain **fully blocked** on a bone/puppet-warp rig system — confirmed via
-  repo-wide grep (as of 2026-07-04) that zero attachment/puppet/bone
-  infrastructure exists in this fork at all. These still need to be honest
-  stubs (undefined/clear "not supported" error) rather than real
-  implementations, unless building actual puppet-warp support becomes its
-  own dedicated project — that part of the original scope is unchanged and
-  still deferred indefinitely.
-
-
-
 ### #9 — T7 upstream rebase (web wallpapers)
 14+ web wallpapers blocked. Large dedicated session.
+
+### #11 — `CParticle` constructor SIGSEGV on a null/failed particle material
+Found 2026-07-06 as a side-effect of #5b's verification work, not fixed
+(kept strictly out of scope for that task). `CParticle::CParticle()`
+unconditionally dereferences `*particle.material->material` with no null
+check. If a particle's material fails to load (e.g. a parse exception
+swallowed upstream, leaving it null), this is a hard `SIGSEGV` at
+construction time rather than a graceful skip/error. Not observed in the
+real 356-wallpaper corpus (every wallpaper's particle materials happen to
+load successfully today), so this is a latent risk rather than a live
+symptom — but a real one, worth a defensive null check whenever picked up.
+Small, well-understood, likely a quick fix whenever it's picked up.
 
 ---
 
@@ -1174,9 +1161,110 @@ already-documented flakiness — not a regression. Zero new failures
 anywhere in the corpus, consistent with this being a purely additive
 change.
 
-**Remaining from the original #5 scope**: see the still-active entry
-above — `getTransformMatrix()` wiring and the full attachment/bone-rig
-system are separate, not addressed by this slice.
+**Remaining from this slice at the time**: `getTransformMatrix()` wiring
+and the full attachment/bone-rig system — addressed the same session, see
+#5b immediately below.
+
+### #5b — DONE 2026-07-06: `getTransformMatrix()` (CParticle, parent-guarded) + honest `getAttachmentMatrix()`/`getAttachmentOrigin()`/`getAttachmentAngles()` stubs — closes out #5's practically-achievable scope
+
+Closes the remainder of #5. Investigation earlier this session found that
+**none of the three object types** (`CImage`, `CText`, `CParticle`) have a
+transform representation that's simultaneously (a) a genuine world-space
+matrix, (b) parent-chain resolved, and (c) fully rotation-capable — see
+the discussion above `#5`'s original entry for the full comparison table.
+Given that, implementing this "correctly" for every type would mean
+building real parent-chain-walking logic from scratch — explicitly ruled
+out of scope for this pass in favor of an honest, narrower design:
+
+- **`CParticle::getTransformMatrix()`**: real and correct, but
+  parent-guarded. `CParticle::updateMatrices()` builds a genuine,
+  well-formed TRS `m_modelMatrix` — but confirmed (again, unchanged from
+  earlier this session) that it never walks the parent chain at all
+  (`m_transformedOrigin` comes directly from
+  `m_particle.origin->value->getVec3()`, a pure screen-space-to-centered
+  conversion, no parent lookup). Since the documented semantic is
+  explicitly *"the world transform matrix,"* returning this local-only
+  matrix for a parented object would be silently wrong — worse than
+  returning nothing. So: unparented particle system → returns a real,
+  correct `Mat4` (local *is* world when there's no parent to compose
+  with); parented particle system → returns `undefined` rather than a
+  plausible-but-wrong matrix. Added `CParticle::getModelMatrix()` (a
+  trivial const-ref getter) and wired it into
+  `ScriptableObjectAdapter.cpp`'s exotic dispatch, gated on
+  `is<CParticle>()` then `getObject().parent.has_value()`, matching the
+  established pattern from this session's sound/texture-animation
+  controllers.
+- **`CImage`/`CText`: return `undefined` unconditionally, no special
+  case.** Deliberately NOT attempting a "no parent" carve-out for these
+  two, even though `CImage::resolveTransform()` *is* parent-aware —
+  because it has a separate, independent correctness gap (only tracks a
+  single Z rotation angle as a float, silently dropping any X/Y
+  components the object's actual `angles` data might have — confirmed
+  `CParticle` reads the full `Vec3` from the same kind of field, so this
+  is a `CImage`-specific limitation, not a data-availability constraint).
+  Baking that gap silently into a "best effort" `getTransformMatrix()`
+  result would repeat the same silently-wrong-answer mistake the
+  `CParticle` parent-guard exists to avoid. Left as a known, honest gap.
+- **`getAttachmentMatrix(attachment)`/`getAttachmentOrigin(attachment)`/
+  `getAttachmentAngles(attachment)`**: added as real, callable functions
+  on every layer type (`typeof thisLayer.getAttachmentMatrix ===
+  'function'` succeeds, matching real WE's actual API surface) that each
+  throw a specific `TypeError` naming the missing puppet-warp/attachment
+  system when actually called — confirmed still zero attachment/puppet/
+  bone infrastructure anywhere in this fork. Unlike `getTransformMatrix()`'s
+  `undefined`-on-parent case, a script calling these expects to use the
+  return value immediately (e.g. `attachmentMatrix.transformPoint(...)`),
+  so a clear thrown error is more honest and useful here than silently
+  handing back `undefined` for something to fail confusingly on later.
+
+**Verification**: build clean under `-Wall -Werror`. Real script test
+against an unparented particle system (angles `(0,0,30°)`, scale
+`(2,1,1)`) — `getTransformMatrix()`'s `translation()` matched the
+hand-computed transformed origin exactly, and `right()`/`up()`/`forward()`
+matched independently-computed expected columns (via separate JS
+`Math.cos`/`Math.sin`, not by re-deriving from GLM) exactly. (First attempt
+returned identity — correctly diagnosed as a test-timing bug, not an
+implementation bug: `m_modelMatrix` isn't populated until the first
+`render()`/`updateMatrices()` call, so the check needed to run a few
+frames in, not on frame 1.) A parented particle system correctly returned
+`undefined` (confirmed the parent relationship was genuinely live via
+`getParent()` first, as a sanity check). `CImage`/`CText`, each with a
+real non-zero rotation angle set, both correctly returned `undefined`
+unconditionally — confirmed no silently-wrong partial result leaks
+through. All three attachment methods confirmed present
+(`typeof === 'function'`) and throwing the expected specific error, tested
+across `CParticle`/`CImage`/`CText`.
+
+**Full 356-wallpaper regression: 354 clean, 2 errors, 0 crashes.** One
+failure (`3420062133`, "Chainsaw Man") is the already-documented
+pre-existing GLSL flakiness case. The other (`2430021386`, "Anonymous",
+`OBJECT_SETUP_FAIL` — shader-unit include-placement failure) was **new**
+relative to the immediately-prior regression run — correctly NOT waved
+off as flakiness on sight: reproduced deterministically 3/3 times, then
+confirmed via a real `git stash`/rebuild/rerun against the true unmodified
+baseline that it fails identically there too. Pre-existing and unrelated
+to this change, a shader-preprocessing issue with no scripting code path
+involved — but treated with real skepticism rather than assumed benign
+just because it resembled a known pattern.
+
+**Bonus finding, NOT fixed here — see #11 below**: `CParticle`'s
+constructor unconditionally dereferences `*particle.material->material`
+with no null check, discovered when the verification script's own
+malformed test fixture (`"particle"` authored as an array instead of a
+string) triggered a real `SIGSEGV`, investigated properly via `gdb`/core
+dump rather than just changing things until it stopped crashing. The
+356-wallpaper corpus never hits this in practice (every wallpaper's
+particle materials happen to load successfully), but it's a real latent
+crash risk for any wallpaper whose particle material fails to parse.
+
+**This closes out #5's practically-achievable scope.** What remains —
+`CImage`/`CText`'s rotation-axis gap, and a real parent-chain-walking
+system needed for a fully correct `getTransformMatrix()` across all
+types, plus the entire attachment/bone-rig system — are all genuinely
+larger, separate undertakings, not follow-ups expected soon. No new
+priority item was opened for these; revisit only if a concrete need
+surfaces.
+
 
 
 
@@ -1219,8 +1307,8 @@ system are separate, not addressed by this slice.
 | Vec2/3/4 prototype methods (full set) | ✅ |
 | Mat4 (8 static factories + 21 instance methods) | ✅ (2026-07-06, see #5a in Completed Items) |
 | Mat3 (7 static factories + 17 instance methods) | ✅ (2026-07-06, see #5a in Completed Items) |
-| ILayer.getTransformMatrix() | ❌ (unblocked in principle now Mat4 exists, but needs per-object-type model-matrix verification — see #5) |
-| ILayer.getAttachmentMatrix() / getAttachmentOrigin() / getAttachmentAngles() | ❌ (blocked on a bone/puppet-warp rig system that doesn't exist in this fork at all — see #5) |
+| ILayer.getTransformMatrix() | ✅ CParticle only, parent-guarded (returns undefined if parented or not CParticle) — 2026-07-06, see #5b in Completed Items |
+| ILayer.getAttachmentMatrix() / getAttachmentOrigin() / getAttachmentAngles() | ⚠️ real callable functions, each throws a clear "not supported" error — genuinely blocked on a bone/puppet-warp rig system that doesn't exist in this fork at all, see #5b |
 | applyUserProperties(changedProps) | ✅ (load-time full-set + live changed-only via --properties-file/SIGUSR1, fully verified end-to-end 2026-07-04) |
 | resizeScreen(size) / destroy() | ❌ |
 | media* event hooks (mediaPropertiesChanged/mediaPlaybackChanged/mediaTimelineChanged/mediaThumbnailChanged) | ✅ (confirmed working end-to-end 2026-07-04 with real MPRIS playback — this row was stale, see #2 in Completed Items) |
