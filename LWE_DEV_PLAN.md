@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-07 (#16 fully CLOSED, including its last checklist item — `resolveGeometrySize()`'s call to `getSize()` directly confirmed via env-var-gated debug instrumentation on two real wallpapers, "Scarlet Witch" and "Retro Room", showing authored size wins over texture real dimensions for both passthrough/composelayer and non-passthrough objects. Also acquired and tested the second originally-reported wallpaper, 3409327922 from upstream #420, via the real Steam client's `+workshop_download_item` since no steamcmd is available in this environment — puppet character renders fully assembled, no scattered limbs, no horizontal seam. Both originally-reported wallpapers now confirmed clean on this fork. Active Priority Order: #17, #19, #20)
+**Last updated:** 2026-07-07 (added #21 — a likely broad "constantshadervalues scripts never execute" gap found as a side effect of #19's investigation, split out into its own tracked item since it affects more than one wallpaper. #19 investigated — both flagged theories (QuickJS SyntaxError, RADV driver interop) ruled out with direct evidence; real cause isolated to the `effects/blend` pass itself via `--render-debug skip-effect`, a genuine fork rendering bug, not a driver/environment limitation. Not fixed yet — flagged for follow-up. #16 fully CLOSED, including its last checklist item — `resolveGeometrySize()`'s call to `getSize()` directly confirmed via env-var-gated debug instrumentation on two real wallpapers, "Scarlet Witch" and "Retro Room", showing authored size wins over texture real dimensions for both passthrough/composelayer and non-passthrough objects. Also acquired and tested the second originally-reported wallpaper, 3409327922 from upstream #420 — puppet character renders fully assembled, no scattered limbs, no horizontal seam. Both originally-reported puppet-mesh wallpapers now confirmed clean on this fork. Active Priority Order: #17, #19 (partially investigated), #20, #21)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -461,6 +461,105 @@ picked up:
   to `#15`'s resolution. Not yet investigated which of these two (or
   something else) is the actual cause — flagged, not diagnosed.
 
+**2026-07-07 investigation — both flagged theories ruled out; real cause
+found and isolated, not yet fixed.** Acquired `2804831278` via the same
+Steam-client `+workshop_download_item` method used for `#16`'s
+`3409327922` (no steamcmd available). This test machine runs an NVIDIA
+RTX 3060 with the proprietary driver (`vulkaninfo`:
+`driverID=DRIVER_ID_NVIDIA_PROPRIETARY`, `conformanceVersion=1.4.1.3` —
+fully conformant, nothing like `radv`'s non-conformant warning) — a
+genuinely different GPU/driver stack than the original AMD RX 9070 XT
+report, which is itself useful signal.
+
+**Symptom reproduces exactly** (`--screenshot`, both at 3s and 15s into
+playback): a perfectly flat frame, pixel value `(178,178,178)` at every
+sampled point — which is precisely `round(0.7 × 255)`, i.e. the scene's
+own `clearcolor` (`"0.70000 0.70000 0.70000"` in `scene.json`) with zero
+gamma applied. This by itself is strong evidence the video/effect object
+is never drawing anything at all, rather than drawing something broken.
+
+**GPU/driver theory: ruled out.** mpv selected `cuda[nv12]` hardware
+decode (nvdec) here, not `vulkan-copy` — a completely different decode
+backend, on a fully-conformant driver, yet the gray screen reproduces
+identically. Went further and forced software decode entirely (temporary
+env-var override of the hardcoded `mpv_set_property_string(handle,
+"hwdec", "auto")` in `GLPlayer.cpp:232`, confirmed via the resulting `VO:
+[libmpv] 3920x2204 yuv420p` log line showing no hardware decoding was
+used) — **identical gray screen**, pixel-for-pixel. The symptom is
+provably independent of hardware decode, decode backend, and GPU vendor.
+Not a driver/environment issue.
+
+**QuickJS SyntaxError theory: ruled out, and explained.** Extracted
+`scene.json` directly from `scene.pkg` (raw offset read — pkg format is
+unpadded, entries listed via `--pkg-validate`) and found the actual
+script: four nearly-identical `constantshadervalues` scripts (`multiply`
+through `multiply4`) on the object's `effects/blend` day/night effect,
+each starting with `'use strict'; import * as WEMath from 'WEMath';` —
+exactly 4 scripts, matching the original log's "repeated 4 times".
+Traced this fork's actual script-compilation path
+(`DynamicValueParser.cpp` → `DynamicValue::setScriptSource` →
+`ScriptEngine::queueScript`, which really does use
+`JS_EVAL_TYPE_MODULE`, so `import * as X from 'Y'` is valid syntax
+there) and found `queueScript` is only ever invoked via
+`ScriptableObject::registerProperty` (`ScriptableObject.cpp:42`), which
+is called for a fixed, explicit whitelist of per-object properties
+(`origin`/`scale`/`angles`/`visible`/`alpha`/`color`/`parallaxDepth`,
+plus per-type extras). `CPass::setupShaderVariables()`
+(`CPass.cpp:963-999`), which applies `constantshadervalues`/effect
+overrides, wires each constant straight to a uniform via `addUniform`
+and **never calls `registerProperty`** for any of them. So on this
+fork's current architecture, shader-constant scripts are parsed into a
+`DynamicValue` with `m_scriptSource` set, but that source is never
+handed to `queueScript` — QuickJS never sees it, so it structurally
+cannot throw a `SyntaxError` here. Confirmed empirically too: zero
+`ScriptEngine`/`SyntaxError` output across every test run on this
+wallpaper. The original upstream report's SyntaxError is real for
+whatever code path produced it, but has **zero bearing on this fork's
+gray screen** — this fork doesn't even attempt to run that script.
+
+**Actual cause, isolated (not yet root-caused to a fix): the
+`effects/blend` pass itself.** Used `--render-debug skip-effect=28`
+(effect id 28 = the blend effect) to bypass just that one effect —
+**the video renders perfectly**, full color and motion, no gray, nothing
+else wrong. So: hardware decode → GL texture upload → base
+`genericimage2` draw are all confirmed working correctly; the bug is
+isolated specifically to the blend-effect pass. Likely mechanism, from
+reading the actual shipped shader
+(`assets/shaders/effects/blend.frag` + `common_blending.h`): the
+combo override here is `BLENDMODE=0`, `NUMBLENDTEXTURES=3`, blending in
+three large day/night textures (`清晨`/`早`/`黄昏`); `ApplyBlending()`'s
+`#if BLENDMODE == N` ladder has no case for `0`, so it falls through to
+the generic `mix(A, BlendNormal(A,B), opacity)` (a full replace at
+opacity 1) — and because the four `multiply*` constants never get their
+intended script-driven time-of-day gating (per the finding above, they
+sit frozen at their static JSON default of `1` always, instead of being
+zero outside their intended hour range), each of the three blend
+textures unconditionally and fully overwrites the previous result rather
+than being gated to "only one active at a time." This guarantees the
+video frame itself is discarded from the chain by construction — but
+doesn't by itself explain why the *final* pixel is exactly the scene's
+raw clearcolor rather than one of the three day/night textures' own
+content, which is the one open thread. Not chased further this session
+per the "stop and report before a non-trivial fix" rule — worth unpacking
+one of the `清晨`/`早`/`黄昏` `.tex` assets directly (or testing with
+`NUMBLENDTEXTURES` forced down) before attempting a fix, to confirm
+whether they resolve as intended or are themselves failing to bind/
+sample.
+
+**Classification: genuine fork bug, not a driver/environment
+limitation** — unlike `#15`. The two originally-flagged theories were
+both dead ends (one inert-by-architecture, one empirically independent
+of the actual cause); the real bug is a rendering-pipeline interaction
+between the unexecuted per-effect-constant scripting gap and the
+`effects/blend` shader's multi-texture replace chain. Separate from,
+but adjacent to, the general "shader-constant scripts are never wired to
+`ScriptEngine`" gap this investigation surfaced — that gap likely affects
+every wallpaper using scripted `constantshadervalues` (day/night blends,
+audio-reactive constants, etc.), not just this one; worth its own
+follow-up entry if picked up. All temporary instrumentation (env-var
+gated `hwdec` override in `GLPlayer.cpp`) fully reverted — confirmed via
+`git diff`, rebuild verified clean.
+
 ### #20 — LOW: Multiple simultaneous audio sources visible for a single wallpaper instance (upstream Almamu/linux-wallpaperengine#174)
 Older, still-open upstream issue:
 [Almamu/linux-wallpaperengine#174](https://github.com/Almamu/linux-wallpaperengine/issues/174).
@@ -478,6 +577,39 @@ client/output (one per sound file per object, potentially multiplying
 quickly on a wallpaper with several sound objects or particle-attached
 audio) rather than sharing one client connection per process, which
 would directly explain the reported symptom.
+
+### #21 — `constantshadervalues` scripts are parsed but never executed — a likely broad gap, found as a side effect of `#19`
+
+Found 2026-07-07 during `#19`'s investigation, not fixed. Confirmed via
+direct code tracing: this fork's script-compilation pipeline
+(`DynamicValueParser.cpp` → `DynamicValue::setScriptSource` →
+`ScriptEngine::queueScript`) is real and correctly handles standard
+per-object properties (`origin`/`scale`/`angles`/`visible`/`alpha`/
+`color`/`parallaxDepth`, etc.) via `ScriptableObject::registerProperty()`.
+But `CPass::setupShaderVariables()` — the function that applies
+`constantshadervalues`/effect-level shader constant overrides (used for
+things like day/night blend gating, audio-reactive shader uniforms) —
+wires each constant straight to a GL uniform via `addUniform()` and
+**never calls `registerProperty()`** for any of them. The script source
+is parsed into the `DynamicValue` (`m_scriptSource` gets set correctly),
+but that source is never handed off to `queueScript()` — QuickJS never
+sees it, so it can never run, and the constant is stuck at its static
+JSON default forever, with no error surfaced anywhere (confirmed
+empirically: zero `ScriptEngine` output for these scripts across every
+test run in `#19`'s investigation, despite 4 real, well-formed scripts
+being present in that wallpaper's `scene.json`).
+
+**Why this matters beyond `#19`'s specific wallpaper**: this is a
+structural gap in the wiring, not a bug in one wallpaper's content —
+likely affects *any* wallpaper using scripted `constantshadervalues`,
+a documented, real WE feature (day/night blend gating being the most
+common real-world use, per `#19`'s own investigation; audio-reactive
+shader uniforms per `WE_DOCS_REFERENCE.md` are another plausible case).
+Not yet scoped how many local wallpapers actually use this feature, or
+what registering these as real scriptable properties would require
+(likely: calling `registerProperty()` for each shader constant the same
+way other per-object properties already do, keyed appropriately given
+constants are per-*effect*-instance rather than per-*object*).
 
 
 
