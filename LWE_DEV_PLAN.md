@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-07 (#16a done — CImage's ping-pong FBOs now resize in place on size change, real architectural insight avoided a broken fix (couldn't reuse #4's remove()+create() pattern since CPass captures the FBO shared_ptr by value at setup time), verified via direct pass-log tracing. Honestly confirmed this fix does NOT explain the originally-reported scattered-limbs symptom — that wallpaper already renders correctly on this fork with no resize ever occurring. #16 downgraded to Low, reduced to just testing the second original wallpaper. Active Priority Order: #16, #17, #19, #20)
+**Last updated:** 2026-07-07 (#16 CLOSED — acquired the second originally-reported wallpaper, 3409327922 from upstream #420, via the real Steam client's `+workshop_download_item` since no steamcmd is available in this environment; ran it directly and confirmed the puppet character renders fully assembled with no scattered limbs and no horizontal seam artifact. Both originally-reported wallpapers now confirmed clean on this fork. Active Priority Order: #17, #19, #20)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,7 +296,12 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #16 — LOW, reduced scope 2026-07-07: puppet-mesh bug report may no longer apply to this fork — only the second original wallpaper remains untested
+### #16 — CLOSED 2026-07-07: both originally-reported puppet-mesh wallpapers confirmed rendering correctly on this fork
+
+Moved to Completed Items — see `#16`'s closure entry there (right after
+`#16a`) for the final second-wallpaper test and disposition.
+
+<details><summary>Original open investigation (superseded, kept for history)</summary>
 
 Reported 2026-07-06 with two real upstream bug reports as evidence:
 [Almamu/linux-wallpaperengine#420](https://github.com/Almamu/linux-wallpaperengine/issues/420)
@@ -374,6 +379,8 @@ than closed outright, but with a much lower expected remaining scope —
 the real next step, if this matters enough to pursue further, is simply
 testing the second wallpaper (`3409327922`) directly to see if it
 reproduces anything at all, rather than any further code investigation.
+
+</details>
 
 ### #17 — Custom X/Y UV offset for all wallpaper types (`--offset-x`/`--offset-y`), ported from TuxPaperEngine's engine fork
 
@@ -535,9 +542,65 @@ because that symptom was never caused by this bug in the first place.
 The puppet character in that wallpaper **already renders correctly
 assembled** with no resize ever occurring; this bug, while real, is
 currently latent (unreachable via any existing runtime mechanism) rather
-than an active cause of the reported issue. See `#16`'s continuing entry
-above for what this implies about the original bug report's current
+than an active cause of the reported issue. See `#16`'s closure entry
+below for what this implies about the original bug report's current
 relevance to this fork.
+
+### #16 — CLOSED 2026-07-07: both originally-reported puppet-mesh wallpapers confirmed rendering correctly on this fork
+
+Closes out the investigation started above and in `#16a`. The one
+remaining open thread was testing the second originally-reported
+wallpaper, `3409327922` from
+[Almamu/linux-wallpaperengine#420](https://github.com/Almamu/linux-wallpaperengine/issues/420)
+(the first, `3465215190` from `#527`, was already confirmed clean
+in `#16a`).
+
+**Acquisition**: not present locally. No `steamcmd` binary or package
+available in this environment (not in official repos, only AUR), so
+rather than installing new tooling, used the real Steam client already
+installed and logged in on this desktop (the same client that owns the
+727 other Wallpaper Engine workshop items already present locally) via
+`steam +workshop_download_item 431960 3409327922 +quit`. First attempt
+raced Steam's own startup (`workshop_log.txt`: "Update canceled: No
+Connection" — client wasn't done connecting yet); the identical second
+invocation succeeded once Steam was fully up, per `workshop_log.txt`:
+`Download item 3409327922 result : OK`. Confirmed
+`scene.pkg`/`project.json`/`preview.gif` landed in
+`~/.steam/steam/steamapps/workshop/content/431960/3409327922/`, and
+confirmed Steam exited cleanly afterward (`bootstrap_log.txt`:
+`Shutdown`, no lingering `steam` process).
+
+**Test**: ran the actual wallpaper directly
+(`--bg 3409327922 --screenshot ... --screenshot-delay <N>`, the engine's
+built-in screenshot flag rather than an X11/Wayland screen grab, since
+the desktop's real monitors were already occupied by Mural's live
+wallpapers). `project.json`'s description confirms this is a Frieren
+(anime) character puppet wallpaper, and the run log confirms
+`Loaded puppet mesh models/frirenpw_puppet.mdl` — the exact code path
+`#16`/`#16a` were investigating. Captured two screenshots at different
+points in the animation (`--screenshot-delay 60` and `240`, i.e. ~2s and
+~8s into the run at 30fps) to rule out a resize/animation-timing-
+dependent glitch, not just a single lucky frame.
+
+**Result: symptom does NOT reproduce.** Both screenshots show Frieren's
+staff, arms, legs, hair, and robe fully and correctly assembled — no
+scattered limbs, no visible horizontal seam in the sky/mountain
+background. Run log shows zero errors or warnings beyond the
+pre-existing, unrelated `param_9` shader-compile notice seen on every
+run in this codebase; no FBO resize occurred (consistent with `#16a`'s
+finding that `Image::size` is baked at parse time with no live resize
+trigger in normal playback).
+
+**Disposition**: both originally-reported wallpapers (`3465215190` from
+`#527`, `3409327922` from `#420`) now confirmed rendering correctly on
+this fork. Combined with 3 of the 4 review-flagged `#568` bugs already
+being independently fixed and the 4th (`CFBO` ping-pong resize) fixed
+this session via `#16a`, #16 is closed: the original scattered-limbs/
+horizontal-seam reports do not reproduce on this fork's current code,
+most likely because the underlying causes were already resolved via
+inherited upstream commits plus this session's own fix. No untestable
+caveat remains — both wallpapers named in the original report were
+directly acquired and run.
 
 ### #18 — DONE 2026-07-06: `WebBrowserContext` now cleans up its per-run CEF cache directory on clean shutdown
 
