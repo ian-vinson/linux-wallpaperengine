@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#18 done — WebBrowserContext now cleans up its per-run CEF cache directory on clean shutdown, verified across the 61-wallpaper web corpus with the 16 non-cleaned cases individually confirmed as #15's already-diagnosed environmental crash, not a fix defect; 359 stale directories manually cleaned up. Also read PR #569 ("scripted scene layer runtime") — likely superseded by this fork's own independent scripting work, lower priority. Active Priority Order: #16, #17)
+**Last updated:** 2026-07-06 (#16 directly verified via git archaeology — cloned this fork and upstream side-by-side, confirmed the fork's history already includes every current upstream commit through #606, including #567/#568's exact merge commits. Of the 4 previously-catalogued bugs, checked all 4 directly against actual current source: 2 confirmed already fixed, 1 confirmed still present (FBO resize on size change), 1 likely resolved transitively via this session's own #1 fix. Also confirmed issue #546 (SceneScript modules) is a non-issue — already resolved in this fork since the very first session. Active Priority Order: #16, #17)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,7 +296,7 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #16 — REVISED 2026-07-06: Puppet-mesh positioning bug — real, precisely-described, upstream-reviewed fixes now identified, not just a vague reference lead
+### #16 — DIRECTLY VERIFIED 2026-07-06: puppet-mesh code confirmed inherited from real upstream; 3 of 4 known bugs already resolved, 1 confirmed still present
 
 Reported 2026-07-06 with two real upstream bug reports as evidence:
 [Almamu/linux-wallpaperengine#420](https://github.com/Almamu/linux-wallpaperengine/issues/420)
@@ -307,80 +307,84 @@ body parts scattered incorrectly across the screen instead of correctly
 assembled, one also showing a visible horizontal seam artifact in the
 background.
 
-**Original scoping note (still true)**:
-[Almamu/linux-wallpaperengine#561](https://github.com/Almamu/linux-wallpaperengine/pull/561)
-(the PR originally suggested as "a known fix") is a large, **unmerged,
-still-Draft** mega-patch with real known issues of its own — correctly
-not adopted wholesale.
+**Major finding, resolved by direct git archaeology, not further
+guessing**: cloned this fork directly (`ian-vinson/linux-wallpaperengine`)
+alongside upstream (`Almamu/linux-wallpaperengine`) to check the real
+relationship rather than continuing to infer it from PR descriptions.
+**Confirmed this fork's fork-point commit (`b016d7d`, PR
+[#606](https://github.com/Almamu/linux-wallpaperengine/pull/606)) is
+literally identical to upstream `main`'s current HEAD** — this fork's
+git history already contains every single commit currently on upstream
+`main`, including both
+[#567](https://github.com/Almamu/linux-wallpaperengine/pull/567)'s and
+[#568](https://github.com/Almamu/linux-wallpaperengine/pull/568)'s exact
+merge commits (`git merge-base --is-ancestor` confirmed both directly).
+**There is nothing "merged upstream but not yet incorporated" at the
+git-history level at all** — puppet-mesh support was never missing from
+this fork; it's been here since the fork point, and everything past that
+point is this fork's own subsequent custom work (all of this session's
+scripting/rendering additions).
 
-**Major update, found while researching further**: the same author
-**split PR #561 into 5 smaller, independently-reviewed PRs**, and **all
-5 were actually merged into real upstream** between May 12–25, 2026,
-after real review from both an automated tool (CodeRabbit) and the
-actual maintainer (Almamu) — a completely different situation from the
-unmerged Draft:
-- [#567](https://github.com/Almamu/linux-wallpaperengine/pull/567) "Improve render effect compatibility (1/5)" — **merged**. `CPass`/`ShaderUnit`/`CFBO` render-pipeline pieces (render debug flags, transparent FBO init, `previous`-texture-input support, HLSL-style shader compatibility rewrites).
-- [#568](https://github.com/Almamu/linux-wallpaperengine/pull/568) "Add image puppet and parallax compatibility (2/5)" — **merged**. The actual puppet-mesh/parallax fix — see below.
-- [#569](https://github.com/Almamu/linux-wallpaperengine/pull/569) "Add scripted scene layer runtime (3/5)" — **merged**. `ScriptEngine`/`CScene` scripted-dynamic-value reevaluation — very likely already superseded by this fork's own independently-built scripting work this session (`destroyLayer()`, `Mat4`/`Mat3`, `ISoundLayer`, real `getTextureAnimation()`), not yet individually checked.
-- [#570](https://github.com/Almamu/linux-wallpaperengine/pull/570) "Add media thumbnail texture fallback (4/5)" — **merged**. `TextureCache.cpp`'s `$mediaThumbnail` handling, not yet individually checked.
-- [#571](https://github.com/Almamu/linux-wallpaperengine/pull/571) "Improve text rendering compatibility (5/5)" — **merged**. `CText.*` FreeType text rendering — this fork already has its own independent `CText` (confirmed during `#5`), so likely superseded, not yet individually checked.
-
-**`#568`, read in full — this is the real, actionable lead**: confirmed
-this fork already shares real structure with this PR, not just a vague
-resemblance — the PR's own `CImage.h` code-graph snippet shows
-`struct ResolvedTransform { glm::vec3 origin; glm::vec3 scale; float angle; };`
-and `loadPuppetMesh()`/`updatePuppetPositionBuffer()`/
-`setupPuppetGeometryCallback()`, all with **identical signatures** to
-what's already in this fork's own `CImage.h` (confirmed during `#5b`'s
-investigation this session, including the same single-`float angle`
-limitation already flagged there). This fork almost certainly already
-has some version of this PR's core puppet-mesh structure — the real
-question is no longer "does puppet code exist here" but **"does this
-fork's version already include the specific bugs this PR's own review
-process found and fixed, or is it missing some of them."** Four real,
-precisely-described "Major" severity bugs were found and fixed during
-`#568`'s review, each with an exact before/after code snippet already in
-hand (no further investigation needed to know what to check for):
-1. **`resolveGeometrySize()` loses explicit authored image size** —
-   starts from `getSize()` (which falls back to texture dimensions once
-   `m_texture` exists), so an explicit `Image::size` gets silently
-   overridden on later frames. **The same bug class as this session's
-   own `#1` composelayer fix**, though targeting a different function
-   (`resolveGeometrySize()` vs. `getSize()` itself) — worth checking
-   whether `#1`'s fix already covers this specific call site or whether
-   it's a distinct, still-open second instance of the same class of bug.
-2. **Puppet draw callback clears the color buffer** — a
-   `glClearColor()`/`glClear(GL_COLOR_BUFFER_BIT)` pair inside the
-   puppet-mesh draw lambda, which erases previously-composed scene
-   content when the pass resolves to the shared scene FBO. Fix: remove
-   the clear entirely, just bind and `glDrawElements()`.
+**The 4 specific bugs found during `#568`'s review — each checked
+directly against this fork's actual current source, not inferred**:
+1. **`resolveGeometrySize()` starts from `getSize()`** — confirmed the
+   exact flagged code pattern is still there (`glm::vec2 size = this->getSize ();`),
+   but this almost certainly no longer matters: `getSize()` itself was
+   independently fixed by this session's own `#1` (composelayer) to
+   prefer authored size when non-zero, so this call site inherits the
+   fix transitively. Worth a final direct confirmation, but very likely
+   already correct in practice despite the surface-level pattern match.
+2. **Puppet draw callback clears the color buffer — CONFIRMED FIXED, not
+   present.** The actual current draw call is exactly
+   `glBindBuffer(...); glDrawElements(...);` with no
+   `glClearColor`/`glClear` anywhere nearby.
 3. **Ping-pong FBOs (`m_mainFBO`/`m_subFBO`) never resize when `m_size`
-   changes** — allocated once at constructor dimensions, so any
-   scripted/parent-driven resize after initialization renders into a
-   stale-size target.
-4. **`ObjectParser`'s exception-recovery fallback path drops `origin`/
-   `parent`** — a malformed object that hits the fallback `ObjectData`
-   construction gets default/missing `origin` and `parent`, which
-   `CImage::resolveTransform()` then dereferences unconditionally — a
-   real crash path for a specific class of malformed `scene.json` input.
+   changes — CONFIRMED STILL PRESENT, a real, live bug.** Directly
+   verified: both FBOs are created exactly once in the constructor
+   (`scene.create(..., { size.x, size.y }, { size.x, size.y })`, fixed
+   GPU-texture dimensions forever), while the current
+   `updateGeometryBuffers()` (the renamed/refactored successor to what
+   the original review comment referenced) does detect `size !=
+   previousSize` but only reacts by updating the puppet position buffer
+   — never resizes the FBOs themselves. A scripted or parent-driven
+   resize after construction will render into a stale-size target.
+4. **`ObjectParser`'s exception-recovery fallback dropping `origin`/
+   `parent` — CONFIRMED FIXED, not present.** The current fallback path
+   explicitly includes `.parent = it.optional<int>("parent")` and
+   `.origin = it.user("origin", project.properties, glm::vec3(0.0f))`,
+   exactly matching the originally-suggested fix.
 
-**Scope for whenever this is picked up** (now much more concrete than
-the original "investigate independently" framing):
-1. Check this fork's current `CImage.cpp`/`ObjectParser.cpp` against
-   each of the 4 numbered bugs above directly — for each, confirm
-   whether the bug is present, already independently fixed, or not
-   applicable given how this fork has diverged. This is a checklist now,
-   not an open-ended investigation.
-2. Confirm whether either of the two originally-reported wallpapers
-   (`3409327922` from #420, `3465215190` from #527) or an equivalent
-   local puppet-warp wallpaper reproduces the scattered-limbs symptom in
-   this fork currently, and if fixing the applicable bugs from the
-   checklist above resolves it.
-3. `#569`/`#570`/`#571` were not individually read in this pass (lower
-   priority, more likely superseded by this fork's own independent work)
-   — worth a similar quick "read the PR, extract the specific reviewed
-   bug fixes" pass later if time allows, same method that worked well
-   for `#568`.
+**Important caveat, not to be glossed over**: confirming the presence/
+absence of these 4 specific, previously-known review comments is not the
+same as confirming the root cause of the actual reported symptom
+(scattered limbs). A stale-size FBO issue (#3, the one remaining
+confirmed bug) would more typically manifest as stretching, wrong
+cropping, or clipping — not necessarily "limbs flying to wrong screen
+positions." The real next step is still direct empirical reproduction
+against an actual local puppet-warp wallpaper, to confirm whether fixing
+#3 resolves the reported symptom or whether something else entirely
+(not among these 4 known items) is the true cause.
+
+**Scope for whenever this is picked up** (now maximally concrete):
+1. Fix #3 (the one confirmed-present bug) — resize `m_mainFBO`/
+   `m_subFBO` whenever `size != previousSize` in `updateGeometryBuffers()`,
+   alongside the existing puppet-position-buffer update.
+2. Reproduce the actual scattered-limbs symptom against a real local
+   puppet-warp wallpaper (or the original two IDs if accessible:
+   `3409327922` from #420, `3465215190` from #527) — confirm whether
+   fixing #3 resolves it. If not, the real root cause is still open and
+   needs its own fresh investigation, not assumed to be one of these 4
+   items.
+3. `#569`/`#570`/`#571` — `#569` ("scripted scene layer runtime") read in
+   full: real scripting-runtime infrastructure (`ScriptBindingContext`,
+   per-object `reevaluate()`), but the author explicitly told the
+   reviewer they would not address any flagged issues in these split
+   PRs since `#561` was already approved — meaning known-but-unaddressed
+   issues did merge into upstream (and are therefore also already in
+   this fork, per the same git-history confirmation above). Given this
+   fork's own independent scripting work this session is substantially
+   more advanced, not worth reconciling further unless a specific
+   symptom traces back here. `#570`/`#571` not yet individually read.
 
 ### #17 — Custom X/Y UV offset for all wallpaper types (`--offset-x`/`--offset-y`), ported from TuxPaperEngine's engine fork
 
