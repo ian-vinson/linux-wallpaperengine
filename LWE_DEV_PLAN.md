@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#15 closed — real Chromium GPU-process logging captured and reverted, confirmed a genuine environment limitation (severe memory pressure + a concurrently-running production instance competing for the same GPU on the heaviest-GPU-context wallpaper tested), not a fork bug. New #18 opened for a minor stale-cache-directory hygiene gap found along the way. Active Priority Order: #16, #17, #18)
+**Last updated:** 2026-07-06 (#16 substantially re-scoped — found the original mega-patch's author split it into 5 PRs, all actually merged into real upstream after real review, unlike the Draft original. Read #568 ("puppet and parallax") in full: this fork already shares real structure with it (identical ResolvedTransform struct, identical puppet-mesh method signatures), turning #16 from an open-ended investigation into a precise 4-item checklist of specific, already-reviewed bugs to check for. Active Priority Order: #16, #17, #18)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -306,7 +306,7 @@ directory is small and harmless individually), but worth a cleanup pass
 in the destructor whenever picked up, given how quickly these accumulate
 under repeated real-world use.
 
-### #16 — Puppet-mesh positioning bug ("body parts scattered" on scene wallpapers using puppet warp)
+### #16 — REVISED 2026-07-06: Puppet-mesh positioning bug — real, precisely-described, upstream-reviewed fixes now identified, not just a vague reference lead
 
 Reported 2026-07-06 with two real upstream bug reports as evidence:
 [Almamu/linux-wallpaperengine#420](https://github.com/Almamu/linux-wallpaperengine/issues/420)
@@ -317,58 +317,80 @@ body parts scattered incorrectly across the screen instead of correctly
 assembled, one also showing a visible horizontal seam artifact in the
 background.
 
-**Important scoping note, investigated before adding this**:
+**Original scoping note (still true)**:
 [Almamu/linux-wallpaperengine#561](https://github.com/Almamu/linux-wallpaperengine/pull/561)
-was suggested as "a known fix," but it is **not a small, targeted patch**
-— it's a large, **unmerged, still-Draft** PR ("Improve scene wallpaper
-compatibility (added puppetwarping, etc...)") bundling puppet-warp
-changes together with an entirely separate new text-rendering subsystem
-(`CText`, FreeType-based — this fork already has its own independent
-`CText`, confirmed during `#5`'s investigation), scripting-engine
-changes, shader-preprocessing changes, media-thumbnail loading, and
-Wayland input changes across 35 files. Automated review on the PR itself
-flagged multiple real, unresolved "Major" severity issues (unnormalized
-color values reaching shaders at >1.0, transform geometry going stale
-after the first frame so scripted movement/resizing silently stops
-working, a media-thumbnail cache that never refreshes, blocking I/O on
-the render thread, a null-pointer-dereference risk) — the PR author's
-own description says they're open to splitting it into smaller PRs,
-confirming it was never intended as a single mergeable unit.
-**Do not adopt this PR wholesale** — treat it only as a reference lead
-for the puppet-mesh-specific pieces, cross-checked against this fork's
-own code, not copied in directly.
+(the PR originally suggested as "a known fix") is a large, **unmerged,
+still-Draft** mega-patch with real known issues of its own — correctly
+not adopted wholesale.
 
-**Also confirmed before adding this**: puppet-mesh rendering is not
-"zero infrastructure" in this fork the way the SceneScript attachment
-API is (`#5`'s "no puppet/bone infrastructure exists" finding was
-specifically about `getAttachmentMatrix()`/etc., the *scripting*
-surface) — `CImage.h` already declares `loadPuppetMesh()`,
-`updatePuppetPositionBuffer()`, and `setupPuppetGeometryCallback()`
-(confirmed via grep during `#5`'s investigation). This fork already
-attempts to render puppet-warped characters via its own existing code
-path — meaning the scattered-limbs bug is very plausibly already
-reproducible here independent of whether PR #561 ever merges anywhere.
+**Major update, found while researching further**: the same author
+**split PR #561 into 5 smaller, independently-reviewed PRs**, and **all
+5 were actually merged into real upstream** between May 12–25, 2026,
+after real review from both an automated tool (CodeRabbit) and the
+actual maintainer (Almamu) — a completely different situation from the
+unmerged Draft:
+- [#567](https://github.com/Almamu/linux-wallpaperengine/pull/567) "Improve render effect compatibility (1/5)" — **merged**. `CPass`/`ShaderUnit`/`CFBO` render-pipeline pieces (render debug flags, transparent FBO init, `previous`-texture-input support, HLSL-style shader compatibility rewrites).
+- [#568](https://github.com/Almamu/linux-wallpaperengine/pull/568) "Add image puppet and parallax compatibility (2/5)" — **merged**. The actual puppet-mesh/parallax fix — see below.
+- [#569](https://github.com/Almamu/linux-wallpaperengine/pull/569) "Add scripted scene layer runtime (3/5)" — **merged**. `ScriptEngine`/`CScene` scripted-dynamic-value reevaluation — very likely already superseded by this fork's own independently-built scripting work this session (`destroyLayer()`, `Mat4`/`Mat3`, `ISoundLayer`, real `getTextureAnimation()`), not yet individually checked.
+- [#570](https://github.com/Almamu/linux-wallpaperengine/pull/570) "Add media thumbnail texture fallback (4/5)" — **merged**. `TextureCache.cpp`'s `$mediaThumbnail` handling, not yet individually checked.
+- [#571](https://github.com/Almamu/linux-wallpaperengine/pull/571) "Improve text rendering compatibility (5/5)" — **merged**. `CText.*` FreeType text rendering — this fork already has its own independent `CText` (confirmed during `#5`), so likely superseded, not yet individually checked.
 
-**Scope for whenever this is picked up**:
-1. First confirm the bug actually reproduces in this fork specifically
-   (find or acquire a local wallpaper using puppet warp/character-sheet
-   limbs, ideally one of the two exact wallpaper IDs from the linked
-   issues if accessible) — don't assume upstream's bug automatically
-   applies here without checking, since this fork has diverged
-   substantially in `CImage.cpp` this session already (`resolveTransform()`/
-   `localTransform()`'s parent-chain split, the `getSize()` fix from `#1`,
-   etc.).
-2. If confirmed, root-cause it within this fork's own existing
-   `loadPuppetMesh`/`updatePuppetPositionBuffer`/
-   `setupPuppetGeometryCallback` code — using PR #561's puppet-mesh-
-   relevant diff hunks as one lead among others to investigate, not as a
-   source to merge from directly.
-3. Given this fork's own `resolveTransform()` already has a documented,
-   real limitation (`#5b`: only tracks a single Z rotation angle, not a
-   full Euler triple) — worth checking early whether that same limitation
-   is actually the root cause here too, since puppet-mesh limb
-   positioning is exactly the kind of feature that would need full 3-axis
-   rotation to correctly reassemble a multi-part character.
+**`#568`, read in full — this is the real, actionable lead**: confirmed
+this fork already shares real structure with this PR, not just a vague
+resemblance — the PR's own `CImage.h` code-graph snippet shows
+`struct ResolvedTransform { glm::vec3 origin; glm::vec3 scale; float angle; };`
+and `loadPuppetMesh()`/`updatePuppetPositionBuffer()`/
+`setupPuppetGeometryCallback()`, all with **identical signatures** to
+what's already in this fork's own `CImage.h` (confirmed during `#5b`'s
+investigation this session, including the same single-`float angle`
+limitation already flagged there). This fork almost certainly already
+has some version of this PR's core puppet-mesh structure — the real
+question is no longer "does puppet code exist here" but **"does this
+fork's version already include the specific bugs this PR's own review
+process found and fixed, or is it missing some of them."** Four real,
+precisely-described "Major" severity bugs were found and fixed during
+`#568`'s review, each with an exact before/after code snippet already in
+hand (no further investigation needed to know what to check for):
+1. **`resolveGeometrySize()` loses explicit authored image size** —
+   starts from `getSize()` (which falls back to texture dimensions once
+   `m_texture` exists), so an explicit `Image::size` gets silently
+   overridden on later frames. **The same bug class as this session's
+   own `#1` composelayer fix**, though targeting a different function
+   (`resolveGeometrySize()` vs. `getSize()` itself) — worth checking
+   whether `#1`'s fix already covers this specific call site or whether
+   it's a distinct, still-open second instance of the same class of bug.
+2. **Puppet draw callback clears the color buffer** — a
+   `glClearColor()`/`glClear(GL_COLOR_BUFFER_BIT)` pair inside the
+   puppet-mesh draw lambda, which erases previously-composed scene
+   content when the pass resolves to the shared scene FBO. Fix: remove
+   the clear entirely, just bind and `glDrawElements()`.
+3. **Ping-pong FBOs (`m_mainFBO`/`m_subFBO`) never resize when `m_size`
+   changes** — allocated once at constructor dimensions, so any
+   scripted/parent-driven resize after initialization renders into a
+   stale-size target.
+4. **`ObjectParser`'s exception-recovery fallback path drops `origin`/
+   `parent`** — a malformed object that hits the fallback `ObjectData`
+   construction gets default/missing `origin` and `parent`, which
+   `CImage::resolveTransform()` then dereferences unconditionally — a
+   real crash path for a specific class of malformed `scene.json` input.
+
+**Scope for whenever this is picked up** (now much more concrete than
+the original "investigate independently" framing):
+1. Check this fork's current `CImage.cpp`/`ObjectParser.cpp` against
+   each of the 4 numbered bugs above directly — for each, confirm
+   whether the bug is present, already independently fixed, or not
+   applicable given how this fork has diverged. This is a checklist now,
+   not an open-ended investigation.
+2. Confirm whether either of the two originally-reported wallpapers
+   (`3409327922` from #420, `3465215190` from #527) or an equivalent
+   local puppet-warp wallpaper reproduces the scattered-limbs symptom in
+   this fork currently, and if fixing the applicable bugs from the
+   checklist above resolves it.
+3. `#569`/`#570`/`#571` were not individually read in this pass (lower
+   priority, more likely superseded by this fork's own independent work)
+   — worth a similar quick "read the PR, extract the specific reviewed
+   bug fixes" pass later if time allows, same method that worked well
+   for `#568`.
 
 ### #17 — Custom X/Y UV offset for all wallpaper types (`--offset-x`/`--offset-y`), ported from TuxPaperEngine's engine fork
 
