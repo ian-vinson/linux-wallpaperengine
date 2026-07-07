@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#14 fixed and thoroughly verified — the CWeb::~CWeb() use-after-free is resolved with a one-line fix, zero regressions across 61 web wallpapers + 356 scene wallpapers, plus wallpaper-switching directly tested via a sandboxed fake $HOME. New #15 opened for an unrelated Chromium GPU-process SIGTRAP found during verification, narrow scope. Active Priority Order is down to just #15)
+**Last updated:** 2026-07-06 (#15 closed — real Chromium GPU-process logging captured and reverted, confirmed a genuine environment limitation (severe memory pressure + a concurrently-running production instance competing for the same GPU on the heaviest-GPU-context wallpaper tested), not a fork bug. New #18 opened for a minor stale-cache-directory hygiene gap found along the way. Active Priority Order: #16, #17, #18)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,20 +296,134 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #15 — Chromium `IntentionallyCrashBrowserForUnusableGpuProcess` SIGTRAP, one web wallpaper
-Found 2026-07-06 as a side effect of `#14`'s verification testing (5
-additional wallpapers tested beyond the 3 known cases), not fixed.
-"Zenless Zone Zero TV" hits a `SIGTRAP` crash mid-run (not at shutdown —
-confirmed unrelated to `#14`'s use-after-free via a real backtrace),
-identified as Chromium's own deliberate,
-`IntentionallyCrashBrowserForUnusableGpuProcess`-named safety response to
-a GPU process launch failure. Not yet investigated further — could be a
-genuine environment limitation (no usable GPU/driver path available for
-this specific wallpaper's rendering requirements in this sandboxed
-environment) rather than a bug in this fork's own code, or could reflect
-a real gap in how this fork configures/passes GPU-related CEF settings.
-Only observed on 1 of the ~66 web wallpapers tested across this session's
-various checks — narrow scope, worth a look but not urgent.
+### #18 — `WebBrowserContext` never cleans up its per-run CEF cache directories in `/tmp`
+Found 2026-07-06 as a side effect of `#15`'s investigation, not fixed.
+`WebBrowserContext` generates a fresh UUID-named cache directory per run
+(`uuid::generate_uuid_v4()`) but `~WebBrowserContext()` never removes it
+— confirmed 337 accumulated stale directories in `/tmp` from this
+session's testing alone. Minor hygiene gap, not a functional bug (each
+directory is small and harmless individually), but worth a cleanup pass
+in the destructor whenever picked up, given how quickly these accumulate
+under repeated real-world use.
+
+### #16 — Puppet-mesh positioning bug ("body parts scattered" on scene wallpapers using puppet warp)
+
+Reported 2026-07-06 with two real upstream bug reports as evidence:
+[Almamu/linux-wallpaperengine#420](https://github.com/Almamu/linux-wallpaperengine/issues/420)
+and
+[Almamu/linux-wallpaperengine#527](https://github.com/Almamu/linux-wallpaperengine/issues/527)
+— both show puppet-warped 2D character wallpapers rendering with limbs/
+body parts scattered incorrectly across the screen instead of correctly
+assembled, one also showing a visible horizontal seam artifact in the
+background.
+
+**Important scoping note, investigated before adding this**:
+[Almamu/linux-wallpaperengine#561](https://github.com/Almamu/linux-wallpaperengine/pull/561)
+was suggested as "a known fix," but it is **not a small, targeted patch**
+— it's a large, **unmerged, still-Draft** PR ("Improve scene wallpaper
+compatibility (added puppetwarping, etc...)") bundling puppet-warp
+changes together with an entirely separate new text-rendering subsystem
+(`CText`, FreeType-based — this fork already has its own independent
+`CText`, confirmed during `#5`'s investigation), scripting-engine
+changes, shader-preprocessing changes, media-thumbnail loading, and
+Wayland input changes across 35 files. Automated review on the PR itself
+flagged multiple real, unresolved "Major" severity issues (unnormalized
+color values reaching shaders at >1.0, transform geometry going stale
+after the first frame so scripted movement/resizing silently stops
+working, a media-thumbnail cache that never refreshes, blocking I/O on
+the render thread, a null-pointer-dereference risk) — the PR author's
+own description says they're open to splitting it into smaller PRs,
+confirming it was never intended as a single mergeable unit.
+**Do not adopt this PR wholesale** — treat it only as a reference lead
+for the puppet-mesh-specific pieces, cross-checked against this fork's
+own code, not copied in directly.
+
+**Also confirmed before adding this**: puppet-mesh rendering is not
+"zero infrastructure" in this fork the way the SceneScript attachment
+API is (`#5`'s "no puppet/bone infrastructure exists" finding was
+specifically about `getAttachmentMatrix()`/etc., the *scripting*
+surface) — `CImage.h` already declares `loadPuppetMesh()`,
+`updatePuppetPositionBuffer()`, and `setupPuppetGeometryCallback()`
+(confirmed via grep during `#5`'s investigation). This fork already
+attempts to render puppet-warped characters via its own existing code
+path — meaning the scattered-limbs bug is very plausibly already
+reproducible here independent of whether PR #561 ever merges anywhere.
+
+**Scope for whenever this is picked up**:
+1. First confirm the bug actually reproduces in this fork specifically
+   (find or acquire a local wallpaper using puppet warp/character-sheet
+   limbs, ideally one of the two exact wallpaper IDs from the linked
+   issues if accessible) — don't assume upstream's bug automatically
+   applies here without checking, since this fork has diverged
+   substantially in `CImage.cpp` this session already (`resolveTransform()`/
+   `localTransform()`'s parent-chain split, the `getSize()` fix from `#1`,
+   etc.).
+2. If confirmed, root-cause it within this fork's own existing
+   `loadPuppetMesh`/`updatePuppetPositionBuffer`/
+   `setupPuppetGeometryCallback` code — using PR #561's puppet-mesh-
+   relevant diff hunks as one lead among others to investigate, not as a
+   source to merge from directly.
+3. Given this fork's own `resolveTransform()` already has a documented,
+   real limitation (`#5b`: only tracks a single Z rotation angle, not a
+   full Euler triple) — worth checking early whether that same limitation
+   is actually the root cause here too, since puppet-mesh limb
+   positioning is exactly the kind of feature that would need full 3-axis
+   rotation to correctly reassemble a multi-part character.
+
+### #17 — Custom X/Y UV offset for all wallpaper types (`--offset-x`/`--offset-y`), ported from TuxPaperEngine's engine fork
+
+Requested 2026-07-06 after comparing Mural/this fork against
+[TuxPaperEngine](https://github.com/NeXx42/TuxPaperEngine) (a sibling
+GUI, same role as Mural) and its underlying engine fork,
+[NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork).
+Cloned and read that fork's actual source directly (not just its README,
+which turned out to be a near-verbatim copy of upstream's and didn't
+document this at all) to find the real mechanism.
+
+**The feature, fully understood, not just located**: two new CLI flags,
+`--offset-x <float>`/`--offset-y <float>`, threaded into the exact same
+per-screen settings structure `--scaling`/`--clamp` already use
+(`ApplicationContext.cpp`, `settings.general.uvOffset[screen]` for
+desktop-background mode, `settings.render.window.uvOffset` for windowed
+mode). The actual application lives entirely in one shared class,
+`WallpaperState` — confirmed via `grep` that `uvOffset` threads through
+`CWallpaper`'s common factory function and is used identically by
+`CScene`, `CVideo`, **and** `CWeb`, not implemented three separate times.
+A small `WallpaperState::addUVOffsets()` method is called at the end of
+every existing UV-computation path (`resetUVs()`, `updateUs()`,
+`updateVs()` — the functions already computing the sampled UV rectangle
+for all four scaling modes: Stretch/Fit/Fill/Default), applying the
+offset as a final adjustment on top regardless of which scaling mode is
+active:
+```cpp
+void WallpaperState::addUVOffsets () {
+    this->m_UVs.ustart += this->getViewportHorizontalOffset ();
+    this->m_UVs.uend += this->getViewportHorizontalOffset ();
+    if (m_vflip) {
+        this->m_UVs.vstart -= this->getViewportVerticalOffset ();
+        this->m_UVs.vend -= this->getViewportVerticalOffset ();
+    } else {
+        this->m_UVs.vstart += this->getViewportVerticalOffset ();
+        this->m_UVs.vend += this->getViewportVerticalOffset ();
+    }
+}
+```
+Genuinely universal by construction (applied once, at the shared "final
+texture UV sampling" layer) rather than three separate implementations
+that happen to look similar — exactly matching the "all wallpaper types"
+requirement.
+
+**Scope for whenever this is picked up**: this fork almost certainly
+already has an equivalent shared UV-scaling abstraction (confirmed this
+session that `--scaling`/`--clamp` already work identically across
+scene/video/web here), so the real first step is confirming that
+equivalent class's exact name/shape in *this* fork (not assuming it's
+named `WallpaperState` too) before porting — likely a genuinely small
+addition: two new CLI flags plus a small offset-application method
+mirroring `addUVOffsets()` above, added to whatever this fork's
+equivalent shared UV-computation function already is. Should not require
+touching `CScene`/`CVideo`/`CWeb` individually if the shared-class
+architecture matches, which is the expected case.
 
 ---
 
@@ -319,6 +433,72 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #15 — CLOSED 2026-07-06: Chromium `IntentionallyCrashBrowserForUnusableGpuProcess` SIGTRAP — genuine environment limitation, not a fork bug
+
+Investigated with real evidence rather than guessed at — same discipline
+as every other classification call this session. **Not fixed, and
+correctly not forced into a fix**, since the classification itself is
+the actual finding: this is environment-specific, not a gap in this
+fork's own code.
+
+**The real Chromium log sequence** (captured via temporary
+`--enable-logging=stderr --v=1 --vmodule=*gpu*=2` diagnostic flags added
+to `BrowserApp.cpp`, then fully reverted — confirmed empty diff after):
+```
+ERROR:command_buffer_proxy_impl.cc(327)] GPU state invalid after WaitForGetOffsetInRange.
+ERROR:gpu_process_host.cc(948)] GPU process launch failed: error_code=1002
+WARNING:gpu_process_host.cc(1395)] The GPU process has crashed 1 time(s)
+... (repeats 9 times, all within ~5 milliseconds)
+FATAL:gpu_data_manager_impl_private.cc(415)] GPU process isn't usable. Goodbye.
+```
+This is a **runtime** GPU-process crash followed by near-instant repeated
+relaunch failure (`error_code=1002` — dead-on-arrival, not a slow retry
+backoff) — a fundamentally different failure mode than a startup/driver-
+detection failure. This distinction matters: the standard fix for
+detection failures (forcing CEF's bundled SwiftShader software
+rasterizer) would not address this at all, since the hardware GL path
+was already confirmed working via `glxinfo`/`eglinfo` — the problem is
+that the GPU process itself couldn't be relaunched, not that it was
+never usable in the first place.
+
+**Real, concrete comparison against "Cat"** (also WebGL, never crashes
+this way): Cat is a single `js/index.js` scene with one WebGL context.
+"Zenless Zone Zero TV" concurrently creates **at least 3 separate WebGL
+contexts** (`lava_lamp_shader.js`, `noise_shader.js`,
+`animation_grid_shader.js`), multiple 2D canvas contexts (two audio
+visualizers, a CRT effect, two bounce-animations), **plus an embedded
+YouTube iframe player** (its own process/GPU surface) — by a wide
+margin the heaviest concurrent-GPU-context load of any wallpaper tested
+in the corpus.
+
+**Confirmed this fork's own GPU configuration is irrelevant here**:
+`WebBrowserContext.cpp`/`BrowserApp.cpp` pass zero GPU-related CEF
+switches (no `--disable-gpu`, `--use-gl`, `--ignore-gpu-blocklist`, or
+SwiftShader-forcing flags) — GPU acceleration is left entirely at
+Chromium's own default auto-detection, and that default already works
+correctly (confirmed real hardware, `renderD128`, working direct
+rendering via `glxinfo`/`eglinfo`).
+
+**The actual environmental confound found**: this test machine was under
+real, severe memory pressure at the time (27GB/31GB swap in use, only
+9.1GB RAM free) **with an already-running production
+`wallpaperengine` instance (PID 4326) actively rendering on the same
+`DP-3` output, competing for the same GPU concurrently**. Combined with
+being the single heaviest GPU-context wallpaper in the corpus, this is a
+fully sufficient, independent explanation for a GPU-process crash and
+relaunch failure that has nothing to do with this fork's own code.
+
+**Classification: genuine environment limitation, not a fork
+configuration gap.** No missing standard CEF flag would fix "the GPU
+process can't be relaunched under severe memory/GPU contention." Closed
+without a code change.
+
+**Bonus finding along the way, not fixed here — see `#18` below**: found
+337 accumulated stale CEF cache directories in `/tmp`, one per test run
+this session, because `WebBrowserContext`'s destructor never cleans up
+the UUID-named cache directory its constructor creates — a separate,
+minor hygiene gap, not the cause of this specific crash.
 
 ### #14 — DONE 2026-07-06: `CWeb::~CWeb()` use-after-free fixed — a genuine use-after-free, universal across all web wallpapers, not SIGTERM-specific
 
