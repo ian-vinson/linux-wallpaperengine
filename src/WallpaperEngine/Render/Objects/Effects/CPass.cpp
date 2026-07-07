@@ -9,6 +9,8 @@
 
 #include "WallpaperEngine/Render/CFBO.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
+#include "WallpaperEngine/Scripting/ScriptEngine.h"
+#include "WallpaperEngine/Scripting/ScriptableObject.h"
 
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariable.h"
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableFloat.h"
@@ -983,6 +985,7 @@ void CPass::setupShaderVariables () {
 
 	ShaderVariable* var = vertex == nullptr ? fragment : vertex;
 	this->addUniform (var, value->value.get ());
+	this->registerScriptedConstant (name, "pass", *value->value);
     }
 
     // apply override constants (highest priority, overrides both defaults and pass constants)
@@ -995,7 +998,32 @@ void CPass::setupShaderVariables () {
 
 	ShaderVariable* var = vertex == nullptr ? fragment : vertex;
 	this->addUniform (var, value->value.get ());
+	this->registerScriptedConstant (name, "override", *value->value);
     }
+}
+
+void CPass::registerScriptedConstant (const std::string& name, const char* scope, DynamicValue& value) const {
+    if (!value.getScriptSource ().has_value ()) {
+	return;
+    }
+
+    // constantshadervalues are effect/pass-scoped, not object-scoped, so they can't go through
+    // ScriptableObject::registerProperty() — its m_properties map is keyed by bare name per
+    // object, and multiple effects on the same object commonly reuse generic constant names
+    // (e.g. "multiply", "alpha"), which would silently clobber each other (registerProperty()
+    // no-ops if the name is already registered) or collide with the object's own same-named
+    // property. Keying on this CPass instance's own address instead guarantees uniqueness
+    // without needing author-provided ids, which can be missing or duplicated in scene.json.
+    auto* scriptable = dynamic_cast<Scripting::ScriptableObject*> (&this->m_renderable);
+
+    if (scriptable == nullptr) {
+	return;
+    }
+
+    const std::string key
+	= "shaderconstant_" + std::to_string (reinterpret_cast<uintptr_t> (this)) + "_" + scope + "_" + name;
+
+    this->m_renderable.getScene ().getScriptEngine ().queueScript (key, value, *scriptable);
 }
 
 // define some basic methods for the template

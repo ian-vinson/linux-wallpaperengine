@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-07 (added #21 — a likely broad "constantshadervalues scripts never execute" gap found as a side effect of #19's investigation, split out into its own tracked item since it affects more than one wallpaper. #19 investigated — both flagged theories (QuickJS SyntaxError, RADV driver interop) ruled out with direct evidence; real cause isolated to the `effects/blend` pass itself via `--render-debug skip-effect`, a genuine fork rendering bug, not a driver/environment limitation. Not fixed yet — flagged for follow-up. #16 fully CLOSED, including its last checklist item — `resolveGeometrySize()`'s call to `getSize()` directly confirmed via env-var-gated debug instrumentation on two real wallpapers, "Scarlet Witch" and "Retro Room", showing authored size wins over texture real dimensions for both passthrough/composelayer and non-passthrough objects. Also acquired and tested the second originally-reported wallpaper, 3409327922 from upstream #420 — puppet character renders fully assembled, no scattered limbs, no horizontal seam. Both originally-reported puppet-mesh wallpapers now confirmed clean on this fork. Active Priority Order: #17, #19 (partially investigated), #20, #21)
+**Last updated:** 2026-07-07 (#21 DONE — `constantshadervalues` scripts (day/night blend gating etc.) are now genuinely wired into `ScriptEngine`/QuickJS via a new `CPass::registerScriptedConstant()`, keyed by the `CPass` instance's own address to avoid the cross-effect name-collision risk `ScriptableObject::registerProperty()`'s bare-name keying would have hit. Verified with real, correctly time-gated values on `#19`'s wallpaper; confirmed via `git stash` A/B that it does NOT resolve `#19`'s gray screen — that's a separate, still-open bug now further isolated. Zero regressions: 356-wallpaper scene batch (2 known pre-existing errors, 0 crashes) and 48-wallpaper web corpus (48/48 clean) both match established baselines. #19 remains open. #16 fully CLOSED, including its last checklist item — `resolveGeometrySize()`'s call to `getSize()` directly confirmed via env-var-gated debug instrumentation on two real wallpapers, "Scarlet Witch" and "Retro Room". Also acquired and tested the second originally-reported wallpaper, 3409327922 from upstream #420 — puppet character renders fully assembled, no scattered limbs, no horizontal seam. Both originally-reported puppet-mesh wallpapers now confirmed clean on this fork. Active Priority Order: #17, #19 (partially investigated), #20)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -578,7 +578,13 @@ quickly on a wallpaper with several sound objects or particle-attached
 audio) rather than sharing one client connection per process, which
 would directly explain the reported symptom.
 
-### #21 — `constantshadervalues` scripts are parsed but never executed — a likely broad gap, found as a side effect of `#19`
+### #21 — DONE 2026-07-07: `constantshadervalues` scripts now wired into `ScriptEngine` — fixed, verified, does NOT resolve `#19`'s gray screen (separate bug)
+
+Moved to Completed Items — see `#21`'s entry there (right after `#16`'s
+closure) for the architecture findings, design, implementation, and
+regression results.
+
+<details><summary>Original open investigation (superseded, kept for history)</summary>
 
 Found 2026-07-07 during `#19`'s investigation, not fixed. Confirmed via
 direct code tracing: this fork's script-compilation pipeline
@@ -611,7 +617,7 @@ what registering these as real scriptable properties would require
 way other per-object properties already do, keyed appropriately given
 constants are per-*effect*-instance rather than per-*object*).
 
-
+</details>
 
 ---
 
@@ -733,6 +739,123 @@ most likely because the underlying causes were already resolved via
 inherited upstream commits plus this session's own fix. No untestable
 caveat remains — both wallpapers named in the original report were
 directly acquired and run.
+
+### #21 — DONE 2026-07-07: `constantshadervalues` scripts now wired into `ScriptEngine` — fixed, verified, does NOT resolve `#19`'s gray screen (separate bug)
+
+Fixes the gap found during `#19`'s investigation: shader-constant
+scripts (`constantshadervalues`, e.g. day/night blend gating) were
+parsed into a `DynamicValue` with `m_scriptSource` set, but never handed
+to `ScriptEngine::queueScript()`, so QuickJS never ran them — they sat
+frozen at their static JSON default forever, silently.
+
+**Step 0 — architecture, investigated before designing anything.**
+`ScriptableObject::registerProperty()`'s `m_properties` map is keyed by
+a bare short name (`"origin"`, `"scale"`, …) **per object** — the
+global uniqueness for `ScriptEngine::m_scriptModules` comes from a
+separate derived key (`name + "_" + getId()`), but the object-facing
+`m_properties` map itself only ever holds one entry per bare name.
+`CPass`, however, is effect/pass-scoped, not object-scoped: `CImage`
+and `CParticle` (the only two owners of `CPass`, confirmed by grepping
+every `new CPass(...)` call site) can each have multiple effects, and
+multiple passes per effect, each with their own `constantshadervalues`
+map that commonly reuses generic names like `"multiply"` or `"alpha"`
+across different effects on the *same* object. Naively calling
+`registerProperty("multiply", …)` for two different effects' constants
+would have the second call silently no-op (`registerProperty()` returns
+early if the name is already registered) — one script would just never
+run, a new, quieter bug replacing the old one. `CPass` also isn't
+itself a `ScriptableObject` (it holds a `CRenderable&`, a sibling class
+under a shared virtual `CObject` base) and the per-pass-override `id`
+field from `scene.json` (`ImageEffectPassOverride::id`) can be
+authored-missing (defaults to `-1`), so it can't be trusted as a unique
+key either. Also checked real-world scope before committing time:
+regex-scanned every local `scene.pkg` for a `"script"` key nested
+inside a `"constantshadervalues"` block — **202 of 413 locally-installed
+wallpapers with any `constantshadervalues` at all genuinely have a
+scripted one**, confirming this is a broad, worthwhile fix, not a
+one-wallpaper special case.
+
+**Step 1 — design.** Bypass `ScriptableObject::registerProperty()`
+entirely for these (deliberately *not* exposing shader constants as new
+`thisLayer.<name>` properties — out of scope, and would reintroduce the
+same collision risk) and call `ScriptEngine::queueScript()` directly
+from `CPass::setupShaderVariables()`, using a key built from the
+`CPass` instance's own address (`reinterpret_cast<uintptr_t>(this)`,
+guaranteed unique for the process lifetime, sidestepping the
+missing/duplicate-id problem entirely) plus a `"pass"`/`"override"` tag
+(distinguishing the two `constantshadervalues` sources `CPass` reads —
+`m_pass.constants` and `m_override.constants` — in case a name were
+ever scripted in both) plus the constant's own name. The owning
+`ScriptableObject&` needed for `queueScript()`'s `thisLayer` binding is
+obtained via `dynamic_cast<ScriptableObject*>(&this->m_renderable)` — a
+safe cross-cast since both real owners are unconditionally also
+`ScriptableObject`, verified by construction (not just assumed).
+
+**Step 2 — implementation.** `CPass.cpp`: new private
+`registerScriptedConstant(name, scope, value)`, called once per
+constant right after each `addUniform()` call in both loops of
+`setupShaderVariables()`; no-ops immediately if the value has no script
+source. Confirmed timing is safe: `setupShaderVariables()` runs during
+`CScene::createObject()`'s per-object construction loop, strictly
+before the scene's single `runPendingInits()` call
+(`CScene.cpp:127`) — same timing every other scripted property already
+relies on, so newly-registered constants get properly primed
+(init()/first-update()) before the scene ever renders, not just
+eventually caught by `tick()`.
+
+**Step 3 — verification, real not assumed.** Temporary env-var-gated
+debug logging (fully reverted after, confirmed via `git diff`) proved
+the mechanism end-to-end on `#19`'s wallpaper (`2804831278`): all 4
+`multiply`/`multiply2`/`multiply3`/`multiply4` scripts now register
+(previously zero), compile with no `SyntaxError` (confirming
+`import * as WEMath from 'WEMath'` is valid under the real
+`JS_EVAL_TYPE_MODULE` eval path `queueScript()` uses — `#19`'s
+originally-flagged SyntaxError theory was about a script that
+structurally never even reached the parser before this fix), and
+produce real, correctly time-gated values matching the actual system
+clock at test time (15:18 local → `multiply2=1` for the 7–17 "day"
+window, the other three at `0` for their inactive windows) — not static
+defaults, not NaN, not errors.
+
+**Honestly reported, not oversold: this does NOT fix `#19`'s gray
+screen.** With the scripts now genuinely executing correct time-gated
+values, the wallpaper still renders exactly the same flat clearcolor
+gray as before the fix, pixel-identical. This means `#19`'s remaining
+bug is a *different*, deeper problem — most likely in how the auxiliary
+day/night blend textures (`清晨`/`早`/`黄昏`) bind or sample once
+they're actually the selected blend target, or a broader alpha-channel
+issue in the blend chain — independent of the scripting gap this item
+fixed. `#19` remains open, now with this cause structurally ruled out
+too; worth its own dedicated follow-up rather than folding into this
+item.
+
+**Regression, both established baselines, zero new failures**:
+- Full 356-wallpaper scene batch (`batch_test.py`): **356, 2 errors, 0
+  crashes** — the 2 errors (`3420062133` "Chainsaw Man",
+  `3450697231` "Horror Anime Girl") are the exact same
+  already-documented pre-existing failures tracked since 2026-07-03
+  (GLSL compile flake; unrelated `console`/`getParent`/malformed-combo
+  script gaps) — confirmed via direct doc lookup, not assumed from the
+  category label alone, since `SCRIPT_EXCEPTION` is exactly the
+  category this fix could plausibly have newly triggered elsewhere.
+  Zero new failures.
+- Full 48-wallpaper local web corpus (all `type: "web"` items present,
+  down from a historical 61 as the workshop collection has changed):
+  **48/48 clean, 0 errors, 0 crashes** — confirms the fix is inert and
+  safe for the CEF/web rendering path, which also constructs `CPass`
+  instances.
+- Spot-checked "Scarlet Witch" (`2186389461`, one of the 202 wallpapers
+  with real scripted constants) before/after via `git stash`: pixel-
+  identical output in both cases — its gray/mostly-empty appearance is
+  an unrelated, pre-existing `#568`-review-era shader compile failure on
+  a *different* object (the `foliagesway` effect, "Failed to setup
+  object 13", already known from `#16`'s investigation), not something
+  this fix touched either way.
+
+All temporary instrumentation (env-var-gated logging in `CPass.cpp` and
+a debug-only key-visibility tweak in `ScriptEngine.cpp`'s `tick()`) was
+fully reverted; final diff is exactly the `CPass.h`/`CPass.cpp` changes
+described above, confirmed via `git diff`.
 
 ### #18 — DONE 2026-07-06: `WebBrowserContext` now cleans up its per-run CEF cache directory on clean shutdown
 

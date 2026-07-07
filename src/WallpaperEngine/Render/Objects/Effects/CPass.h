@@ -125,6 +125,10 @@ private:
     static GLuint compileShader (const char* shader, GLuint type);
     void setupShaders ();
     void setupShaderVariables ();
+    // constantshadervalues scripts (e.g. day/night blend multipliers) are parsed into a
+    // DynamicValue's script source but otherwise inert unless handed to ScriptEngine — this wires
+    // one up the same way ScriptableObject::registerProperty() does for object properties.
+    void registerScriptedConstant (const std::string& name, const char* scope, DynamicValue& value) const;
     void setupUniforms ();
     void setupTextureUniforms ();
     void setupAttributes ();
