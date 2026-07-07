@@ -75,7 +75,8 @@ WebBrowserContext::WebBrowserContext (WallpaperEngine::Application::WallpaperApp
 
     // Configurate Chromium
     CefSettings settings;
-    std::string cache_path = (std::filesystem::temp_directory_path () / uuid::generate_uuid_v4 ()).string ();
+    this->m_cachePath = std::filesystem::temp_directory_path () / uuid::generate_uuid_v4 ();
+    std::string cache_path = this->m_cachePath.string ();
 
     // resources_dir_path/locales_dir_path both require an ABSOLUTE path when set (relative paths
     // are invalid per CEF's own documentation). The actual fix for the "Invalid file descriptor to
@@ -112,4 +113,17 @@ WebBrowserContext::WebBrowserContext (WallpaperEngine::Application::WallpaperApp
 WebBrowserContext::~WebBrowserContext () {
     sLog.out ("Shutting down CEF");
     CefShutdown ();
+
+    // CefShutdown() blocks until CEF has released everything under root_cache_path (cookies,
+    // local storage, disk cache, etc.), so it's only safe to remove the directory after this
+    // point. A leftover directory is a minor annoyance, not worth crashing over, so failures
+    // here are logged and swallowed rather than propagated.
+    if (!this->m_cachePath.empty ()) {
+        std::error_code ec;
+        std::filesystem::remove_all (this->m_cachePath, ec);
+
+        if (ec) {
+            sLog.error ("Failed to remove CEF cache directory ", this->m_cachePath.string (), ": ", ec.message ());
+        }
+    }
 }

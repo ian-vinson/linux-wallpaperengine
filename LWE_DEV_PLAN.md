@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#16 substantially re-scoped — found the original mega-patch's author split it into 5 PRs, all actually merged into real upstream after real review, unlike the Draft original. Read #568 ("puppet and parallax") in full: this fork already shares real structure with it (identical ResolvedTransform struct, identical puppet-mesh method signatures), turning #16 from an open-ended investigation into a precise 4-item checklist of specific, already-reviewed bugs to check for. Active Priority Order: #16, #17, #18)
+**Last updated:** 2026-07-06 (#18 done — WebBrowserContext now cleans up its per-run CEF cache directory on clean shutdown, verified across the 61-wallpaper web corpus with the 16 non-cleaned cases individually confirmed as #15's already-diagnosed environmental crash, not a fix defect; 359 stale directories manually cleaned up. Also read PR #569 ("scripted scene layer runtime") — likely superseded by this fork's own independent scripting work, lower priority. Active Priority Order: #16, #17)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,16 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #18 — `WebBrowserContext` never cleans up its per-run CEF cache directories in `/tmp`
-Found 2026-07-06 as a side effect of `#15`'s investigation, not fixed.
-`WebBrowserContext` generates a fresh UUID-named cache directory per run
-(`uuid::generate_uuid_v4()`) but `~WebBrowserContext()` never removes it
-— confirmed 337 accumulated stale directories in `/tmp` from this
-session's testing alone. Minor hygiene gap, not a functional bug (each
-directory is small and harmless individually), but worth a cleanup pass
-in the destructor whenever picked up, given how quickly these accumulate
-under repeated real-world use.
-
 ### #16 — REVISED 2026-07-06: Puppet-mesh positioning bug — real, precisely-described, upstream-reviewed fixes now identified, not just a vague reference lead
 
 Reported 2026-07-06 with two real upstream bug reports as evidence:
@@ -455,6 +445,67 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #18 — DONE 2026-07-06: `WebBrowserContext` now cleans up its per-run CEF cache directory on clean shutdown
+
+Found during `#15`'s investigation (337 accumulated stale directories in
+`/tmp`), fixed the same session. `WebBrowserContext`'s constructor
+generates a fresh UUID-named cache directory
+(`std::filesystem::temp_directory_path() / uuid::generate_uuid_v4()`)
+assigned to `CefSettings::root_cache_path`, but only ever stored it as a
+local variable — nothing kept it around for the destructor to reference.
+Confirmed first (`Step 0`): no cross-run cache-reuse logic anywhere
+depends on this directory persisting, and `~WebBrowserContext()` calls
+`CefShutdown()` — which blocks until CEF has released everything under
+`root_cache_path` — *before* anything else, so cleanup is only safe
+*after* that call returns, not before.
+
+**Fix**: added a `std::filesystem::path m_cachePath` member to
+`WebBrowserContext.h`; the constructor now stores the path there before
+building the `cache_path` string passed to CEF. The destructor, after
+`CefShutdown()` returns, calls
+`std::filesystem::remove_all(this->m_cachePath, ec)` — the
+`std::error_code` overload, which cannot throw — logging via
+`sLog.error()` and continuing on failure rather than propagating, since
+a leftover directory is a minor annoyance, not something worth crashing
+shutdown over. Orphan cleanup from abnormal termination (`SIGKILL`,
+crashes) deliberately left out of scope, per the minimal-scope guidance
+this was picked up under.
+
+**Verification**: clean build. The initial aggregate `/tmp`-count
+tracking approach turned out to be contaminated by concurrent unrelated
+activity (this machine was under heavy concurrent test load) — correctly
+abandoned in favor of precise per-run tracking via each run's own
+`--user-data-dir=` argument, which reliably confirmed clean `SIGTERM`
+shutdown removes the exact directory used, consistently across Cat,
+Personal Slideshow, Bongo Cat, and a fourth test run. `SIGKILL` (a
+simulated crash) correctly leaves its directory behind, as expected,
+with no new problem introduced. `#14`'s fix re-confirmed still holding
+(zero crash indicators across every run this session). **Full
+61-wallpaper corpus**: zero instances of `#14`'s bug, 45/61 cleaned
+successfully, 16/61 not cleaned — **each of the 16 investigated
+individually rather than dismissed as noise**, and every single one
+shows the identical signature of `#15`'s already-diagnosed
+environmental GPU-crash (abrupt log truncation immediately after a
+subprocess relaunch, the same "GPU state invalid"/zygote-communication
+errors) — meaning the process terminates during CEF's own shutdown
+*before* reaching the new cleanup code at all, not a defect in the fix
+itself. Further confirmed by re-running one of the 16 twice more:
+succeeded once, failed once — purely tracking environment load, which
+had gotten measurably worse than during `#15`'s own investigation (an
+additional application now also competing for the same constrained
+memory/swap).
+
+**One-time manual cleanup** (Step 2.7): removed all 359 stale
+directories accumulated across this session's `#14`/`#15`/`#18` testing
+(337 originally found, plus more generated during this fix's own
+verification runs) — confirmed nothing currently running referenced any
+of them before deleting. `0` remaining afterward.
+
+**Bottom line**: the cleanup mechanism works correctly and consistently
+on every normal shutdown. The cases where it doesn't fire are fully,
+individually attributable to the already-diagnosed `#15` environmental
+crash — not a gap in this fix.
 
 ### #15 — CLOSED 2026-07-06: Chromium `IntentionallyCrashBrowserForUnusableGpuProcess` SIGTRAP — genuine environment limitation, not a fork bug
 
