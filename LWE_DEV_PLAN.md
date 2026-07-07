@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#12 fixed — traced the uncaught crash to a noexcept-boundary violation, fixed with a systemic coercion fix plus a general safety net; #13 resolved as a non-issue (type is already lowercased). Web corpus now at 57/61 rendering real content, zero crashes. New #14 opened: a separate, pre-existing CEF teardown-on-SIGTERM crash affecting nearly every web wallpaper, surfaced because these 3 now survive long enough to reach it. Active Priority Order is down to just #14)
+**Last updated:** 2026-07-06 (#14 fixed and thoroughly verified — the CWeb::~CWeb() use-after-free is resolved with a one-line fix, zero regressions across 61 web wallpapers + 356 scene wallpapers, plus wallpaper-switching directly tested via a sandboxed fake $HOME. New #15 opened for an unrelated Chromium GPU-process SIGTRAP found during verification, narrow scope. Active Priority Order is down to just #15)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,26 +296,20 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #14 — CEF teardown-on-SIGTERM crash ("pure virtual method called") affecting nearly every web wallpaper when killed via timeout
-
-Found 2026-07-06 as a side effect of `#12`'s verification, not fixed
-(kept out of scope for that task — a genuinely separate, pre-existing
-bug). Every web wallpaper tested with a `timeout <N>` wrapper (the
-standard verification pattern this whole session) now reaches — because
-they survive long enough to get there, post-`#12`'s fix — a crash on
-shutdown: `pure virtual method called`, terminating via `abort()`. This
-is a C++ object-lifetime bug during CEF's teardown sequence on
-`SIGTERM` — something is calling a virtual method on an object whose
-most-derived part has already been destructed (classically: a base
-class's destructor, or something reachable from it, invoking a virtual
-function that only the derived class overrides). Affects nearly every
-web wallpaper in this fork's corpus, not something specific to the 3
-wallpapers that surfaced it — they just happened to be the ones that
-previously crashed *before* reaching this point. Not yet traced to a
-specific class/destructor. Worth real investigation given how broadly it
-applies — likely affects any real-world use of this fork where a running
-web wallpaper process gets terminated normally (not just this session's
-own `timeout`-wrapped testing).
+### #15 — Chromium `IntentionallyCrashBrowserForUnusableGpuProcess` SIGTRAP, one web wallpaper
+Found 2026-07-06 as a side effect of `#14`'s verification testing (5
+additional wallpapers tested beyond the 3 known cases), not fixed.
+"Zenless Zone Zero TV" hits a `SIGTRAP` crash mid-run (not at shutdown —
+confirmed unrelated to `#14`'s use-after-free via a real backtrace),
+identified as Chromium's own deliberate,
+`IntentionallyCrashBrowserForUnusableGpuProcess`-named safety response to
+a GPU process launch failure. Not yet investigated further — could be a
+genuine environment limitation (no usable GPU/driver path available for
+this specific wallpaper's rendering requirements in this sandboxed
+environment) rather than a bug in this fork's own code, or could reflect
+a real gap in how this fork configures/passes GPU-related CEF settings.
+Only observed on 1 of the ~66 web wallpapers tested across this session's
+various checks — narrow scope, worth a look but not urgent.
 
 ---
 
@@ -325,6 +319,105 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #14 — DONE 2026-07-06: `CWeb::~CWeb()` use-after-free fixed — a genuine use-after-free, universal across all web wallpapers, not SIGTERM-specific
+
+**The actual bug**, confirmed via disassembly and two independent
+coredumps landing at the identical instruction:
+```cpp
+// CWeb's constructor:
+this->m_renderHandler = new WebBrowser::CEF::RenderHandler (this); // raw pointer, refcount starts at 0
+this->m_client = new WebBrowser::CEF::BrowserClient (m_renderHandler); // ctor takes CefRefPtr<CefRenderHandler>,
+                                                                        // implicitly AddRef()s it to 1, stores it
+                                                                        // in BrowserClient::m_renderHandler
+
+// CWeb's destructor:
+delete this->m_renderHandler; // raw delete — bypasses CEF's refcounting entirely, ignoring BrowserClient's live reference
+```
+`RenderHandler` correctly implements `IMPLEMENT_REFCOUNTING`, but `CWeb`
+owns it via a raw pointer and frees it directly instead of letting
+`CefRefPtr` semantics manage its lifetime. The instant `delete` runs,
+`~RenderHandler()` completes and — per standard Itanium ABI
+destructor-unwind behavior — the object's vtable pointer is left pointing
+at `CefBaseRefCounted`'s base level, where `AddRef`/`Release`/
+`HasOneRef`/`HasAtLeastOneRef` are still pure virtual. Later in the same
+teardown, when CEF's browser ref-count cascade reaches
+`BrowserClient::Release()` → `~BrowserClient()`, the compiler-generated
+destructor destructs its own `CefRefPtr<CefRenderHandler> m_renderHandler`
+member, calling `Release()` on the already-destructed `RenderHandler`
+object — resolving against the stale/pure-virtual vtable slice. A
+textbook use-after-free.
+
+**Confirmed as one bug with two observable signals, not two separate
+issues**: reproduced on two different wallpapers, both crashing at the
+exact same call site (`~BrowserClient()+69`) — "Cat" (WebGL-heavy) hit
+`__cxa_pure_virtual()` → `terminate()`/`abort()` (`SIGABRT`, the freed
+memory still cleanly reflected the pure-virtual vtable); "Personal
+Slideshow" (simple, non-WebGL) hit the identical call site but the freed
+memory had since been overwritten with garbage, resolving to an unmapped
+address → `SIGSEGV` instead. Same root cause, different heap state at the
+moment of the stale call.
+
+**The signal path was investigated and ruled out** — `signalhandler()`
+does nothing but set `m_context.state.general.keepRunning = false` and
+reset signal dispositions to `SIG_DFL`; the actual teardown
+(`delete app` → `~WallpaperApplication` → `~RenderContext` → the
+wallpaper map's destruction → `~CWeb()`) runs as completely ordinary code
+on the main thread, entirely outside signal-handler context. Confirmed
+empirically: killing with `SIGINT` instead of `SIGTERM` on the same
+wallpaper reproduces the identical crash — the signal itself is
+irrelevant, just one trigger among several for the same destructor
+cascade.
+
+**Scope confirmed universal via direct testing across the spectrum, not
+assumed**: reproduced identically on WebGL-heavy (Cat), audio-reactive
+(Bongo Cat, uses `wallpaperRegisterAudioListener`), and simple/non-WebGL
+(Personal Slideshow) wallpapers — not conditional on wallpaper
+complexity, confirming this lives in `CWeb`'s/`BrowserClient`'s
+destructors themselves. **Not directly tested, but plausible given the
+root cause**: this would very likely also fire on any other teardown of
+a `CWeb` instance, e.g. runtime wallpaper-switching, not just process
+exit — flagged honestly as untested rather than claimed.
+
+**The fix, shipped and thoroughly verified**: removed the single
+`delete this->m_renderHandler;` line from `CWeb::~CWeb()` (`CWeb.cpp`),
+replaced with a comment explaining `BrowserClient`'s `CefRefPtr` is the
+real owner and frees the object naturally via `Release()` when
+`BrowserClient` itself is destroyed. Confirmed via a full audit first
+(`Step 0`): `CWeb::m_renderHandler` is a private raw pointer used only at
+construction and (previously) destruction — nothing else in the codebase
+touches `RenderHandler` at all, so nothing depended on `CWeb` retaining
+ownership. The minimal correct change — no restructuring beyond removing
+the one incorrect line.
+
+**Verification, more thorough than requested**:
+- All 3 known crash scenarios (Cat/`SIGTERM`, Cat/`SIGINT`, Personal
+  Slideshow/`SIGTERM`) retested — all clean, no crash text, no new
+  coredumps.
+- **5 additional, more diverse wallpapers** tested via `SIGTERM` beyond
+  the known cases (Bongo Cat, a BiliBili audio-responsive wallpaper,
+  Zenless Zone Zero TV, Audio Visualizer v0.6.6, Customizable Module
+  Visualizer) — none hit this bug. One (Zenless Zone Zero TV) hit a
+  completely separate, pre-existing, unrelated crash — see `#15` below.
+- **Wallpaper-switching tested directly** (flagged as untested during
+  discovery, followed up on here): built an isolated test playlist
+  (Cat → Personal Slideshow) using a **sandboxed fake `$HOME`**
+  specifically so the real Wallpaper Engine `config.json` was never
+  touched by the test tooling — confirmed the process survives past the
+  switch point with no crash/coredump, real log evidence of the second
+  browser subprocess spinning up, and a clean final `SIGTERM` shutdown
+  afterward.
+- **Full 61-wallpaper web corpus recheck**: 61/61 clean shutdown, zero
+  crashes of this bug's type anywhere in the corpus.
+- **Full 356-wallpaper scene regression**: 354 clean, 2 errors, 0
+  crashes — matches the established baseline exactly (the 2 flaky
+  wallpapers vary run-to-run, consistent with already-documented
+  non-deterministic shader-pipeline flakiness; scene wallpapers never
+  touch `CWeb` at all, as expected).
+
+**Net result**: the crash affecting shutdown of nearly every web
+wallpaper in this fork is fixed, with zero regressions across both
+corpora.
 
 ### #12 — DONE 2026-07-06: general JSON type-coercion robustness fix, including the root cause of the one uncaught crash
 

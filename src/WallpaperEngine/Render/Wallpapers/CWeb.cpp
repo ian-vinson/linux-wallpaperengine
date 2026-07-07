@@ -261,5 +261,7 @@ CWeb::~CWeb () {
     CefDoMessageLoopWork ();
     this->m_browser->GetHost ()->CloseBrowser (true);
 
-    delete this->m_renderHandler;
+    // m_renderHandler is owned by BrowserClient's CefRefPtr<CefRenderHandler> (established via
+    // CEF's own AddRef in BrowserClient's constructor) — it must not be freed manually here, or
+    // BrowserClient's later Release() call on its own (now-dangling) reference use-after-frees it.
 }
