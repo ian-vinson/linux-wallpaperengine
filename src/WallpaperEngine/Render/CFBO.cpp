@@ -129,6 +129,41 @@ float CFBO::getSpritesheetDuration () const {
     return 0.0f; // FBOs don't have spritesheets
 }
 
+void CFBO::resize (uint32_t realWidth, uint32_t realHeight, uint32_t textureWidth, uint32_t textureHeight) {
+    if (this->m_resolution.x == static_cast<float> (textureWidth)
+	&& this->m_resolution.y == static_cast<float> (textureHeight)
+	&& this->m_resolution.z == static_cast<float> (realWidth)
+	&& this->m_resolution.w == static_cast<float> (realHeight)) {
+	return;
+    }
+
+    // reallocate the existing texture's storage; the texture/framebuffer IDs stay the same, so
+    // anyone already holding a shared_ptr<const CFBO> to this object sees the new size/contents
+    glBindTexture (GL_TEXTURE_2D, this->m_texture);
+    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, textureWidth, textureHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    GLint previousFramebuffer = 0;
+    glGetIntegerv (GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
+    glBindFramebuffer (GL_FRAMEBUFFER, this->m_framebuffer);
+
+    // Layer framebuffers must start transparent, same as on construction.
+    GLfloat previousClearColor[4] = {};
+    glGetFloatv (GL_COLOR_CLEAR_VALUE, previousClearColor);
+    glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+    glClear (GL_COLOR_BUFFER_BIT);
+    glClearColor (previousClearColor[0], previousClearColor[1], previousClearColor[2], previousClearColor[3]);
+
+    glBindFramebuffer (GL_FRAMEBUFFER, previousFramebuffer);
+
+    this->m_resolution = { textureWidth, textureHeight, realWidth, realHeight };
+
+    auto& frame = this->m_frames.front ();
+    frame->height1 = textureHeight;
+    frame->height2 = realHeight;
+    frame->width1 = textureWidth;
+    frame->width2 = realWidth;
+}
+
 void CFBO::incrementUsageCount () const { }
 void CFBO::decrementUsageCount () const { }
 void CFBO::update () const { }

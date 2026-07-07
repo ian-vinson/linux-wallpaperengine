@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (added #19 (gray screen, upstream #523 — video wallpaper with a real QuickJS syntax-error + a possibly-unrelated radv Vulkan-decode driver caveat) and #20 (multiple audio sources, upstream #174 — old unresolved issue, worth checking against this session's own AudioStream/AudioContext work) as Low priority. Did a first-page sweep of the open issues list (12 most recent of ~201) — flagged but not yet added: #593/#594 (a WaylandMouseInput {0,0} fallback bug likely inherited via #568), #597 (a real TextureCache security-audit issue), #579 (a laptop-wallpaper feature request worth relaying to Mural). Active Priority Order: #16, #17, #19, #20)
+**Last updated:** 2026-07-07 (#16a done — CImage's ping-pong FBOs now resize in place on size change, real architectural insight avoided a broken fix (couldn't reuse #4's remove()+create() pattern since CPass captures the FBO shared_ptr by value at setup time), verified via direct pass-log tracing. Honestly confirmed this fix does NOT explain the originally-reported scattered-limbs symptom — that wallpaper already renders correctly on this fork with no resize ever occurring. #16 downgraded to Low, reduced to just testing the second original wallpaper. Active Priority Order: #16, #17, #19, #20)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,7 +296,7 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #16 — DIRECTLY VERIFIED 2026-07-06: puppet-mesh code confirmed inherited from real upstream; 3 of 4 known bugs already resolved, 1 confirmed still present
+### #16 — LOW, reduced scope 2026-07-07: puppet-mesh bug report may no longer apply to this fork — only the second original wallpaper remains untested
 
 Reported 2026-07-06 with two real upstream bug reports as evidence:
 [Almamu/linux-wallpaperengine#420](https://github.com/Almamu/linux-wallpaperengine/issues/420)
@@ -354,37 +354,26 @@ directly against this fork's actual current source, not inferred**:
    `.origin = it.user("origin", project.properties, glm::vec3(0.0f))`,
    exactly matching the originally-suggested fix.
 
-**Important caveat, not to be glossed over**: confirming the presence/
-absence of these 4 specific, previously-known review comments is not the
-same as confirming the root cause of the actual reported symptom
-(scattered limbs). A stale-size FBO issue (#3, the one remaining
-confirmed bug) would more typically manifest as stretching, wrong
-cropping, or clipping — not necessarily "limbs flying to wrong screen
-positions." The real next step is still direct empirical reproduction
-against an actual local puppet-warp wallpaper, to confirm whether fixing
-#3 resolves the reported symptom or whether something else entirely
-(not among these 4 known items) is the true cause.
-
-**Scope for whenever this is picked up** (now maximally concrete):
-1. Fix #3 (the one confirmed-present bug) — resize `m_mainFBO`/
-   `m_subFBO` whenever `size != previousSize` in `updateGeometryBuffers()`,
-   alongside the existing puppet-position-buffer update.
-2. Reproduce the actual scattered-limbs symptom against a real local
-   puppet-warp wallpaper (or the original two IDs if accessible:
-   `3409327922` from #420, `3465215190` from #527) — confirm whether
-   fixing #3 resolves it. If not, the real root cause is still open and
-   needs its own fresh investigation, not assumed to be one of these 4
-   items.
-3. `#569`/`#570`/`#571` — `#569` ("scripted scene layer runtime") read in
-   full: real scripting-runtime infrastructure (`ScriptBindingContext`,
-   per-object `reevaluate()`), but the author explicitly told the
-   reviewer they would not address any flagged issues in these split
-   PRs since `#561` was already approved — meaning known-but-unaddressed
-   issues did merge into upstream (and are therefore also already in
-   this fork, per the same git-history confirmation above). Given this
-   fork's own independent scripting work this session is substantially
-   more advanced, not worth reconciling further unless a specific
-   symptom traces back here. `#570`/`#571` not yet individually read.
+**Status update 2026-07-07 — bug #3 fixed and verified; the original
+reported symptom does NOT currently reproduce.** Full details in `#16a`
+below (moved to Completed Items, since the confirmed-present bug is
+genuinely fixed) — but the short version: the FBO-resize bug was real
+and is now fixed, proven via direct pass-log tracing showing the FBO
+genuinely transition size mid-run. However, no live path currently
+exists in this engine to trigger a puppet-mesh `CImage` resize at all
+(`Image::size` is baked once at parse time), and running the actual real
+wallpaper from upstream `#527` (`3465215190`) showed the puppet
+character **already rendering correctly assembled**, with no resize ever
+occurring. Combined with 3 of 4 known review-flagged bugs already being
+fixed independently, this strongly suggests **the originally reported
+scattered-limbs symptom may simply no longer reproduce on this fork's
+current code** — though only one of the two originally-reported
+wallpapers (`3465215190` from `#527`) was tested; `3409327922` from
+`#420` has not been. Given that caveat, this item is left open rather
+than closed outright, but with a much lower expected remaining scope —
+the real next step, if this matters enough to pursue further, is simply
+testing the second wallpaper (`3409327922`) directly to see if it
+reproduces anything at all, rather than any further code investigation.
 
 ### #17 — Custom X/Y UV offset for all wallpaper types (`--offset-x`/`--offset-y`), ported from TuxPaperEngine's engine fork
 
@@ -493,6 +482,62 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #16a — DONE 2026-07-07: `CImage`'s ping-pong FBOs now resize in place when object size changes — real bug fixed, but confirmed NOT the cause of the reported scattered-limbs symptom
+
+Fixes the one confirmed-still-present bug from `#16`'s 4-item checklist
+(`m_mainFBO`/`m_subFBO` never resizing when `m_size` changes).
+
+**Real architectural finding made before implementing, avoiding a broken
+fix**: this session's own established resize pattern from `#4`
+(`FBOProvider::remove()` + fresh `create()`) would **not** have worked
+here. `CPass::setDestination()`/`setInput()` copy the
+`shared_ptr<const CFBO>` **by value** into each pass once, at
+`setup()`/`setupPasses()` time — recreating the FBOs would produce a new
+object that already-configured passes would never see, leaving them
+rendering into the stale one forever. Since
+`CPass::setupRenderFramebuffer()` reads `getRealWidth()`/
+`getRealHeight()` fresh every frame for `glViewport`, the correct fix is
+an **in-place resize** that mutates the existing `CFBO` object (same GL
+texture/framebuffer IDs) — everyone already holding a reference to it
+sees the new size automatically. No precedent for this existed anywhere
+in the codebase; added fresh.
+
+**Fix**: new `CFBO::resize(realWidth, realHeight, textureWidth,
+textureHeight)` — no-op if unchanged, otherwise reallocates the texture
+storage via `glTexImage2D`, re-clears to transparent (matching original
+construction behavior), updates `m_resolution` and frame metadata.
+`CImage::updateGeometryBuffers()` now calls `resize()` on both
+`m_mainFBO`/`m_subFBO` whenever `size != previousSize`, **unconditionally**
+— not gated on `m_hasPuppetMesh`, since any `CImage` with ping-pong FBOs
+benefits, not just puppet-mesh objects specifically.
+
+**Verification — real, not assumed**: since no live path currently
+exists in this engine to trigger a `CImage` resize at runtime
+(`Image::size` is baked once at parse time, not a live property; camera/
+scene dimensions are fixed at scene construction), temporary
+environment-variable-gated instrumentation was added to force a real
+mid-run resize for testing purposes, then fully reverted afterward
+(confirmed via diff: final change is exactly the intended fix, nothing
+left over). Verified via direct pass-log tracing rather than subtle
+screenshot pixel-diffs — a more unambiguous, deterministic proof: with
+the fix active, the FBO genuinely transitions `2000×1080 → 3200×1728`
+mid-run; with the fix disabled (simulating the original bug), it stays
+frozen at `2000×1080` for the entire run despite the object's on-screen
+geometry already having grown. Full 356-wallpaper scene regression:
+355 clean, 1 error, 0 crashes — the single failure is the already-
+documented pre-existing GLSL flake, zero new failures.
+
+**Honestly reported, not oversold**: ran the actual real wallpaper from
+upstream `#527` (`3465215190`) specifically to check whether this fix
+resolves the originally-reported scattered-limbs symptom. It does not —
+because that symptom was never caused by this bug in the first place.
+The puppet character in that wallpaper **already renders correctly
+assembled** with no resize ever occurring; this bug, while real, is
+currently latent (unreachable via any existing runtime mechanism) rather
+than an active cause of the reported issue. See `#16`'s continuing entry
+above for what this implies about the original bug report's current
+relevance to this fork.
 
 ### #18 — DONE 2026-07-06: `WebBrowserContext` now cleans up its per-run CEF cache directory on clean shutdown
 

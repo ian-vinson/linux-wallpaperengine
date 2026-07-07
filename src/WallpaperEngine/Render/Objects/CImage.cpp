@@ -1110,8 +1110,17 @@ CImage::ResolvedTransform CImage::updateGeometryBuffers () {
     const glm::vec2 size = this->resolveGeometrySize (sceneWidth, sceneHeight, origin);
     const glm::vec2 previousSize = this->m_size;
     this->m_size = size;
-    if (this->m_hasPuppetMesh && size != previousSize) {
-	this->updatePuppetPositionBuffer (size);
+    if (size != previousSize) {
+	if (this->m_hasPuppetMesh) {
+	    this->updatePuppetPositionBuffer (size);
+	}
+
+	// m_mainFBO/m_subFBO were allocated once at construction time; CPass destinations
+	// captured them by shared_ptr value at setup(), so they must be resized in place
+	// rather than recreated, or already-configured passes would keep rendering into the
+	// stale-size FBO.
+	const_cast<CFBO&> (*this->m_mainFBO).resize (size.x, size.y, size.x, size.y);
+	const_cast<CFBO&> (*this->m_subFBO).resize (size.x, size.y, size.x, size.y);
     }
 
     this->updateScenePosition (origin, size, scale, sceneWidth, sceneHeight);
