@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-07 (#16 CLOSED — acquired the second originally-reported wallpaper, 3409327922 from upstream #420, via the real Steam client's `+workshop_download_item` since no steamcmd is available in this environment; ran it directly and confirmed the puppet character renders fully assembled with no scattered limbs and no horizontal seam artifact. Both originally-reported wallpapers now confirmed clean on this fork. Active Priority Order: #17, #19, #20)
+**Last updated:** 2026-07-07 (#16 fully CLOSED, including its last checklist item — `resolveGeometrySize()`'s call to `getSize()` directly confirmed via env-var-gated debug instrumentation on two real wallpapers, "Scarlet Witch" and "Retro Room", showing authored size wins over texture real dimensions for both passthrough/composelayer and non-passthrough objects. Also acquired and tested the second originally-reported wallpaper, 3409327922 from upstream #420, via the real Steam client's `+workshop_download_item` since no steamcmd is available in this environment — puppet character renders fully assembled, no scattered limbs, no horizontal seam. Both originally-reported wallpapers now confirmed clean on this fork. Active Priority Order: #17, #19, #20)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -1304,6 +1304,40 @@ fix doesn't interfere with either.
 All temporary instrumentation (numeric debug prints, FBO dumps, spot-check
 logging) was fully reverted; the final working-tree diff is exactly the
 4-line `getSize()` change above, nothing else.
+
+**2026-07-07 follow-up — `resolveGeometrySize()`'s call to `getSize()` directly
+confirmed, closing the last item of `#16`'s original 4-item checklist.**
+`#16`'s checklist had reasoned this was "almost certainly" fine transitively
+since `getSize()` itself was fixed here, but never verified it with its own
+test. Read `resolveGeometrySize()`'s current body directly
+(`CImage.cpp:993`): its first line is `glm::vec2 size = this->getSize ();`,
+unconditionally, with no passthrough/non-passthrough branch — and it's
+reached from `updateGeometryBuffers()` → `updateScreenSpacePosition()` →
+`CImage::render()`, which likewise never branches on `passthrough` before
+that call. So the code path is shared by every `CImage`, composelayer or not.
+
+Added temporary env-var-gated instrumentation (`LWE_DEBUG_RESOLVEGEOMETRYSIZE`)
+printing each object's id/name/passthrough flag/authored size/`getSize()`
+result/texture real size, then ran two real local wallpapers rather than a
+synthetic fixture (both still installed, no rebuild of the corpus needed):
+- **"Scarlet Witch"** (`2186389461`) — reproduced the exact non-passthrough
+  mismatch `#1`'s original spot-check found: object `74192`/`68811`
+  ("Manifold assest"), `passthrough=0`, authored `540×540` vs texture real
+  `640×640`. Logged `getSize()=(540,540)` — the authored size, not the
+  texture's.
+- **"Retro Room"** (`2388299037`) — turned out to exercise *both* cases in
+  one run, better than expected: object `49` ("Donkey Kong"), `passthrough=0`,
+  authored `500×500` vs texture real `351×347`, logged `getSize()=(500,500)`;
+  and objects `165`/`293` ("Compose"/"Blur"), **`passthrough=1`**
+  (composelayer), authored `512×512`/`512×300` vs shared texture real
+  `3840×2160`, logged `getSize()=(512,512)`/`(512,300)` — authored size,
+  not texture real size, in the passthrough case too.
+
+All results: authored size wins over texture real dimensions in every case,
+non-passthrough and passthrough alike — direct, printed evidence, not
+inference. Instrumentation fully reverted afterward (confirmed via `git
+diff`: empty), rebuild verified clean. `#16`'s 4-item checklist is now fully
+closed with each item individually confirmed against current source.
 
 **Residual, smaller-magnitude open detail — resolved, or at least no longer
 visible**: the small NDC overshoot predicted on two of Lofi Cafe's four
