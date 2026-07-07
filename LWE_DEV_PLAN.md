@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-06 (#16 directly verified via git archaeology — cloned this fork and upstream side-by-side, confirmed the fork's history already includes every current upstream commit through #606, including #567/#568's exact merge commits. Of the 4 previously-catalogued bugs, checked all 4 directly against actual current source: 2 confirmed already fixed, 1 confirmed still present (FBO resize on size change), 1 likely resolved transitively via this session's own #1 fix. Also confirmed issue #546 (SceneScript modules) is a non-issue — already resolved in this fork since the very first session. Active Priority Order: #16, #17)
+**Last updated:** 2026-07-06 (added #19 (gray screen, upstream #523 — video wallpaper with a real QuickJS syntax-error + a possibly-unrelated radv Vulkan-decode driver caveat) and #20 (multiple audio sources, upstream #174 — old unresolved issue, worth checking against this session's own AudioStream/AudioContext work) as Low priority. Did a first-page sweep of the open issues list (12 most recent of ~201) — flagged but not yet added: #593/#594 (a WaylandMouseInput {0,0} fallback bug likely inherited via #568), #597 (a real TextureCache security-audit issue), #579 (a laptop-wallpaper feature request worth relaying to Mural). Active Priority Order: #16, #17, #19, #20)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -440,6 +440,50 @@ mirroring `addUVOffsets()` above, added to whatever this fork's
 equivalent shared UV-computation function already is. Should not require
 touching `CScene`/`CVideo`/`CWeb` individually if the shared-class
 architecture matches, which is the expected case.
+
+### #19 — LOW: Gray screen on a specific video wallpaper (upstream Almamu/linux-wallpaperengine#523)
+Reported 2026-07-06,
+[Almamu/linux-wallpaperengine#523](https://github.com/Almamu/linux-wallpaperengine/issues/523),
+still open upstream. Wallpaper `2804831278` on CachyOS/KDE/Wayland/AMD
+RX 9070 XT renders solid gray instead of the expected video content.
+Real logs captured in the issue, two things worth noting before this is
+picked up:
+- It's actually a **video** wallpaper (`h264 3920x2204`, `VO: libmpv`,
+  hardware decode via `vulkan-copy`), not a scene wallpaper — but the
+  log still shows `ScriptEngine [evaluate]: SyntaxError: Unexpected
+  token '*'` repeated 4 times before video playback starts, meaning it
+  also carries an attached property-script hitting a real, hard
+  QuickJS parse failure (not an environment issue — a genuine
+  syntax-compatibility gap, worth understanding regardless of whether
+  it's the actual cause of the gray screen).
+- The log also shows `radv is not a conformant Vulkan implementation,
+  testing use only` — a real driver-level caveat on the exact
+  hardware-decode path in use, which is a plausible independent
+  explanation for a blank output texture (Vulkan-decode-to-OpenGL
+  interop is a notoriously fragile boundary) — could turn out to be
+  environment/driver-specific rather than a fork bug, similar in shape
+  to `#15`'s resolution. Not yet investigated which of these two (or
+  something else) is the actual cause — flagged, not diagnosed.
+
+### #20 — LOW: Multiple simultaneous audio sources visible for a single wallpaper instance (upstream Almamu/linux-wallpaperengine#174)
+Older, still-open upstream issue:
+[Almamu/linux-wallpaperengine#174](https://github.com/Almamu/linux-wallpaperengine/issues/174).
+A single running wallpaper instance shows up as multiple separate audio
+sources/sinks in PulseAudio/PipeWire graph tools (qpwgraph/helvum/carla),
+even with `--silent` set. Never confirmed resolved in the upstream
+thread — Almamu's own comment there only mentions pushing a change to
+"disable audio processing entirely" as a stopgap while investigating
+further, not a confirmed root-cause fix. Worth checking directly against
+this fork's own audio stack whenever picked up, since this session did
+extensive, direct work in exactly this area for `#10`'s `ISoundLayer`
+implementation (`AudioContext`/`AudioStream`/`SDLAudioDriver`) — check
+whether each `AudioStream` registers its own separate PulseAudio/PipeWire
+client/output (one per sound file per object, potentially multiplying
+quickly on a wallpaper with several sound objects or particle-attached
+audio) rather than sharing one client connection per process, which
+would directly explain the reported symptom.
+
+
 
 ---
 
