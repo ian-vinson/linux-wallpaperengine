@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-08 (#27 DONE — batch_test.py's crash-detection blind spot fixed (now checks the real signal-based exit code, additive to the old string check), plus a second real bug found and fixed in its own verification (UnicodeDecodeError on invalid UTF-8 from a timeout-killed process). Rigorously verified with 6 synthetic positive/negative-path scenarios, not just a re-run. The fix immediately paid off: the corrected harness found 2 real, previously invisible crashes in the same regression run, now tracked as #29 (a genuinely new SIGABRT in AudioStream::resampleAudio() on a video wallpaper) and #30 (an uncaught std::terminate() on a GLSL compile failure, already-detectable but corpus-flaky). Active Priority Order: #23, #24, #25, #26, #28, #29, #30)
+**Last updated:** 2026-07-08 (#30 CLOSED — corrects an unverified claim in #27's own report. #27 stated this wallpaper's flagged crash "was already catchable by the old string-based check," but that was never actually cross-checked against a coredump. 44 reproduction attempts across 5 methods, including replicating the exact real corpus order, all exited cleanly through the already-safe error path — zero coredumps found anywhere on the system for this wallpaper, in contrast to #29's confirmed match. Most likely explanation: the crash-detection string check has its own false-positive hazard (a GLSL compiler's own benign "compilation terminated" diagnostic matches the naive "terminate" substring check) — tracked as a new small hardening item, #31. No fix implemented for a bug that couldn't be confirmed to exist. Active Priority Order: #23, #24, #25, #26, #28, #29, #31)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -442,20 +442,19 @@ somewhat ironic given `#22` was originally (incorrectly) attributed to
 "concurrent video/audio decode" territory — this one actually is in
 that territory.
 
-### #30 — 麻匪 音频识别 悬浮窗 Media Player (2974757317): uncaught `std::terminate()` on a GLSL shader compile failure
+### #31 — small hardening: `batch_test.py`'s `"terminate"` string check has a false-positive hazard on benign compiler diagnostics
 
-Found 2026-07-08 during `#27`'s regression re-run. Unlike `#29`, this
-one **was** already detectable by the old string-based check — its
-absence from earlier session runs was corpus flakiness (the
-already-documented non-deterministic batch-test behavior), not a new
-detection capability from `#27`'s fix. Still a real, genuine bug worth
-fixing on its own merits: a GLSL shader failing to compile should be a
-recoverable, logged error for that one wallpaper (matching how other
-shader-compile failures elsewhere in this fork are already handled),
-not an uncaught exception that aborts the whole process. Not yet
-investigated further — needs tracing to the specific `terminate()` call
-site to see why this particular compile-failure path isn't caught the
-same way others are.
+Found 2026-07-08 while investigating `#30` (which turned out to have no
+real bug behind it — see Completed Items). The current check
+(`"terminate" in combined.lower()`) matches **any** substring
+containing "terminate," including a shader compiler's own entirely
+benign diagnostic text (`"compilation terminated"`). This is a genuine
+false-positive class distinct from — and the opposite direction of —
+`#27`'s original fix (which was about real crashes being *under*-
+detected). Small, well-understood fix whenever picked up: require the
+more specific phrase `"terminate called after throwing"` (the actual
+libstdc++ message for an uncaught C++ exception) rather than the bare
+substring `"terminate"`.
 
 ### #28 — `engine.setTimeout`/`setInterval` return a plain numeric ID, not real WE's cancel-closure — known, deliberate compatibility gap
 
@@ -534,18 +533,81 @@ misclassified as a crash), and the invalid-UTF-8-before-timeout-kill
 case → `TIMEOUT` without raising. 6/6 passed.
 
 **Full regression with the corrected harness — the real payoff**: 355
-clean, 1 pre-existing shader error (Chainsaw Man), and **2 real crashes
-the old harness could never see at all**:
+clean, 1 pre-existing shader error (Chainsaw Man), and 2 flagged
+crashes, one real and one — on later investigation — not:
 - "Kirby 30th Anniversary 4K" (`2722481044`) — `SIGABRT`, confirmed via
-  a matching coredump. Tracked as its own new item, `#29`.
-- "麻匪 音频识别 悬浮窗 Media Player" (`2974757317`) — an uncaught
-  `std::terminate()` on a GLSL shader compile failure. This one *was*
-  already catchable by the old string-based check — its absence from
-  earlier runs was corpus flakiness, not a new capability from this
-  fix. Tracked as its own new item, `#30`.
+  a matching coredump. **Real, genuine crash.** Tracked as its own new
+  item, `#29`.
+- "麻匪 音频识别 悬浮窗 Media Player" (`2974757317`) — flagged as an
+  uncaught `std::terminate()`. **Correction, made during `#30`'s later
+  investigation**: the claim below that this "was already catchable by
+  the old string-based check" was stated here without the same
+  coredump cross-check applied to Kirby — turned out to be wrong.
+  See `#30`'s own closure entry (right below) for the full correction:
+  no real crash was ever confirmed to exist here at all.
 
-Neither newly-found crash was fixed here — out of scope for a
-harness-correctness item — both tracked separately.
+Neither newly-found item was fixed here — out of scope for a
+harness-correctness item.
+
+### #30 — CLOSED 2026-07-08 (unconfirmed, no live bug found) — corrects an unverified claim in `#27`'s own report
+
+`#27`'s report (above) stated this wallpaper's flagged crash "was
+already catchable by the old string-based check," implying a confirmed
+real crash. That claim was never actually cross-checked against a
+coredump the way `#29`'s was — investigating `#30` on its own surfaced
+that gap and corrected it.
+
+**Extraordinarily thorough reproduction effort, zero crashes found**:
+44 direct attempts across 5 different methods — 8 standalone runs, 20
+more standalone runs, 15 direct calls to the real `run_wallpaper()`
+harness function, a 60-wallpaper batch-context window ending on this
+wallpaper, and a full 186-wallpaper prefix replicating the *exact* real
+corpus order up through this wallpaper. **Every single attempt exited
+cleanly** (a normal `TIMEOUT` status — ran the full test window with no
+crash). Every attempt hit the identical GLSL failure this wallpaper
+always produces (`ERROR: 0:404: '-' : wrong operand types...`), and
+every time it was logged safely via `"Failed to setup object"` — the
+exact non-fatal message the codebase's existing safe path produces.
+
+**Confirmed this already goes through the same safe path as the
+long-documented Chainsaw Man case** — there was no separate unsafe path
+to reconcile, contrary to the item's original framing. Traced the full
+chain: `GLSLContext::toGlsl()` only logs on a glslang parse failure and
+returns empty strings (never throws) → `CPass::compileShader()`/
+`setupShaders()` then fails to compile that invalid source via real
+OpenGL, which calls `sLog.exception()` (logs, then throws
+`std::runtime_error`) → propagates up through `CPass`'s constructor →
+`CImage::setup()` → caught cleanly by `CScene::createObject()`'s
+existing `try`/`catch`. Identical mechanism, every time, in every
+reproduction.
+
+**The decisive piece**: searched every coredump on the system, going
+back through the prior day, for any process referencing this wallpaper
+ID. **None exists** — in stark contrast to Kirby (`#29`), where the
+coredump was found immediately and matched exactly by PID and
+timestamp. A real `SIGABRT`/`SIGSEGV` always leaves a coredump on this
+system; the total absence of one here, combined with 44/44 clean
+reproductions, is strong evidence against a real crash ever having
+occurred.
+
+**Most likely real explanation for the original false flag**: the
+crash-detection string check (`"terminate" in combined.lower()`) has
+its own false-positive hazard — this compiler's own benign diagnostic
+text literally contains the substring `"terminated"`
+(`"compilation terminated"`), which matches `"terminate"`. If that
+one flagged run's process happened to exit with any nonzero,
+non-signaled code for an unrelated, transient reason (no deliberate
+`exit(nonzero)` path was found in the codebase for this — possibly
+genuine one-off system/GPU-driver noise), the classifier would tag it
+`CRASH` purely from that benign text, with nothing actually wrong.
+Tracked as its own small, well-understood hardening item, `#31`.
+
+**No fix implemented** — correctly declined to patch a bug that
+couldn't be confirmed to exist via any independent evidence (coredump,
+consistent repro, or a real code-level gap distinct from the
+already-safe pattern), matching this session's established practice of
+reporting an unconfirmed finding honestly rather than guessing at a fix
+for it.
 
 ### #22 — DONE 2026-07-08: original "ffmpeg concurrent-decode" classification was WRONG — real cause was a QuickJS use-after-free in `engine.setTimeout`/`setInterval`, fixed
 
