@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <nlohmann/json.hpp>
 #include <random>
 
 #include "WallpaperEngine/Application/ApplicationContext.h"
@@ -110,11 +111,14 @@ private:
      */
     void setupProperties ();
     /**
-     * Updates the properties for the given background based on the current context
+     * Updates the properties for the given background based on the current context. When
+     * --list-properties --format=json is active, returns the project's properties as JSON
+     * (name -> Property::dumpJson()); the return value is otherwise an empty object and can
+     * be ignored.
      *
      * @param project
      */
-    void setupPropertiesForProject (const Project& project);
+    nlohmann::json setupPropertiesForProject (const Project& project);
     /**
      * Checks whether a SIGUSR1-triggered property reload is pending and, if so, re-reads
      * --properties-file, applies any changed values, and dispatches applyUserProperties()

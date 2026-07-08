@@ -720,6 +720,16 @@ void ApplicationContext::loadSettingsFromArgv () {
 	.flag ()
 	.store_into (this->settings.general.onlyListProperties);
 
+    configurationGroup.add_argument ("--format")
+	.help (
+	    "Output format for --list-properties/--dump-structure: text (default, human-readable) or json "
+	    "(structured, for external tools like Mural to parse)"
+	)
+	.choices ("text", "json")
+	.default_value ("text")
+	.action ([this] (const std::string& value) -> void { this->settings.general.introspectionJson = (value == "json"); }
+	);
+
     configurationGroup.add_argument ("--set-property", "--property")
 	.help ("Overrides the default value of the given property")
 	.action ([this] (const std::string& value) -> void {

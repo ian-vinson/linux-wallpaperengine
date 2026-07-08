@@ -89,6 +89,8 @@ public:
 	    bool onlyListProperties;
 	    /** If the user requested a dump of the background structure */
 	    bool dumpStructure;
+	    /** Output format for --list-properties/--dump-structure: false = text (default), true = json */
+	    bool introspectionJson;
 	    /** If the user requested the particles to be deactivated */
 	    bool disableParticles;
 	    /** Path to a .pkg file to validate and dump (--pkg-validate); empty = not requested */
@@ -217,6 +219,7 @@ public:
         .general = {
             .onlyListProperties = false,
             .dumpStructure = false,
+            .introspectionJson = false,
             .disableParticles = false,
             .pkgValidatePath = "",
             .assets = "",

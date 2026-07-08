@@ -6,6 +6,7 @@
 #include "WallpaperEngine/Logging/Log.h"
 
 #include <map>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <utility>
 
@@ -35,6 +36,8 @@ public:
     using DynamicValue::update;
     virtual void update (const std::string& value, UpdateSource source) = 0;
     [[nodiscard]] virtual std::string dump () const = 0;
+    /** Structured equivalent of dump(), for --list-properties --format=json */
+    [[nodiscard]] virtual nlohmann::json dumpJson () const = 0;
 };
 
 class PropertySlider final : public Property, SliderData {
@@ -59,6 +62,11 @@ public:
 
 	return ss.str ();
     }
+
+    [[nodiscard]] nlohmann::json dumpJson () const override {
+	return { { "type", "slider" }, { "text", this->text },  { "min", this->min },
+		 { "max", this->max },   { "step", this->step }, { "value", this->getFloat () } };
+    }
 };
 
 class PropertyBoolean final : public Property {
@@ -81,6 +89,10 @@ public:
 
 	return ss.str ();
     }
+
+    [[nodiscard]] nlohmann::json dumpJson () const override {
+	return { { "type", "boolean" }, { "text", this->text }, { "value", this->getBool () } };
+    }
 };
 
 class PropertyColor final : public Property {
@@ -102,6 +114,14 @@ public:
 	   << "\tValue: " << this->toString () << std::endl;
 
 	return ss.str ();
+    }
+
+    [[nodiscard]] nlohmann::json dumpJson () const override {
+	const auto& colour = this->getVec3 ();
+
+	return { { "type", "color" },
+		 { "text", this->text },
+		 { "value", { { "r", colour.r }, { "g", colour.g }, { "b", colour.b } } } };
     }
 };
 
@@ -137,6 +157,16 @@ public:
 
 	return ss.str ();
     }
+
+    [[nodiscard]] nlohmann::json dumpJson () const override {
+	nlohmann::json options = nlohmann::json::object ();
+
+	for (const auto& [key, value] : this->values) {
+	    options[key] = value;
+	}
+
+	return { { "type", "combo" }, { "text", this->text }, { "value", this->toString () }, { "options", options } };
+    }
 };
 
 class PropertyText final : public Property {
@@ -157,6 +187,10 @@ public:
 
 	return ss.str ();
     }
+
+    [[nodiscard]] nlohmann::json dumpJson () const override {
+	return { { "type", "text" }, { "text", this->text }, { "value", this->toString () } };
+    }
 };
 
 class PropertySceneTexture final : public Property {
@@ -175,6 +209,10 @@ public:
 	   << "\tValue: " << this->m_value << std::endl;
 
 	return ss.str ();
+    }
+
+    [[nodiscard]] nlohmann::json dumpJson () const override {
+	return { { "type", "scenetexture" }, { "text", this->text }, { "value", this->m_value } };
     }
 
 private:
@@ -199,6 +237,10 @@ public:
 	return ss.str ();
     }
 
+    [[nodiscard]] nlohmann::json dumpJson () const override {
+	return { { "type", "file" }, { "text", this->text }, { "value", this->m_value } };
+    }
+
 private:
     std::string m_value;
 };
@@ -219,6 +261,10 @@ public:
 	   << "\tValue: " << this->m_value << std::endl;
 
 	return ss.str ();
+    }
+
+    [[nodiscard]] nlohmann::json dumpJson () const override {
+	return { { "type", "textinput" }, { "text", this->text }, { "value", this->m_value } };
     }
 
 private:

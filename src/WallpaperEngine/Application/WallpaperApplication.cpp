@@ -11,6 +11,7 @@
 #include "WallpaperEngine/Render/Drivers/VideoFactories.h"
 #include "WallpaperEngine/Render/RenderContext.h"
 
+#include "WallpaperEngine/Data/Dumpers/JsonPrinter.h"
 #include "WallpaperEngine/Data/Dumpers/StringPrinter.h"
 #include "WallpaperEngine/Data/Parsers/ProjectParser.h"
 
@@ -651,7 +652,9 @@ void WallpaperApplication::checkPropertyReload () {
     }
 }
 
-void WallpaperApplication::setupPropertiesForProject (const Project& project) {
+nlohmann::json WallpaperApplication::setupPropertiesForProject (const Project& project) {
+    nlohmann::json properties = nlohmann::json::object ();
+
     // show properties if required
     for (const auto& [key, cur] : project.properties) {
 	// update the value of the property
@@ -664,14 +667,32 @@ void WallpaperApplication::setupPropertiesForProject (const Project& project) {
 	}
 
 	if (this->m_context.settings.general.onlyListProperties) {
-	    sLog.out (cur->dump ());
+	    if (this->m_context.settings.general.introspectionJson) {
+		properties[key] = cur->dumpJson ();
+	    } else {
+		sLog.out (cur->dump ());
+	    }
 	}
     }
+
+    return properties;
 }
 
 void WallpaperApplication::setupProperties () {
+    const bool jsonMode
+	= this->m_context.settings.general.onlyListProperties && this->m_context.settings.general.introspectionJson;
+    nlohmann::json result = nlohmann::json::object ();
+
     for (const auto& [background, info] : this->m_backgrounds) {
-	this->setupPropertiesForProject (*info);
+	auto properties = this->setupPropertiesForProject (*info);
+
+	if (jsonMode) {
+	    result[background] = properties;
+	}
+    }
+
+    if (jsonMode) {
+	std::cout << result.dump (2) << std::endl;
     }
 }
 
@@ -1033,13 +1054,29 @@ void WallpaperApplication::setup () {
     this->setupOpenGLDebugging ();
 
     if (this->m_context.settings.general.dumpStructure) {
-	auto prettyPrinter = Data::Dumpers::StringPrinter ();
+	if (this->m_context.settings.general.introspectionJson) {
+	    auto jsonPrinter = Data::Dumpers::JsonPrinter ();
+	    nlohmann::json result = nlohmann::json::object ();
 
-	for (const auto& [background, info] : this->m_renderContext->getWallpapers ()) {
-	    prettyPrinter.printWallpaper (info->getWallpaperData ());
+	    for (const auto& [background, info] : this->m_renderContext->getWallpapers ()) {
+		result[background] = jsonPrinter.printWallpaper (info->getWallpaperData ());
+	    }
+
+	    std::cout << result.dump (2) << std::endl;
+	} else {
+	    auto prettyPrinter = Data::Dumpers::StringPrinter ();
+
+	    for (const auto& [background, info] : this->m_renderContext->getWallpapers ()) {
+		prettyPrinter.printWallpaper (info->getWallpaperData ());
+	    }
+
+	    std::cout << prettyPrinter.str () << std::endl;
 	}
 
-	std::cout << prettyPrinter.str () << std::endl;
+	// read-only introspection: exit cleanly right after printing, matching
+	// --list-properties' early-exit behaviour, instead of falling through into
+	// normal rendering/playback
+	this->m_context.state.general.keepRunning = false;
     }
 
 #if DEMOMODE

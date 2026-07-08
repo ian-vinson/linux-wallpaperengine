@@ -63,6 +63,15 @@ void StringPrinter::printObject (const Object& object) {
     } else if (object.is<Sound> ()) {
 	this->lineEnd ();
 	this->printSound (*object.as<Sound> ());
+    } else if (object.is<Text> ()) {
+	this->lineEnd ();
+	this->printText (*object.as<Text> ());
+    } else if (object.is<Particle> ()) {
+	this->lineEnd ();
+	this->printParticle (*object.as<Particle> ());
+    } else if (object.is<CameraObject> ()) {
+	this->lineEnd ();
+	this->printCameraObject (*object.as<CameraObject> ());
     }
 
     this->decreaseIndentation ();
@@ -92,6 +101,36 @@ void StringPrinter::printSound (const Sound& sound) {
 	this->m_out << "Filename " << filename;
     }
 
+    this->decreaseIndentation ();
+}
+
+void StringPrinter::printText (const Text& text) {
+    this->m_out << "Text:";
+    this->increaseIndentation ();
+    this->lineEnd ();
+    this->m_out << "Font: " << text.font;
+    this->lineEnd ();
+    this->m_out << "Value: " << text.text->value->toString ();
+    this->decreaseIndentation ();
+}
+
+void StringPrinter::printParticle (const Particle& particle) {
+    this->m_out << "Particle:";
+    this->increaseIndentation ();
+    this->lineEnd ();
+    this->m_out << "Particle file: " << particle.particleFile;
+    this->lineEnd ();
+    this->m_out << "Animation mode: " << particle.animationMode;
+    this->lineEnd ();
+    this->m_out << "Max count: " << particle.maxCount;
+    this->decreaseIndentation ();
+}
+
+void StringPrinter::printCameraObject (const CameraObject& camera) {
+    this->m_out << "Camera:";
+    this->increaseIndentation ();
+    this->lineEnd ();
+    this->m_out << "Camera name: " << camera.cameraName;
     this->decreaseIndentation ();
 }
 

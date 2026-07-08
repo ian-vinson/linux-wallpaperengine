@@ -47,6 +47,27 @@ public:
     void printSound (const Sound& sound);
 
     /**
+     * Prints the information of the given text object
+     *
+     * @param text
+     */
+    void printText (const Text& text);
+
+    /**
+     * Prints the information of the given particle object
+     *
+     * @param particle
+     */
+    void printParticle (const Particle& particle);
+
+    /**
+     * Prints the information of the given camera object
+     *
+     * @param camera
+     */
+    void printCameraObject (const CameraObject& camera);
+
+    /**
      * Prints the information of the given model
      *
      * @param model

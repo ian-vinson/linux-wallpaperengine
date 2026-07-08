@@ -524,6 +524,8 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Data/Builders/VectorBuilder.h
     src/WallpaperEngine/Data/Dumpers/StringPrinter.cpp
     src/WallpaperEngine/Data/Dumpers/StringPrinter.h
+    src/WallpaperEngine/Data/Dumpers/JsonPrinter.cpp
+    src/WallpaperEngine/Data/Dumpers/JsonPrinter.h
     src/WallpaperEngine/Data/JSON.cpp
 
     src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
