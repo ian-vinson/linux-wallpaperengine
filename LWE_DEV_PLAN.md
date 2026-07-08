@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-08 (#22 DONE, with an important self-correction — the original "ffmpeg concurrent-decode" classification from earlier this session was wrong; real cause was a QuickJS use-after-free in engine.setTimeout/setInterval storing a borrowed argv[0] JSValue without JS_DupValue, crashing on any single wallpaper using an inline-closure timeout, nothing to do with video decode or concurrency. Fixed, verified via 24/24 clean repeated runs and a full regression cross-checked against raw coredumpctl (0 crashes post-fix vs. 6+ pre-fix). Also surfaced two new tracked items: #27, a real blind spot in batch_test.py's own crash detection (only checks for the string "terminate", misses real SIGSEGV/SIGABRT — worth knowing this whole session's past "0 crashes" claims weren't independently signal-checked, though nothing found suggests any specific one was actually wrong), and #28, a known setTimeout/setInterval cancel-closure API-compatibility gap left deliberately out of scope. Active Priority Order: #23, #24, #25, #26, #27, #28)
+**Last updated:** 2026-07-08 (#27 DONE — batch_test.py's crash-detection blind spot fixed (now checks the real signal-based exit code, additive to the old string check), plus a second real bug found and fixed in its own verification (UnicodeDecodeError on invalid UTF-8 from a timeout-killed process). Rigorously verified with 6 synthetic positive/negative-path scenarios, not just a re-run. The fix immediately paid off: the corrected harness found 2 real, previously invisible crashes in the same regression run, now tracked as #29 (a genuinely new SIGABRT in AudioStream::resampleAudio() on a video wallpaper) and #30 (an uncaught std::terminate() on a GLSL compile failure, already-detectable but corpus-flaky). Active Priority Order: #23, #24, #25, #26, #28, #29, #30)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -421,41 +421,41 @@ each is small and well-isolated:
   the pause) are both small, additive refinements checked directly in
   `WaylandFullScreenDetector.cpp`.
 
-### #27 — `batch_test.py`'s crash detection has a real blind spot: real SIGSEGV/SIGABRT crashes get silently reported as "clean"
+### #29 — Kirby 30th Anniversary 4K (2722481044): `SIGABRT` in `AudioStream::resampleAudio()`, found by `#27`'s fixed harness
 
-Found 2026-07-08 as a side effect of `#22`'s re-investigation, not yet
-fixed. `batch_test.py`'s crash detection only checks for the literal
-string `"terminate"` appearing in a wallpaper's captured output — it
-does **not** check the process's actual exit code/signal, and does not
-cross-reference `coredumpctl`/`journalctl`. A real, silent `SIGSEGV`
-(the exact crash `#22` root-caused) produces no `"terminate"` string in
-stdout/stderr, so the harness reported **"0 crashes"** across multiple
-full regression runs while `coredumpctl` independently showed **6+ real
-coredumps** sitting on disk from those same runs.
+Found 2026-07-08, the moment `batch_test.py`'s crash detection was
+fixed (`#27`) — this crash was **completely invisible** to the old
+harness (no `"terminate"` string, so it silently reported "clean" every
+time) and had never been seen before this session despite presumably
+occurring on every regression run that included this wallpaper.
 
-**Why this matters beyond just `#22`**: this whole session has used
-`batch_test.py`'s own "X clean, Y errors, **0 crashes**" summary as a
-trusted verification signal at nearly every step, for nearly every fix.
-This blind spot means that claim specifically — the "0 crashes" part —
-was not as reliable as it was treated as being, for any run before this
-was discovered. This is **not** a reason to distrust every prior
-fix's overall conclusion (most verification also included independent
-evidence beyond the harness — screenshots, direct pixel readbacks,
-specific error-message cross-checks, live reproduction, etc. — and nothing
-found so far suggests any *specific* prior "0 crashes" claim was
-actually masking a real crash), but it's a real gap worth closing so
-future "0 crashes" claims from this harness are trustworthy on their own
-without needing a manual `coredumpctl` cross-check every time, which is
-what `#22`'s own final verification had to fall back on to get a
-genuinely trustworthy answer.
+A video wallpaper (`h264`/`nvdec` + AAC/PipeWire audio). Confirmed via
+a matching `coredumpctl` entry: `abort()` reached from glibc internals
+via `AudioStream::resampleAudio()` ← `decodeFrame()` ← SDL's real-time
+`audio_callback`. Looks like a heap-corruption guard (glibc's malloc
+consistency check, typically triggered by a buffer overrun/underrun in
+native code) tripping inside this fork's own audio resample path —
+**not** ffmpeg/mpv itself, and **not** related to `#22`'s timer bug or
+`#19`'s video-texture-decode fix. Genuinely new, not yet investigated
+further. A good, well-defined candidate for a focused follow-up,
+somewhat ironic given `#22` was originally (incorrectly) attributed to
+"concurrent video/audio decode" territory — this one actually is in
+that territory.
 
-**Fix, whenever picked up**: check the actual subprocess exit
-code/signal (a process killed by `SIGSEGV`/`SIGABRT`/etc. has a
-distinguishable negative/signal-indicating return from Python's
-`subprocess` module) in addition to or instead of the current
-string-matching approach, and/or cross-reference `coredumpctl` for new
-coredumps generated during the specific test run's time window,
-attributing each to the specific wallpaper being tested at that moment.
+### #30 — 麻匪 音频识别 悬浮窗 Media Player (2974757317): uncaught `std::terminate()` on a GLSL shader compile failure
+
+Found 2026-07-08 during `#27`'s regression re-run. Unlike `#29`, this
+one **was** already detectable by the old string-based check — its
+absence from earlier session runs was corpus flakiness (the
+already-documented non-deterministic batch-test behavior), not a new
+detection capability from `#27`'s fix. Still a real, genuine bug worth
+fixing on its own merits: a GLSL shader failing to compile should be a
+recoverable, logged error for that one wallpaper (matching how other
+shader-compile failures elsewhere in this fork are already handled),
+not an uncaught exception that aborts the whole process. Not yet
+investigated further — needs tracing to the specific `terminate()` call
+site to see why this particular compile-failure path isn't caught the
+same way others are.
 
 ### #28 — `engine.setTimeout`/`setInterval` return a plain numeric ID, not real WE's cancel-closure — known, deliberate compatibility gap
 
@@ -485,6 +485,67 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #27 — DONE 2026-07-08: `batch_test.py`'s crash-detection blind spot fixed — immediately found two real, previously invisible crashes
+
+The fix paid off immediately: the corrected harness found real bugs
+this same session that had been silently misclassified as "clean" for
+an unknown number of prior runs — see `#29`/`#30` below.
+
+**The actual blind spot, confirmed precisely**: `run_wallpaper()` used
+`subprocess.run(..., capture_output=True)` and classified a run as
+`CRASH` only if the literal string `"terminate"` appeared in captured
+output — it never looked at the exit code at all. A raw `SIGSEGV`/
+`SIGABRT` kill produces no such string and silently fell through to
+`CLEAN` (or `ERRORS`, if unrelated log noise happened to match some
+other pattern) — exactly what let `#22`'s use-after-free crash 6+ times
+across recent runs while every report claimed "0 crashes."
+
+**Fix**: switched to `subprocess.Popen`, checking `proc.returncode < 0`
+— the Python/POSIX convention for "killed by signal N" — as the
+primary, authoritative crash signal, resolved to a real name via
+`signal.Signals(n).name`. Additive, not a replacement: the original
+`"terminate"`-string check still runs afterward for the separate case
+of a process calling `std::terminate()` but exiting with a plain
+nonzero code rather than being raw-signaled. Also added a best-effort
+`coredumpctl info <pid>` cross-reference so a caught crash's report
+includes real signal/timestamp detail for later triage.
+
+**A second real bug found and fixed during the fix's own verification,
+not glossed over**: reaping a timeout-killed process's leftover output
+with `text=True` raised `UnicodeDecodeError` when that output happened
+to contain invalid UTF-8 — confirmed the hard way, when the very first
+re-run attempt died partway through the corpus on a specific wallpaper.
+The original code never hit this because it discarded output on
+timeout entirely; the new code actually reads it, exposing a
+pre-existing fragility. Fixed with `errors="replace"`, and — rather
+than just patch and move on — built a dedicated regression test (a
+synthetic script printing invalid UTF-8 bytes then hanging) confirming
+this exact scenario before re-running anything else.
+
+**Positive-path verification, genuinely rigorous, not just "re-run and
+hope"**: called the real `run_wallpaper()` directly against synthetic
+binaries (via a monkeypatched binary path), covering 6 distinct
+scenarios — `SIGSEGV` → `CRASH`/`CRASH_SIGNAL_SIGSEGV`, `SIGABRT` →
+`CRASH`/`CRASH_SIGNAL_SIGABRT`, clean exit → `CLEAN`, a
+terminate-string-without-a-real-signal → `CRASH`/`CRASH` (confirming the
+old detection path still works), an unbounded hang → `TIMEOUT` (not
+misclassified as a crash), and the invalid-UTF-8-before-timeout-kill
+case → `TIMEOUT` without raising. 6/6 passed.
+
+**Full regression with the corrected harness — the real payoff**: 355
+clean, 1 pre-existing shader error (Chainsaw Man), and **2 real crashes
+the old harness could never see at all**:
+- "Kirby 30th Anniversary 4K" (`2722481044`) — `SIGABRT`, confirmed via
+  a matching coredump. Tracked as its own new item, `#29`.
+- "麻匪 音频识别 悬浮窗 Media Player" (`2974757317`) — an uncaught
+  `std::terminate()` on a GLSL shader compile failure. This one *was*
+  already catchable by the old string-based check — its absence from
+  earlier runs was corpus flakiness, not a new capability from this
+  fix. Tracked as its own new item, `#30`.
+
+Neither newly-found crash was fixed here — out of scope for a
+harness-correctness item — both tracked separately.
 
 ### #22 — DONE 2026-07-08: original "ffmpeg concurrent-decode" classification was WRONG — real cause was a QuickJS use-after-free in `engine.setTimeout`/`setInterval`, fixed
 
