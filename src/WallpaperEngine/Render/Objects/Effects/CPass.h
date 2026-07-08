@@ -131,6 +131,14 @@ private:
     void registerScriptedConstant (const std::string& name, const char* scope, DynamicValue& value) const;
     void setupUniforms ();
     void setupTextureUniforms ();
+    // Video-backed textures only start decoding once something calls incrementUsageCount() on
+    // them (CImage does this once for its own m_texture) — textures resolved here purely as
+    // effect/material inputs (e.g. day/night blend textures) are never anyone's main texture, so
+    // without this they'd sit forever at whatever GLPlayer's one-time construction-time clear
+    // produced. Walks every texture referenced anywhere in m_textures (including chain fallbacks)
+    // so all of them are kept alive/decoding for this pass's lifetime; called once from
+    // setupTextureUniforms() and symmetrically undone in ~CPass().
+    void adjustTextureUsageCounts (bool increment) const;
     void setupAttributes ();
     void addAttribute (const std::string& name, GLint type, GLint elements, const GLuint* value);
     void addUniform (ShaderVariable* value);

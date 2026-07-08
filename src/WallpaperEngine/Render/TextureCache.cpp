@@ -137,3 +137,9 @@ std::shared_ptr<const TextureProvider> TextureCache::resolveTransparentPlacehold
 void TextureCache::store (const std::string& name, std::shared_ptr<const TextureProvider> texture) {
     this->m_textureCache.insert_or_assign (name, texture);
 }
+
+void TextureCache::updateAll () const {
+    for (const auto& texture : this->m_textureCache | std::views::values) {
+	texture->update ();
+    }
+}

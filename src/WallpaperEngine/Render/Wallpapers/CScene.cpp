@@ -553,6 +553,14 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 #endif
     }
 
+    // Video-backed textures referenced only as effect/material inputs (e.g. day/night blend
+    // textures) aren't anyone's "main" texture, so the per-object loop above never reaches them —
+    // update() every cached texture too so they actually decode. Cheap no-op for anything that
+    // isn't video-backed (CFBO/AlbumTexture's update() are empty), and harmless to call twice on
+    // an object's own main texture (already updated above) since it just re-renders the current
+    // frame.
+    this->getContext ().updateAllTextures ();
+
     // bind the vertex array
     glBindVertexArray (this->m_vaoBuffer);
     // use the scene's framebuffer by default

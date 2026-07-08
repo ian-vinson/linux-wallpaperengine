@@ -52,6 +52,16 @@ public:
      */
     void store (const std::string& name, std::shared_ptr<const TextureProvider> texture);
 
+    /**
+     * Advances every cached texture's contents (video-backed textures decode their next frame
+     * here; anything else is a no-op). Must run once per frame so video textures referenced only
+     * as effect/material inputs (day/night blend textures, etc) actually get ticked — an object's
+     * own primary texture is already ticked separately via CScene's per-object update, but calling
+     * update() twice on the same texture is harmless (CTexture::update() just re-renders the
+     * current frame), so no de-duplication is needed here.
+     */
+    void updateAll () const;
+
 private:
     /**
      * @return A cached 1x1 fully transparent texture used as a placeholder for

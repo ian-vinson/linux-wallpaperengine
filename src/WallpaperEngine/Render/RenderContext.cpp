@@ -66,6 +66,8 @@ std::shared_ptr<const TextureProvider> RenderContext::resolveUserTexture (const 
     return this->m_textureCache->resolveUserTexture (name);
 }
 
+void RenderContext::updateAllTextures () const { this->m_textureCache->updateAll (); }
+
 const std::map<std::string, std::shared_ptr<CWallpaper>>& RenderContext::getWallpapers () const {
     return this->m_wallpapers;
 }

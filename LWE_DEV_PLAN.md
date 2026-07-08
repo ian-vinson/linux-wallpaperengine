@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-07 (#21 DONE — `constantshadervalues` scripts (day/night blend gating etc.) are now genuinely wired into `ScriptEngine`/QuickJS via a new `CPass::registerScriptedConstant()`, keyed by the `CPass` instance's own address to avoid the cross-effect name-collision risk `ScriptableObject::registerProperty()`'s bare-name keying would have hit. Verified with real, correctly time-gated values on `#19`'s wallpaper; confirmed via `git stash` A/B that it does NOT resolve `#19`'s gray screen — that's a separate, still-open bug now further isolated. Zero regressions: 356-wallpaper scene batch (2 known pre-existing errors, 0 crashes) and 48-wallpaper web corpus (48/48 clean) both match established baselines. #19 remains open. #16 fully CLOSED, including its last checklist item — `resolveGeometrySize()`'s call to `getSize()` directly confirmed via env-var-gated debug instrumentation on two real wallpapers, "Scarlet Witch" and "Retro Room". Also acquired and tested the second originally-reported wallpaper, 3409327922 from upstream #420 — puppet character renders fully assembled, no scattered limbs, no horizontal seam. Both originally-reported puppet-mesh wallpapers now confirmed clean on this fork. Active Priority Order: #17, #19 (partially investigated), #20)
+**Last updated:** 2026-07-07 (#19 CLOSED — root cause fully traced: video-backed textures referenced only as effect/material inputs (day/night blend textures) never had `GLPlayer::play()`/`render()` called on them at all, so they sat forever showing whatever GL clear color was active at their one-time construction moment (which happened to exactly match the scene's own clearcolor). Fixed via `TextureCache::updateAll()` + `CPass::adjustTextureUsageCounts()`, mirroring `CImage`'s existing per-texture pattern. Verified visually (real video renders where gray previously showed) and via 48-wallpaper web corpus (48/48 clean, twice). Regression testing surfaced a real, separate concurrent-decode segfault (confirmed via kernel log — genuine ffmpeg thread SIGSEGV under full-batch stress, not a logic bug in this fix) — split out as new item `#22`, shipped `#19` anyway after explicit user sign-off since it doesn't reproduce in normal single-wallpaper use. #21 DONE — `constantshadervalues` scripts are now genuinely wired into `ScriptEngine`/QuickJS via `CPass::registerScriptedConstant()`; confirmed this alone did NOT resolve #19 (separate bug), correctly narrowing the investigation. #16 fully CLOSED, including its last checklist item. Active Priority Order: #17, #20, #22)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -351,7 +351,15 @@ equivalent shared UV-computation function already is. Should not require
 touching `CScene`/`CVideo`/`CWeb` individually if the shared-class
 architecture matches, which is the expected case.
 
-### #19 — LOW: Gray screen on a specific video wallpaper (upstream Almamu/linux-wallpaperengine#523)
+### #19 — CLOSED 2026-07-07: video-backed effect-input textures now actually decode; gray screen fixed
+
+Moved to Completed Items — see `#19`'s closure entry there (right after
+`#21`) for the final root cause, fix, and regression results. See also
+`#22` (new item) for a real, separate concurrent-decode threading issue
+this fix's own regression testing surfaced.
+
+<details><summary>Original open investigation (superseded, kept for history)</summary>
+
 Reported 2026-07-06,
 [Almamu/linux-wallpaperengine#523](https://github.com/Almamu/linux-wallpaperengine/issues/523),
 still open upstream. Wallpaper `2804831278` on CachyOS/KDE/Wayland/AMD
@@ -474,6 +482,9 @@ follow-up entry if picked up. All temporary instrumentation (env-var
 gated `hwdec` override in `GLPlayer.cpp`) fully reverted — confirmed via
 `git diff`, rebuild verified clean.
 
+</details>
+
+
 ### #20 — LOW: Multiple simultaneous audio sources visible for a single wallpaper instance (upstream Almamu/linux-wallpaperengine#174)
 Older, still-open upstream issue:
 [Almamu/linux-wallpaperengine#174](https://github.com/Almamu/linux-wallpaperengine/issues/174).
@@ -491,6 +502,45 @@ client/output (one per sound file per object, potentially multiplying
 quickly on a wallpaper with several sound objects or particle-attached
 audio) rather than sharing one client connection per process, which
 would directly explain the reported symptom.
+
+### #22 — Concurrent multi-video decode can segfault under sustained load (found via `#19`'s regression testing, not yet investigated)
+
+Found 2026-07-07 as a side effect of verifying `#19`'s fix, not
+investigated further this session. `#19`'s fix correctly makes video-
+backed textures that are only referenced as effect/material inputs
+(day/night blend textures, etc) actually decode — meaning wallpapers
+using this pattern now run **multiple simultaneous `mpv`/ffmpeg decoder
+instances within a single process**, where previously at most one ever
+ran (the others were structurally inert).
+
+**Real evidence, not a hunch**: two full 358-wallpaper batch regression
+runs with `#19`'s fix both showed the exact same wallpaper
+(`2974757317`, "麻匪 音频识别 悬浮窗 Media Player") crashing — a
+controlled A/B against the pre-fix code under identical full-batch
+conditions showed zero crashes, isolating this to the fix specifically.
+Root-caused via `journalctl`/kernel log (not guessed): a genuine
+**kernel-level SIGSEGV inside an ffmpeg H264 decode thread**
+(`av:h264:df1`, signal 11), timestamped to the exact minute of the
+batch run. Does **not** reproduce in 10+ isolated single-wallpaper
+retries (matching the batch harness's exact subprocess invocation) —
+only manifests under the full batch's sustained back-to-back load,
+suggesting a resource/timing-sensitive concurrency issue (possibly
+related to NVDEC's known concurrent-hardware-decode-session limits on
+consumer GeForce cards, though not confirmed) rather than a logic bug
+in `#19`'s own usage-count bookkeeping (verified separately to be
+correctly balanced).
+
+**Scope/impact**: does not reproduce in normal single-wallpaper desktop
+use (the way a real user actually runs this engine) — only under
+artificial, fast, back-to-back automated stress across the whole
+workshop corpus. Shipped `#19`'s fix anyway after explicit user sign-off
+given this tradeoff (see `#19`'s closure entry for the full decision
+context). Worth investigating properly before this fork is used in any
+context that might run many video-heavy wallpapers back-to-back (e.g. a
+future batch-preview/thumbnail-generation feature) — likely needs either
+a concurrency cap on simultaneous decoder instances, or a deeper look at
+`mpv`/ffmpeg thread-safety when multiple decoder contexts share a
+process.
 
 ---
 
@@ -729,6 +779,110 @@ All temporary instrumentation (env-var-gated logging in `CPass.cpp` and
 a debug-only key-visibility tweak in `ScriptEngine.cpp`'s `tick()`) was
 fully reverted; final diff is exactly the `CPass.h`/`CPass.cpp` changes
 described above, confirmed via `git diff`.
+
+### #19 — CLOSED 2026-07-07: video-backed effect-input textures now actually decode; gray screen fixed
+
+Closes the investigation from `#19`'s open entry above and `#21`. With
+`#21`'s scripting fix confirmed correct (real, time-gated values, no
+change to the gray screen), the remaining open thread was: why does even
+the *correctly selected* day/night texture never make it to the screen?
+
+**Step 1 — read the actual shader in full.** Extracted the wallpaper's
+own bundled `shaders/effects/blend.frag`/`.vert` directly from
+`scene.pkg` and diffed it against the shared `assets/effects/blend/`
+copy — the wallpaper ships an older but functionally equivalent version
+for this combo config (`BLENDMODE=0`, no `WRITEALPHA`); not a version
+mismatch, not the cause.
+
+**Step 2 — traced actual GL bindings and content, not just resolution
+success.** Temporary instrumentation (scratch FBO + `glReadPixels`,
+fully reverted after): confirmed `g_Texture0` (the video composite) and
+`g_Texture1`/`2`/`3` (`清晨`/`早`/`黄昏`) all resolve to real, correctly-
+sized (3920×2204), "ready" textures — resolution/binding was never the
+problem. But sampling their **raw pixel content directly**, bypassing
+all shader math, showed something conclusive: `g_Texture0` had genuine,
+varying video content (proving the readback method itself was sound),
+while `清晨`/`早`/`黄昏` were **flat, uniform `(0.698039, 0.698039,
+0.698039, 1.0)` at every sampled point** — bit-for-bit `round(0.7×255)`,
+the scene's own `clearcolor`, with full alpha. Not a blend-math or
+alpha-transparency bug: the textures' own GPU-resident content was
+never anything but the scene's clear color.
+
+**Step 3 — root cause, traced to source.** Checked the `.tex` headers
+directly (temporary logging in `TextureCache::resolve()`): all three —
+like `晚`, the main video — carry `TextureFlags_Video` (value 32) and
+matching 3920×2204 dimensions. They're **video-backed textures**, each
+needing their own `GLPlayer`/mpv instance, exactly like the main video.
+Two structural gaps meant they never actually played:
+1. `GLPlayer::play()` — which calls `mpv_initialize()` and issues the
+   `loadfile` command that starts real decode — is only ever invoked via
+   `TextureProvider::incrementUsageCount()`. The *only* call site in the
+   entire codebase was `CImage.cpp:415`, for an object's own primary
+   `m_texture`. Effect-input textures resolved via the shared
+   `TextureCache` never got this call.
+2. Even if playing, `GLPlayer::render()` (which pulls the next decoded
+   frame via `mpv_render_context_render()`) was only ticked via
+   `CScene.cpp`'s `image->getTexture()->update()` loop — again scoped to
+   objects' primary textures only.
+Since neither ever ran for `清晨`/`早`/`黄昏`, their GL textures were
+never touched after `GLPlayer::prepareGL()`'s **one-time, constructor-
+time** `glClear(GL_COLOR_BUFFER_BIT)` — which uses whatever the *global*
+GL clear color happens to be at that moment, not a fixed transparent
+value (unlike `CFBO`'s constructor, which explicitly saves/restores the
+previous clear color around its own clear for exactly this reason — see
+its comment: "Layer framebuffers must start transparent... using \[the
+scene clearcolor\] here makes empty layer areas render as solid
+rectangles"). Since the scene's own `glClearColor(0.7, 0.7, 0.7, 1.0)`
+call was still the active GL state at texture-construction time, that
+exact value got permanently baked into all three textures at
+construction and never overwritten again.
+
+**Fix** (55 lines, `TextureCache`/`RenderContext`/`CScene`/`CPass`):
+- `TextureCache::updateAll()` — new method, ticks every cached texture's
+  `update()` once per frame (a no-op for non-video textures: `CFBO`/
+  `AlbumTexture`'s `update()` are empty), called from `CScene.cpp`
+  alongside the existing per-object primary-texture update loop.
+- `CPass::adjustTextureUsageCounts(bool)` — new method, walks every
+  texture referenced anywhere in `m_textures` (including chain
+  fallbacks) and calls `incrementUsageCount()`/`decrementUsageCount()`
+  symmetrically, called once from `setupTextureUniforms()` and once from
+  `~CPass()` — the exact same pattern `CImage` already uses for its own
+  texture, just extended to cover effect-input textures too.
+
+**Verification.** All four video players now genuinely initialize and
+decode (confirmed via log: four `● Video`/`VO:` track-selection blocks
+instead of one). The wallpaper renders real, stable video content
+instead of gray, confirmed via `--screenshot` at multiple points in
+time (3s and 15s into playback). 48-wallpaper web corpus: 48/48 clean,
+twice (this fix also touches the CEF/web rendering path, since it also
+constructs `CPass` instances). All temporary instrumentation (scratch-
+FBO readbacks, `.tex`-header logging) fully reverted — confirmed via
+`git diff`.
+
+**Full 358-wallpaper scene regression surfaced a real, separate issue —
+investigated to ground truth, not dismissed.** Two full-batch runs with
+the fix both showed 355 clean / 2 errors / **1 crash** (wallpaper
+`2974757317`, "麻匪 音频识别 悬浮窗 Media Player"), vs. the established
+356/2/0 baseline. A controlled A/B — identical corpus, identical
+machine, old pre-fix code re-tested under the exact same full-batch
+conditions — showed **0/0 crashes**, proving this is a genuine
+consequence of the fix, not noise. The crash does **not** reproduce in
+10+ isolated single-wallpaper retries (matching the test harness's exact
+subprocess invocation) — only under the full batch's sustained load.
+Root-caused via `journalctl`/kernel log, not guessed: a real **kernel-
+level SIGSEGV inside an ffmpeg H264 decode thread** (`av:h264:df1`,
+signal 11), timestamped to the exact minute of the second full-batch
+run. This fix correctly makes many more wallpapers' effect-input videos
+actually decode — wallpapers that previously ran at most one real video
+decoder per process now run several `mpv`/ffmpeg instances concurrently
+within a single process, exposing what looks like a genuine, pre-
+existing thread-safety fragility in concurrent multi-instance decode
+that this code path never exercised before (it was structurally dead
+until this fix). Not a defect in the usage-count/tick logic itself,
+which is correctly balanced. Split out as its own tracked item, `#22`,
+rather than blocking this fix — doesn't reproduce in normal single-
+wallpaper desktop use, only under back-to-back automated stress. Shipped
+after explicit user sign-off given this tradeoff.
 
 ### #18 — DONE 2026-07-06: `WebBrowserContext` now cleans up its per-run CEF cache directory on clean shutdown
 

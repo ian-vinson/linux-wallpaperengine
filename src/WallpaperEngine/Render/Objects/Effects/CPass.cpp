@@ -59,6 +59,8 @@ CPass::CPass (
 }
 
 CPass::~CPass () {
+    this->adjustTextureUsageCounts (false);
+
     glDeleteVertexArrays (1, &m_vao);
     this->m_vao = GL_NONE;
 
@@ -843,6 +845,24 @@ void CPass::setupTextureUniforms () {
     }
 
     this->addUniform ("g_Texture0Resolution", &this->m_texture0Resolution);
+
+    this->adjustTextureUsageCounts (true);
+}
+
+void CPass::adjustTextureUsageCounts (const bool increment) const {
+    for (const auto& chain : this->m_textures | std::views::values) {
+	for (auto cur = chain; cur != nullptr; cur = cur->next) {
+	    if (cur->texture == nullptr) {
+		continue;
+	    }
+
+	    if (increment) {
+		cur->texture->incrementUsageCount ();
+	    } else {
+		cur->texture->decrementUsageCount ();
+	    }
+	}
+    }
 }
 
 void CPass::setupUniforms () {
