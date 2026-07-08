@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-08 (#30 CLOSED — corrects an unverified claim in #27's own report. #27 stated this wallpaper's flagged crash "was already catchable by the old string-based check," but that was never actually cross-checked against a coredump. 44 reproduction attempts across 5 methods, including replicating the exact real corpus order, all exited cleanly through the already-safe error path — zero coredumps found anywhere on the system for this wallpaper, in contrast to #29's confirmed match. Most likely explanation: the crash-detection string check has its own false-positive hazard (a GLSL compiler's own benign "compilation terminated" diagnostic matches the naive "terminate" substring check) — tracked as a new small hardening item, #31. No fix implemented for a bug that couldn't be confirmed to exist. Active Priority Order: #23, #24, #25, #26, #28, #29, #31)
+**Last updated:** 2026-07-08 (#29 DONE — Kirby 30th Anniversary 4K's SIGABRT fixed, a genuine heap buffer overflow in AudioStream::resampleAudio()'s modern channel-layout branch (sizing the output buffer from the input file's channel count instead of the driver's actual output layout). Also fixed a real, independent secondary bug found first (a shared static decode-state variable across concurrent AudioStream instances) — tested in isolation and correctly found insufficient alone before digging further with a targeted debug rebuild to find the actual root cause. Verified via 25/25 clean stress runs (up from ~2/12 crashing) and a full regression cross-checked against raw coredumpctl. Found one new pre-existing bug along the way, tracked as #32 (a SIGFPE on Blue Archive). Active Priority Order: #23, #24, #25, #26, #28, #31, #32)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -421,26 +421,15 @@ each is small and well-isolated:
   the pause) are both small, additive refinements checked directly in
   `WaylandFullScreenDetector.cpp`.
 
-### #29 — Kirby 30th Anniversary 4K (2722481044): `SIGABRT` in `AudioStream::resampleAudio()`, found by `#27`'s fixed harness
+### #32 — Blue Archive (3320489297): `SIGFPE` (integer divide-by-zero), found as a side effect of `#29`'s verification
 
-Found 2026-07-08, the moment `batch_test.py`'s crash detection was
-fixed (`#27`) — this crash was **completely invisible** to the old
-harness (no `"terminate"` string, so it silently reported "clean" every
-time) and had never been seen before this session despite presumably
-occurring on every regression run that included this wallpaper.
-
-A video wallpaper (`h264`/`nvdec` + AAC/PipeWire audio). Confirmed via
-a matching `coredumpctl` entry: `abort()` reached from glibc internals
-via `AudioStream::resampleAudio()` ← `decodeFrame()` ← SDL's real-time
-`audio_callback`. Looks like a heap-corruption guard (glibc's malloc
-consistency check, typically triggered by a buffer overrun/underrun in
-native code) tripping inside this fork's own audio resample path —
-**not** ffmpeg/mpv itself, and **not** related to `#22`'s timer bug or
-`#19`'s video-texture-decode fix. Genuinely new, not yet investigated
-further. A good, well-defined candidate for a focused follow-up,
-somewhat ironic given `#22` was originally (incorrectly) attributed to
-"concurrent video/audio decode" territory — this one actually is in
-that territory.
+Found 2026-07-08, confirmed via a matching `coredumpctl` entry during
+`#29`'s spot-check of other real audio-bearing wallpapers, plus present
+again in `#29`'s own final full-corpus regression cross-check —
+genuinely reproducible, not a one-off. Pre-existing, unrelated to
+`#22`/`#27`/`#29`'s fixes. Not yet investigated — needs its own real
+backtrace/root-cause pass the same way `#22`/`#29` got, rather than
+assumed to be some other already-understood bug.
 
 ### #31 — small hardening: `batch_test.py`'s `"terminate"` string check has a false-positive hazard on benign compiler diagnostics
 
@@ -484,6 +473,76 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #29 — DONE 2026-07-08: Kirby 30th Anniversary 4K's `SIGABRT` fixed — a genuine heap buffer overflow in `AudioStream::resampleAudio()`'s modern channel-layout branch
+
+A real, provable memory-safety bug, root-caused with a precise,
+line-resolved backtrace, not guessed at.
+
+**A real, independent bug found and fixed first, but not sufficient
+alone**: `AudioStream::decodeFrame()` declared `static int
+audio_pkt_size` — a function-local static shared across **every**
+`AudioStream` instance in the process, when it should track per-
+instance decode state. Confirmed Kirby's scene genuinely has 2
+concurrent `CSound` objects, so their two decode loops were interleaving
+through the same shared variable, corrupting each stream's notion of
+"bytes remaining in the current packet." Fixed by converting it to a
+real instance member (`m_audioPktSize`). **Tested this fix in isolation
+first, and correctly found it insufficient** — 2 of 12 stress runs
+still crashed afterward — confirming it was a real, independent bug,
+but not the actual root cause.
+
+**Root cause, found via targeted debug tooling**: recompiled just
+`AudioStream.cpp` with `-g` (extracted from the project's real CMake
+flags) and relinked it into the existing release `.so` — avoiding a
+full rebuild — to get a precise, line-resolved backtrace. Reproduced on
+the 4th attempt; the crash site itself (`AudioStream.cpp:571`, a
+cleanup `av_freep()` call on an already-NULL pointer) was just the next
+allocator call after the real damage — the classic signature of heap
+corruption manifesting downstream of its actual cause, not at it.
+Traced the actual cause: `resampleAudio()`'s `#else` branch (used on
+this system, since `libavutil` 60 is past the
+`FF_API_OLD_CHANNEL_LAYOUT` cutoff of 59) computed `out_nb_channels`
+from `this->getContext()->ch_layout.nb_channels` — the **input** sound
+file's own channel count — instead of the actual **output** (driver)
+channel layout that `swr_alloc_set_opts2()` was configured with in
+`initialize()`. The sibling legacy branch just above it already did
+this correctly. Kirby has at least one mono sound effect being
+resampled to this fork's stereo driver output: the destination buffer
+was allocated for 1 channel's worth of samples, but `swr_convert()` —
+correctly configured for 2-channel output — wrote twice that,
+overflowing the buffer and corrupting adjacent heap metadata. Explains
+the rarity/data-dependence: this only manifests when a wallpaper's
+audio file's channel count differs from the driver's, not on every
+resample.
+
+**Fix**: in the `#else` branch, derive `out_nb_channels` from the same
+output-channel-layout logic already used correctly elsewhere in the
+same function — build the channel mask (mono/stereo/surround) from
+`m_audioContext.getChannels()`, resolve it via
+`av_channel_layout_from_mask()`, and take `.nb_channels` from the
+result, instead of reading the input file's own layout.
+
+**Verification, thorough and cross-checked**:
+- Clean build.
+- **25/25 stress-test runs of Kirby, zero crashes, zero coredumps in
+  that entire window** — up from ~2/12 crashing before the channel-
+  layout fix (the `audio_pkt_size` fix alone).
+- Spot-checked 4 other real audio-bearing wallpapers — all clean. One
+  crash was hit during this spot-check, but confirmed via matching
+  coredump to be a genuinely separate, pre-existing, unrelated `SIGFPE`
+  (integer divide-by-zero) on a different wallpaper — tracked
+  separately as new item `#32`.
+- **Full 358-wallpaper regression, cross-checked against raw
+  `coredumpctl` for the entire run window**: 356 clean, 1 pre-existing
+  shader error (Chainsaw Man), 1 pre-existing `SIGFPE` (`#32`, above).
+  Kirby now appears in the clean list. Exactly one coredump generated
+  during the whole run, matching the one reported failure — confirming
+  nothing was missed or silently hidden, the standard this session
+  established for any crash-adjacent fix after `#27`'s own finding.
+  `#30`'s earlier one-off false-positive did not reappear, consistent
+  with that investigation's conclusion that it was never a real,
+  recurring bug.
 
 ### #27 — DONE 2026-07-08: `batch_test.py`'s crash-detection blind spot fixed — immediately found two real, previously invisible crashes
 

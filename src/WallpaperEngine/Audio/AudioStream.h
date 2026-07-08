@@ -194,6 +194,8 @@ private:
     bool m_paused = false;
     /** Per-stream volume scale [0.0, 1.0] */
     float m_volume = 1.0f;
+    /** Bytes remaining in m_decodePacket still to be decoded via avcodec_receive_frame */
+    int m_audioPktSize = 0;
     /** The codec context that contains the original audio format information */
     AVCodecContext* m_context = nullptr;
     /** The format context that controls how data is read off the file */
