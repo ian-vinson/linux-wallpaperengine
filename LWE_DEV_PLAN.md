@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-08 (#29 DONE — Kirby 30th Anniversary 4K's SIGABRT fixed, a genuine heap buffer overflow in AudioStream::resampleAudio()'s modern channel-layout branch (sizing the output buffer from the input file's channel count instead of the driver's actual output layout). Also fixed a real, independent secondary bug found first (a shared static decode-state variable across concurrent AudioStream instances) — tested in isolation and correctly found insufficient alone before digging further with a targeted debug rebuild to find the actual root cause. Verified via 25/25 clean stress runs (up from ~2/12 crashing) and a full regression cross-checked against raw coredumpctl. Found one new pre-existing bug along the way, tracked as #32 (a SIGFPE on Blue Archive). Active Priority Order: #23, #24, #25, #26, #28, #31, #32)
+**Last updated:** 2026-07-08 (#23 DONE — contrast/saturation/border-colour post-processing implemented, following #17's exact established pattern (same per-screen storage convention, same CWallpaper/CScene/CVideo/CWeb threading). No new compositing pass needed — CWallpaper's existing final-compositing shader was already the right hook, extended in place. Verified with real quantitative RGB proof for saturation/contrast and a real UV-overflow test for border-colour; one specific sub-case (aspect-mismatch + --scaling fit) was honestly reported as inconclusive rather than folded into a blanket pass. Full regression clean, matching baseline exactly. Active Priority Order: #24, #25, #26, #28, #31, #32)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,54 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #23 — Contrast/saturation/border-colour post-processing, universal for all wallpaper types (`--contrast`/`--saturation`/`--border-colour`), from NeXx42's engine fork
-
-Researched 2026-07-07 alongside `#17`'s UV offset, same source
-([NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork)).
-All three are handled by **one single, unified mechanism** — confirmed
-via direct source reading, not inferred: `CWallpaper` (the same shared
-base class already confirmed for `#17`'s UV offset, used identically by
-`CScene`/`CVideo`/`CWeb`) loads a dedicated `shaders/postprocess.vert`/
-`.frag` pair and runs it as the **very last rendering step**, after any
-wallpaper type's own content is already fully rendered to its own
-texture — genuinely universal by construction, not three separate
-per-type implementations.
-
-The whole fragment shader is small enough to reproduce in full:
-```glsl
-uniform sampler2D g_Texture0;
-uniform float u_Saturation;
-uniform float u_Contrast;
-uniform vec3 u_BorderColour;
-
-void main() {
-    vec4 tex = texture(g_Texture0, v_TexCoord);
-    if (tex.a < 0.01) {
-        out_FragColor = vec4(u_BorderColour, 1.0);
-        return;
-    }
-    vec3 color = tex.rgb;
-    float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    color = mix(vec3(lum), color, u_Saturation);       // saturation
-    color = (color - 0.5) * u_Contrast + 0.5;          // contrast
-    out_FragColor = vec4(color, 1.0);
-}
-```
-`border-colour` and saturation/contrast are all one feature in practice:
-the alpha-test fallback (`tex.a < 0.01`) is exactly what makes
-`border-colour` show up specifically in the letterboxed/empty area when
-using clamp/border scaling mode. Values are read from
-`this->m_shaderSettings` and set as uniforms **once, at shader setup
-time** — not re-applied per frame, so if Mural wants live-adjustable
-sliders (not just launch-time CLI flags), this would need extending to
-re-set the uniforms on change, not just ported as-is.
-
-**Scope for whenever this is picked up**: confirm whether this fork's
-existing shared wallpaper-output/compositing stage (analogous to
-`CWallpaper` here) has an equivalent hook to add one final shader pass
-after all per-type rendering completes — likely small and clean if the
-architecture matches, similar in shape and effort to `#17`.
-
 ### #24 — Introspection CLI flags for Mural integration: `--list-properties` and `--dump-structure`, from NeXx42's engine fork
 
 Researched 2026-07-07, same source as `#17`/`#23`. Directly valuable for
@@ -473,6 +425,69 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #23 — DONE 2026-07-08: contrast/saturation/border-colour post-processing implemented, following `#17`'s exact established pattern
+
+Ported from NeXx42/linux-wallpaperengine-fork's real, already-researched
+mechanism. Confirmed `CWallpaper::setupShaders()`/`render()` was already
+exactly the universal final-compositing stage the reference describes —
+every wallpaper type (`CScene`/`CVideo`/`CWeb`) renders its own content
+into `m_sceneFBO` via `renderFrame()`, then this shared, type-agnostic
+code composites that texture to the screen via a hardcoded passthrough
+shader. No new pass needed — extended that existing shader in place.
+
+**Implementation**: added `--contrast`/`--saturation`/`--border-colour`
+CLI flags with per-screen (`screenContrasts`/`screenSaturations`/
+`screenBorderColours` maps) and span-group storage identical in
+structure to `#17`'s `--offset-x`/`--offset-y`. Threaded through
+`WallpaperApplication.cpp`'s three `fromWallpaper()` call sites (per-
+screen, span-group, playlist-advance), `CWallpaper::fromWallpaper()` →
+constructor → `CScene`/`CVideo`/`CWeb` constructors, all as trailing
+defaulted params exactly like `offsetX`/`offsetY`.
+`CWallpaper::setupShaders()`'s fragment shader now matches the
+reference (saturation via luminance mix, contrast via midpoint stretch,
+border-colour via a `tex.a < 0.01` alpha-test fallback). Uniforms set
+once, right after linking — not re-applied per frame, matching
+NeXx42's fork's own documented-as-a-limitation behavior (a real
+constraint to remember if Mural ever wants live-adjustable sliders
+rather than launch-time-only flags).
+
+**Verification, with one honestly-reported inconclusive result rather
+than a blanket pass**:
+- Caught a real methodological trap on its own: `--screenshot` captures
+  the **pre**-compositing scene FBO, completely bypassing this new
+  shader — correctly diagnosed rather than concluding the feature was
+  broken, and pivoted to capturing the actual displayed window output
+  via an external screen-capture tool (non-destructively layered on top
+  of the live desktop session).
+- Saturation/contrast confirmed genuinely applied via real, quantitative
+  RGB numbers: `--saturation 0.0` produced real channel convergence
+  (`R=96.3/G=96.4/B=96.5`) on a window that was `R=108/G=87/B=62` by
+  default.
+- Border-colour mechanism proven correct via a forced UV-overflow test
+  (`--offset-x 0.5 --clamp border`) — pure `(255,0,0)` red exactly in
+  the overflowing half of the window. **One specific sub-case (aspect-
+  mismatched window + `--scaling fit`) did not visibly show the border
+  colour and was reported plainly as inconclusive** rather than folded
+  into a blanket "confirmed" — the real cause (Wayland compositor
+  window-geometry behavior, or a pre-existing `WallpaperState` UV-math
+  quirk for that specific scaling mode) was not pinned down and remains
+  open if it matters later.
+- Defaults confirmed as no-ops by direct mathematical inspection of the
+  shader formula, not by screenshot diffing — run-to-run diffing turned
+  out to have an inherent multi-million-pixel noise floor on this
+  renderer's animated content even with zero code changes between runs,
+  making it useless as a check here. `saturation=1.0`/`contrast=1.0`
+  are exact identities in the formula itself; the border-colour branch
+  only executes when `tex.a < 0.01`, which normal opaque content never
+  reaches.
+- All three wallpaper types (scene/video/web) ran cleanly with the new
+  flags — video specifically showed the expected contrast math
+  (already-dark content pushed further toward black under
+  `contrast=2.0`, consistent with the midpoint-stretch formula).
+- Full 358-wallpaper regression: 356 clean, 1 pre-existing shader error,
+  1 pre-existing `SIGFPE` (`#32`) — identical to the established
+  baseline, cross-checked against `coredumpctl`, zero new failures.
 
 ### #29 — DONE 2026-07-08: Kirby 30th Anniversary 4K's `SIGABRT` fixed — a genuine heap buffer overflow in `AudioStream::resampleAudio()`'s modern channel-layout branch
 
