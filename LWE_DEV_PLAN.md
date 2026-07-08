@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-07 (#19 CLOSED — root cause fully traced: video-backed textures referenced only as effect/material inputs (day/night blend textures) never had `GLPlayer::play()`/`render()` called on them at all, so they sat forever showing whatever GL clear color was active at their one-time construction moment (which happened to exactly match the scene's own clearcolor). Fixed via `TextureCache::updateAll()` + `CPass::adjustTextureUsageCounts()`, mirroring `CImage`'s existing per-texture pattern. Verified visually (real video renders where gray previously showed) and via 48-wallpaper web corpus (48/48 clean, twice). Regression testing surfaced a real, separate concurrent-decode segfault (confirmed via kernel log — genuine ffmpeg thread SIGSEGV under full-batch stress, not a logic bug in this fix) — split out as new item `#22`, shipped `#19` anyway after explicit user sign-off since it doesn't reproduce in normal single-wallpaper use. #21 DONE — `constantshadervalues` scripts are now genuinely wired into `ScriptEngine`/QuickJS via `CPass::registerScriptedConstant()`; confirmed this alone did NOT resolve #19 (separate bug), correctly narrowing the investigation. #16 fully CLOSED, including its last checklist item. Active Priority Order: #17, #20, #22)
+**Last updated:** 2026-07-07 (researched [NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork) beyond #17's UV offset — cloned and read the real source for every CLI flag. Added #23 (contrast/saturation/border-colour, one unified shared post-process mechanism, same architecture as #17), #24 (--list-properties/--dump-structure, direct Mural-integration value), #25 (a real, substantial playlist rotation feature — sequential/random order, timed rotation, preflight validation, live hot-swap), #26 (small misc: --disable-parallax, fullscreen-pause refinements). Also found a strong, precise lead for #20 (multiple audio sources) — a separate always-on PulseAudio capture client created whenever a wallpaper merely declares audio-processing support, regardless of actual use. Active Priority Order: #17, #20, #22, #23, #24, #25, #26)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -369,6 +369,32 @@ quickly on a wallpaper with several sound objects or particle-attached
 audio) rather than sharing one client connection per process, which
 would directly explain the reported symptom.
 
+**Strong, precise lead found 2026-07-07 researching
+[NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork)**:
+that fork has a real `--no-audio-processing` flag
+(`settings.audio.audioprocessing`, separate from `settings.audio.enabled`
+which just gates sound/video playback). Traced its actual consumer —
+`WallpaperApplication::setupAudio()` unconditionally creates a
+**`PulseAudioPlaybackRecorder`** (a real PulseAudio *capture* client,
+`pa_context_new(..., "wallpaperengine-audioprocessing")`) whenever *any*
+loaded background merely **declares** audio-processing support
+(`supportsAudioProcessing`) — regardless of whether that wallpaper's
+audio-reactive feature is actually used or produces any visible effect.
+This is a very plausible, precise explanation for the reported
+symptom: actual sound/video playback creates one audio sink, and this
+separate, always-on capture client (used for feeding desktop-audio
+spectrum data to audio-reactive shaders/scripts) creates a second,
+independent PulseAudio connection on top — exactly matching "multiple
+sources for one wallpaper instance." Very likely the exact mechanism
+behind Almamu's own "disable audio processing entirely" mitigation
+comment in the upstream thread. Check whether this fork already has an
+equivalent audio-capture-for-visualization client, and if so, whether it
+has the same "created unconditionally whenever declared, regardless of
+actual use" pattern — if it does, the fix is likely as simple as gating
+that specific client's creation more precisely (only when the wallpaper
+genuinely reads/uses spectrum data, not just declares theoretical
+support), or adding an equivalent opt-out flag.
+
 ### #22 — Concurrent multi-video decode can segfault under sustained load (found via `#19`'s regression testing, not yet investigated)
 
 Found 2026-07-07 as a side effect of verifying `#19`'s fix, not
@@ -407,6 +433,131 @@ future batch-preview/thumbnail-generation feature) — likely needs either
 a concurrency cap on simultaneous decoder instances, or a deeper look at
 `mpv`/ffmpeg thread-safety when multiple decoder contexts share a
 process.
+
+### #23 — Contrast/saturation/border-colour post-processing, universal for all wallpaper types (`--contrast`/`--saturation`/`--border-colour`), from NeXx42's engine fork
+
+Researched 2026-07-07 alongside `#17`'s UV offset, same source
+([NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork)).
+All three are handled by **one single, unified mechanism** — confirmed
+via direct source reading, not inferred: `CWallpaper` (the same shared
+base class already confirmed for `#17`'s UV offset, used identically by
+`CScene`/`CVideo`/`CWeb`) loads a dedicated `shaders/postprocess.vert`/
+`.frag` pair and runs it as the **very last rendering step**, after any
+wallpaper type's own content is already fully rendered to its own
+texture — genuinely universal by construction, not three separate
+per-type implementations.
+
+The whole fragment shader is small enough to reproduce in full:
+```glsl
+uniform sampler2D g_Texture0;
+uniform float u_Saturation;
+uniform float u_Contrast;
+uniform vec3 u_BorderColour;
+
+void main() {
+    vec4 tex = texture(g_Texture0, v_TexCoord);
+    if (tex.a < 0.01) {
+        out_FragColor = vec4(u_BorderColour, 1.0);
+        return;
+    }
+    vec3 color = tex.rgb;
+    float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(lum), color, u_Saturation);       // saturation
+    color = (color - 0.5) * u_Contrast + 0.5;          // contrast
+    out_FragColor = vec4(color, 1.0);
+}
+```
+`border-colour` and saturation/contrast are all one feature in practice:
+the alpha-test fallback (`tex.a < 0.01`) is exactly what makes
+`border-colour` show up specifically in the letterboxed/empty area when
+using clamp/border scaling mode. Values are read from
+`this->m_shaderSettings` and set as uniforms **once, at shader setup
+time** — not re-applied per frame, so if Mural wants live-adjustable
+sliders (not just launch-time CLI flags), this would need extending to
+re-set the uniforms on change, not just ported as-is.
+
+**Scope for whenever this is picked up**: confirm whether this fork's
+existing shared wallpaper-output/compositing stage (analogous to
+`CWallpaper` here) has an equivalent hook to add one final shader pass
+after all per-type rendering completes — likely small and clean if the
+architecture matches, similar in shape and effort to `#17`.
+
+### #24 — Introspection CLI flags for Mural integration: `--list-properties` and `--dump-structure`, from NeXx42's engine fork
+
+Researched 2026-07-07, same source as `#17`/`#23`. Directly valuable for
+Mural specifically — both let an external tool (Mural) query a
+wallpaper's real structure/properties via CLI rather than re-implementing
+`project.json`/`scene.json` parsing on Mural's own side.
+
+- `--list-properties` (`-l`): for every loaded background, iterates its
+  parsed properties and logs each one's `dump()` output (whatever a
+  property's own `dump()` method already produces — this fork almost
+  certainly has an equivalent property object with similar
+  introspection potential, worth checking). Implementation is a thin,
+  simple loop — low effort if the underlying property model is similar.
+- `--dump-structure` (`-z`): uses a dedicated `Data::Dumpers::StringPrinter`
+  class with a `printWallpaper()` method that pretty-prints a
+  wallpaper's full parsed layer/object tree to stdout. A real, small,
+  purpose-built dumper — worth reading in full if picked up, since the
+  exact output format matters for whatever Mural would parse back out
+  of it (plain text vs. structured/JSON — confirm which before building
+  a Mural-side consumer against it).
+
+Both are read-only, low-risk, and don't touch rendering at all — good
+candidates for a quick, contained implementation session.
+
+### #25 — Wallpaper playlist rotation (`--playlist`), a substantial standalone feature, from NeXx42's engine fork
+
+Researched 2026-07-07, same source as `#17`/`#23`/`#24`. This is a real,
+complete, non-trivial feature, not a small flag — worth scoping as its
+own larger session rather than a quick add.
+
+Uses **Wallpaper Engine's own `config.json` playlist format** directly
+(not a custom format built from scratch) — `--playlist <name>` resolves
+a named playlist from config, applies per-screen if used after
+`--screen-root`, otherwise used in windowed mode. Confirmed via
+`WallpaperApplication::advancePlaylist()`: a genuinely complete rotation
+system —
+- Sequential or random order (`playlist.definition.settings.order`),
+  reshuffling on each full cycle for random mode.
+- Timed rotation via `delayMinutes`, tracked per-playlist with a real
+  `nextSwitch` timestamp (`std::chrono::steady_clock`).
+- **Preflight validation** — `preflightWallpaper()` checks a candidate
+  loads successfully before committing to it; failed items are recorded
+  (`failedIndices`) and skipped on future rotations; if every item in a
+  playlist fails, logs an error and keeps the current wallpaper rather
+  than crashing or going blank.
+- **Live hot-swap mid-run** — loads the next background, re-runs
+  `setupPropertiesForProject`/`ensureBrowserForProject` for it, and
+  explicitly carries over per-screen settings (scaling, clamp, and — for
+  a fork with `#17`'s UV offset — UV offset too) to the newly-loaded
+  wallpaper rather than resetting to defaults.
+
+**Scope for whenever this is picked up**: this is a real feature-sized
+addition (a new `ActivePlaylist`-equivalent state struct, a real
+rotation/timing loop integrated into the main render loop, preflight
+validation, config.json playlist parsing) — closer in size to `#5`
+(Mat4/Mat3) or `#14` (the use-after-free redesign) than to `#17`'s
+single-mechanism port. Worth its own dedicated scoping pass before
+starting, not a quick pickup.
+
+### #26 — Small misc CLI additions from NeXx42's engine fork: `--disable-parallax`, `--fullscreen-pause-only-active`, `--fullscreen-pause-ignore-appid`
+
+Researched 2026-07-07, same source as the above. Bundled together since
+each is small and well-isolated:
+- `--disable-parallax` (`settings.mouse.disableparallax`): a blunt,
+  global toggle checked at exactly two existing parallax-computation
+  call sites (`CImage.cpp`, `CScene.cpp`) — a simple guard added at
+  points that already exist, not new parallax logic.
+- `--fullscreen-pause-only-active`/`--fullscreen-pause-ignore-appid`:
+  both Wayland-only refinements of an *existing* baseline fullscreen-
+  pause feature (`pauseOnFullscreen`) — confirm whether this fork
+  already has that baseline feature at all before treating these as
+  applicable; if it does, `only-active` (pause only when a fullscreen
+  window is genuinely focused, not merely present) and
+  `ignore-appid` (repeatable, exempt specific app IDs from triggering
+  the pause) are both small, additive refinements checked directly in
+  `WaylandFullScreenDetector.cpp`.
 
 ---
 
