@@ -72,6 +72,8 @@ public:
 	WallpaperEngine::Render::WallpaperState::TextureUVsScaling scaling
 	    = WallpaperEngine::Render::WallpaperState::TextureUVsScaling::DefaultUVs;
 	TextureFlags clamp = TextureFlags_ClampUVs;
+	float offsetX = 0.0f;
+	float offsetY = 0.0f;
     };
 
     struct {
@@ -104,6 +106,10 @@ public:
 	    std::map<std::string, WallpaperEngine::Render::WallpaperState::TextureUVsScaling> screenScalings;
 	    /** The clamping mode for different screens */
 	    std::map<std::string, TextureFlags> screenClamps;
+	    /** The horizontal UV offset for different screens (--offset-x) */
+	    std::map<std::string, float> screenOffsetsX;
+	    /** The vertical UV offset for different screens (--offset-y) */
+	    std::map<std::string, float> screenOffsetsY;
 	    /** Playlists selected per screen */
 	    std::map<std::string, PlaylistDefinition> screenPlaylists;
 	    /** Playlist used in window mode */
@@ -147,6 +153,9 @@ public:
 		glm::ivec4 geometry;
 		TextureFlags clamp;
 		WallpaperEngine::Render::WallpaperState::TextureUVsScaling scalingMode;
+		/** Custom UV offset used in window mode (--offset-x/--offset-y) */
+		float offsetX;
+		float offsetY;
 	    } window;
 
 	    struct {
@@ -203,6 +212,8 @@ public:
             .propertiesFile = "",
             .screenScalings = {},
             .screenClamps = {},
+            .screenOffsetsX = {},
+            .screenOffsetsY = {},
             .screenPlaylists = {},
             .defaultPlaylist = std::nullopt,
             .spanGroups = {},
@@ -225,6 +236,8 @@ public:
                 .geometry = {},
                 .clamp = TextureFlags_ClampUVs,
                 .scalingMode = WallpaperEngine::Render::WallpaperState::TextureUVsScaling::DefaultUVs,
+                .offsetX = 0.0f,
+                .offsetY = 0.0f,
             },
             .wayland = {
                 .layer = WAYLAND_LAYER_BOTTOM,

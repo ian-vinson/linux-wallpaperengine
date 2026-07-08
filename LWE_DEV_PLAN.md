@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-07 (researched [NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork) beyond #17's UV offset — cloned and read the real source for every CLI flag. Added #23 (contrast/saturation/border-colour, one unified shared post-process mechanism, same architecture as #17), #24 (--list-properties/--dump-structure, direct Mural-integration value), #25 (a real, substantial playlist rotation feature — sequential/random order, timed rotation, preflight validation, live hot-swap), #26 (small misc: --disable-parallax, fullscreen-pause refinements). Also found a strong, precise lead for #20 (multiple audio sources) — a separate always-on PulseAudio capture client created whenever a wallpaper merely declares audio-processing support, regardless of actual use. Active Priority Order: #17, #20, #22, #23, #24, #25, #26)
+**Last updated:** 2026-07-07 (#17 DONE — custom `--offset-x`/`--offset-y` UV offset implemented against this fork's real `WallpaperState` class (confirmed to match the NeXx42-fork reference architecture directly, not assumed), threaded through `CWallpaper`/`CScene`/`CVideo`/`CWeb` and `ApplicationContext`'s CLI parsing mirroring `--scaling`/`--clamp` exactly. Verified via real screenshots on all three wallpaper types, zero-offset confirmed byte-identical to no-flags-at-all at the UV-value level, all four scaling modes confirmed to compose correctly with a nonzero offset, and a crash hit during testing was traced via `coredumpctl` to an unrelated pre-existing D-Bus/media-source race, not this feature. Zero regressions: 358-wallpaper scene batch (355 clean, 3 known pre-existing errors, 0 crashes) and 48-wallpaper web corpus (48/48 clean) both match established baselines. Also researched [NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork) beyond #17's UV offset — cloned and read the real source for every CLI flag. Added #23 (contrast/saturation/border-colour, one unified shared post-process mechanism, same architecture as #17), #24 (--list-properties/--dump-structure, direct Mural-integration value), #25 (a real, substantial playlist rotation feature — sequential/random order, timed rotation, preflight validation, live hot-swap), #26 (small misc: --disable-parallax, fullscreen-pause refinements). Also found a strong, precise lead for #20 (multiple audio sources) — a separate always-on PulseAudio capture client created whenever a wallpaper merely declares audio-processing support, regardless of actual use. Active Priority Order: #20, #22, #23, #24, #25, #26)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -295,61 +295,6 @@ messages, API status table) — gaps (#2, #6, #7, #8) are items that were
 completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
-
-### #17 — Custom X/Y UV offset for all wallpaper types (`--offset-x`/`--offset-y`), ported from TuxPaperEngine's engine fork
-
-Requested 2026-07-06 after comparing Mural/this fork against
-[TuxPaperEngine](https://github.com/NeXx42/TuxPaperEngine) (a sibling
-GUI, same role as Mural) and its underlying engine fork,
-[NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork).
-Cloned and read that fork's actual source directly (not just its README,
-which turned out to be a near-verbatim copy of upstream's and didn't
-document this at all) to find the real mechanism.
-
-**The feature, fully understood, not just located**: two new CLI flags,
-`--offset-x <float>`/`--offset-y <float>`, threaded into the exact same
-per-screen settings structure `--scaling`/`--clamp` already use
-(`ApplicationContext.cpp`, `settings.general.uvOffset[screen]` for
-desktop-background mode, `settings.render.window.uvOffset` for windowed
-mode). The actual application lives entirely in one shared class,
-`WallpaperState` — confirmed via `grep` that `uvOffset` threads through
-`CWallpaper`'s common factory function and is used identically by
-`CScene`, `CVideo`, **and** `CWeb`, not implemented three separate times.
-A small `WallpaperState::addUVOffsets()` method is called at the end of
-every existing UV-computation path (`resetUVs()`, `updateUs()`,
-`updateVs()` — the functions already computing the sampled UV rectangle
-for all four scaling modes: Stretch/Fit/Fill/Default), applying the
-offset as a final adjustment on top regardless of which scaling mode is
-active:
-```cpp
-void WallpaperState::addUVOffsets () {
-    this->m_UVs.ustart += this->getViewportHorizontalOffset ();
-    this->m_UVs.uend += this->getViewportHorizontalOffset ();
-    if (m_vflip) {
-        this->m_UVs.vstart -= this->getViewportVerticalOffset ();
-        this->m_UVs.vend -= this->getViewportVerticalOffset ();
-    } else {
-        this->m_UVs.vstart += this->getViewportVerticalOffset ();
-        this->m_UVs.vend += this->getViewportVerticalOffset ();
-    }
-}
-```
-Genuinely universal by construction (applied once, at the shared "final
-texture UV sampling" layer) rather than three separate implementations
-that happen to look similar — exactly matching the "all wallpaper types"
-requirement.
-
-**Scope for whenever this is picked up**: this fork almost certainly
-already has an equivalent shared UV-scaling abstraction (confirmed this
-session that `--scaling`/`--clamp` already work identically across
-scene/video/web here), so the real first step is confirming that
-equivalent class's exact name/shape in *this* fork (not assuming it's
-named `WallpaperState` too) before porting — likely a genuinely small
-addition: two new CLI flags plus a small offset-application method
-mirroring `addUVOffsets()` above, added to whatever this fork's
-equivalent shared UV-computation function already is. Should not require
-touching `CScene`/`CVideo`/`CWeb` individually if the shared-class
-architecture matches, which is the expected case.
 
 ### #20 — LOW: Multiple simultaneous audio sources visible for a single wallpaper instance (upstream Almamu/linux-wallpaperengine#174)
 Older, still-open upstream issue:
@@ -900,6 +845,110 @@ which is correctly balanced. Split out as its own tracked item, `#22`,
 rather than blocking this fix — doesn't reproduce in normal single-
 wallpaper desktop use, only under back-to-back automated stress. Shipped
 after explicit user sign-off given this tradeoff.
+
+### #17 — DONE 2026-07-07: custom X/Y UV offset for all wallpaper types (`--offset-x`/`--offset-y`)
+
+Implements the mechanism found during `#17`'s original research (see its
+entry above) against this fork's actual source, not assumed to match.
+
+**Step 0 — confirmed, not assumed.** This fork's shared UV-computation
+class really is called `WallpaperState` (`Render/WallpaperState.h/.cpp`)
+— same class name as the reference, and its `resetUVs()`/`updateUs()`/
+`updateVs()`/`updateTextureUVs<Scaling>()` method names and vflip sign
+conventions all matched directly, no renaming needed. Confirmed via
+`grep` that `resetUVs()`/`updateUs()`/`updateVs()` have **zero external
+callers** anywhere in the codebase — they're only ever invoked from
+`updateTextureUVs<Scaling>()`'s specializations, which are only ever
+invoked from `updateState()`'s switch statement. This means applying the
+offset once at the end of `updateState()` (rather than the reference's
+three separate call sites inside `resetUVs()`/`updateUs()`/`updateVs()`)
+is functionally identical — each function fully overwrites its axis
+rather than incrementing on top of a prior value, so a constant offset
+added once at the very end produces the same result as adding it after
+every intermediate step. A deliberate simplification, not a shortcut:
+one call site instead of three, same behavior, verified below. Also
+confirmed `--scaling`/`--clamp`'s exact CLI-parsing and per-screen/span-
+group/window-mode dispatch pattern in `ApplicationContext.cpp` to mirror
+exactly, rather than inventing a different convention.
+
+**Implementation** (154 lines across 13 files): `WallpaperState::
+addUVOffsets()` (new, called once at the end of `updateState()`),
+threaded through `WallpaperState`'s constructor and forwarded verbatim
+through `CWallpaper`'s constructor, `CWallpaper::fromWallpaper()`'s
+factory dispatch, and `CScene`/`CVideo`/`CWeb`'s constructors (all three
+already just forward `scalingMode`/`clampMode` straight through with no
+other use — offsetX/offsetY follow the identical pattern). New
+`--offset-x`/`--offset-y` CLI flags in `ApplicationContext.cpp`, plus
+`screenOffsetsX`/`screenOffsetsY` per-screen maps and `SpanGroup.offsetX`/
+`offsetY` fields mirroring `screenScalings`/`screenClamps`/`SpanGroup.
+scaling`/`.clamp` exactly, including seeding on `--screen-root`/
+`--screen-span` from the current window default. Updated all 3 call
+sites in `WallpaperApplication.cpp` that build the per-screen scaling/
+clamp lookup-with-fallback to do the same for offsetX/offsetY.
+Vflip sign handling copied from the reference (subtract when flipped,
+add when not) after confirming — not assuming — this fork's own
+`resetUVs()`/`updateVs()` already use the identical vflip convention
+(vflip=true → vstart takes the "0"/"down" value), so the reference's
+sign logic applies correctly here unchanged.
+
+**Verification, all real, not assumed**:
+- **Visual, all three wallpaper types**: `--offset-x 0.1 --offset-y 0.1`
+  (scene) and `0.15`/`0.15` (video) and `0.15`/`0.15` (web) all show
+  clearly, visibly shifted content via `--screenshot` — new content
+  entering one edge, previously-visible content leaving the other,
+  confirmed by eye against the unoffset screenshot for each type.
+- **Zero-offset is a true no-op, confirmed at the numeric level, not by
+  screenshot**: the target scene wallpaper has continuous animation
+  (birds, waves, particles), so two separate process runs are never
+  byte-identical regardless of offset — confirmed this directly (two
+  runs with *no* offset flags at all differed too, purely from animation
+  timing). Used temporary debug logging of the actual computed
+  `ustart`/`uend`/`vstart`/`vend` instead: **identical to 6 decimal
+  places** between "no flags at all" and `--offset-x 0 --offset-y 0`
+  (`ustart=0.124853 uend=0.875147 vstart=0 vend=1` both times), and
+  `--offset-x 0.1 --offset-y 0.1` shifted all four values by exactly
+  ±0.1 from that baseline, with the vflip-aware sign correctly applied
+  (confirmed `m_vflip=true` for this output path from the pre-offset
+  baseline values, matching `resetUVs()`'s own vflip=true convention).
+- **All four scaling modes compose correctly with a nonzero offset**:
+  initial test against the scene wallpaper showed identical UVs across
+  all 4 requested `--scaling` values — investigated rather than assumed
+  fine, and found `CScene`'s constructor unconditionally force-overrides
+  to `ZoomFillUVs` for orthogonal-projection scenes regardless of the
+  CLI-requested mode (pre-existing, documented, unrelated behavior, not
+  a bug in this feature). Re-tested against a video wallpaper (no such
+  override) instead: all four modes (`mode=0..3`) produced genuinely
+  different base UV rectangles as expected, **each correctly
+  incorporating the same offset on top**.
+- **One crash hit during scaling-mode testing, investigated to ground
+  truth rather than assumed related**: `--scaling fill` plus a nonzero
+  offset segfaulted once. Got a real backtrace via `coredumpctl` rather
+  than guessing: the crash was entirely inside `AlbumTexture::
+  copyContents()`, reached via a D-Bus media-metadata listener
+  (`DBusMediaSource::parseMetadata` → `MediaSource::
+  fireAlbumArtListeners`) — nothing to do with `WallpaperState`, scaling,
+  or offsets at all. Confirmed non-reproducible: 3/3 identical retries
+  of the exact same command ran clean. A real, pre-existing, timing-
+  dependent bug in the album-art/media-source path, coincidentally
+  triggered by an actual D-Bus media signal during that one test window
+  — unrelated to this feature, not investigated further here.
+- **Full 358-wallpaper scene regression**: 355 clean, 3 "errors", 0
+  crashes. Two of the three are the same already-documented pre-existing
+  failures tracked since 2026-07-03 (`3420062133` GLSL flake,
+  `3450697231` script/combo gaps). The third, `2430021386` ("Anonymous"),
+  was checked directly rather than assumed benign: its exact error
+  (`Could not find where to place includes for shader unit commands/
+  copy`) matches, word-for-word, an already-documented non-deterministic
+  GLSL-compiler flake from `#4`'s regression history, previously proven
+  (via `git stash` + rebuild) to reproduce identically on **unmodified**
+  code — and it ran clean in this very session's own two earlier,
+  unrelated batch runs. Confirmed via direct isolated re-run producing
+  the identical error text. Zero real regressions.
+- **48-wallpaper web corpus**: 48/48 clean, matching baseline.
+
+All temporary instrumentation (env-var-gated UV-value logging in
+`WallpaperState.cpp`) fully reverted; final diff confirmed via `git
+diff` to be exactly the 13-file feature implementation described above.
 
 ### #18 — DONE 2026-07-06: `WebBrowserContext` now cleans up its per-run CEF cache directory on clean shutdown
 

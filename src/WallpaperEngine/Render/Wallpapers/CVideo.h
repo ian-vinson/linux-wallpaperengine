@@ -11,7 +11,8 @@ class CVideo final : public CWallpaper {
 public:
     CVideo (
 	const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
-	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
+	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const float& offsetX = 0.0f,
+	const float& offsetY = 0.0f
     );
 
     ~CVideo () override;

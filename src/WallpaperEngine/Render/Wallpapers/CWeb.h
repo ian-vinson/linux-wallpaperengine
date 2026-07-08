@@ -27,7 +27,8 @@ public:
     CWeb (
 	const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
 	WallpaperEngine::WebBrowser::WebBrowserContext& browserContext,
-	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
+	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const float& offsetX = 0.0f,
+	const float& offsetY = 0.0f
     );
     ~CWeb () override;
     [[nodiscard]] int getWidth () const override { return this->m_width; }

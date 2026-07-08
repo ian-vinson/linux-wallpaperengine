@@ -5,8 +5,10 @@
 
 using namespace WallpaperEngine::Render;
 
-WallpaperState::WallpaperState (const TextureUVsScaling& textureUVsMode, const uint32_t& clampMode) :
-    m_textureUVsMode (textureUVsMode), m_clampingMode (clampMode) { }
+WallpaperState::WallpaperState (
+    const TextureUVsScaling& textureUVsMode, const uint32_t& clampMode, const float& offsetX, const float& offsetY
+) :
+    m_textureUVsMode (textureUVsMode), m_clampingMode (clampMode), m_offsetX (offsetX), m_offsetY (offsetY) { }
 
 bool WallpaperState::hasChanged (
     const glm::ivec4& viewport, const bool& vflip, const int& projectionWidth, const int& projectionHeight
@@ -153,6 +155,22 @@ int WallpaperState::getProjectionWidth () const { return this->m_projection.widt
 
 int WallpaperState::getProjectionHeight () const { return this->m_projection.height; }
 
+void WallpaperState::addUVOffsets () {
+    this->m_UVs.ustart += this->m_offsetX;
+    this->m_UVs.uend += this->m_offsetX;
+
+    // vstart/vend's roles swap with vflip (see resetUVs()/updateVs() above) — subtracting here
+    // when flipped keeps a positive --offset-y always shifting the sampled content the same
+    // visual direction regardless of the active vflip convention.
+    if (m_vflip) {
+	this->m_UVs.vstart -= this->m_offsetY;
+	this->m_UVs.vend -= this->m_offsetY;
+    } else {
+	this->m_UVs.vstart += this->m_offsetY;
+	this->m_UVs.vend += this->m_offsetY;
+    }
+}
+
 void WallpaperState::updateState (
     const glm::ivec4& viewport, const bool& vflip, const int& projectionWidth, const int& projectionHeight
 ) {
@@ -183,4 +201,6 @@ void WallpaperState::updateState (
 	    );
 	    break;
     }
+
+    this->addUVOffsets ();
 }

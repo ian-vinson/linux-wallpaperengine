@@ -313,6 +313,8 @@ void ApplicationContext::loadSettingsFromArgv () {
 	    this->settings.general.screenBackgrounds[lastScreen] = "";
 	    this->settings.general.screenScalings[lastScreen] = this->settings.render.window.scalingMode;
 	    this->settings.general.screenClamps[lastScreen] = this->settings.render.window.clamp;
+	    this->settings.general.screenOffsetsX[lastScreen] = this->settings.render.window.offsetX;
+	    this->settings.general.screenOffsetsY[lastScreen] = this->settings.render.window.offsetY;
 	})
 	.append ();
     backgroundGroup.add_argument ("--screen-span")
@@ -356,6 +358,8 @@ void ApplicationContext::loadSettingsFromArgv () {
 
 	    group.scaling = this->settings.render.window.scalingMode;
 	    group.clamp = this->settings.render.window.clamp;
+	    group.offsetX = this->settings.render.window.offsetX;
+	    group.offsetY = this->settings.render.window.offsetY;
 	    this->settings.general.spanGroups.push_back (std::move (group));
 	    // set lastScreen to a synthetic name so --bg/--scaling/--clamp can target this group
 	    lastScreen = "span:" + value;
@@ -459,6 +463,58 @@ void ApplicationContext::loadSettingsFromArgv () {
 		}
 	    } else {
 		this->settings.render.window.clamp = flags;
+	    }
+	})
+	.append ();
+    backgroundGroup.add_argument ("--offset-x")
+	.help (
+	    "Custom horizontal UV offset to shift the sampled background content, this applies to the previous "
+	    "--window, --screen-root, or --screen-span output, or the default background if no other background is "
+	    "specified"
+	)
+	.action ([this, &lastScreen] (const std::string& value) -> void {
+	    float offset;
+
+	    try {
+		offset = std::stof (value);
+	    } catch (const std::exception&) {
+		sLog.exception ("Invalid offset-x value: ", value);
+	    }
+
+	    if (this->settings.render.mode == DESKTOP_BACKGROUND) {
+		this->settings.general.screenOffsetsX[lastScreen] = offset;
+		// also update span group if targeting one
+		if (lastScreen.rfind ("span:", 0) == 0 && !this->settings.general.spanGroups.empty ()) {
+		    this->settings.general.spanGroups.back ().offsetX = offset;
+		}
+	    } else {
+		this->settings.render.window.offsetX = offset;
+	    }
+	})
+	.append ();
+    backgroundGroup.add_argument ("--offset-y")
+	.help (
+	    "Custom vertical UV offset to shift the sampled background content, this applies to the previous "
+	    "--window, --screen-root, or --screen-span output, or the default background if no other background is "
+	    "specified"
+	)
+	.action ([this, &lastScreen] (const std::string& value) -> void {
+	    float offset;
+
+	    try {
+		offset = std::stof (value);
+	    } catch (const std::exception&) {
+		sLog.exception ("Invalid offset-y value: ", value);
+	    }
+
+	    if (this->settings.render.mode == DESKTOP_BACKGROUND) {
+		this->settings.general.screenOffsetsY[lastScreen] = offset;
+		// also update span group if targeting one
+		if (lastScreen.rfind ("span:", 0) == 0 && !this->settings.general.spanGroups.empty ()) {
+		    this->settings.general.spanGroups.back ().offsetY = offset;
+		}
+	    } else {
+		this->settings.render.window.offsetY = offset;
 	    }
 	})
 	.append ();

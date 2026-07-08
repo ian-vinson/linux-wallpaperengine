@@ -21,7 +21,10 @@ public:
 	StretchUVs,
     };
 
-    WallpaperState (const TextureUVsScaling& textureUVsMode, const uint32_t& clampMode);
+    WallpaperState (
+	const TextureUVsScaling& textureUVsMode, const uint32_t& clampMode, const float& offsetX = 0.0f,
+	const float& offsetY = 0.0f
+    );
 
     /**
      * Checks if any of the given values has changed
@@ -109,6 +112,15 @@ public:
     [[nodiscard]] int getProjectionHeight () const;
 
 private:
+    /**
+     * Shifts the computed UV rectangle by the configured --offset-x/--offset-y amount. Called once
+     * at the end of updateState(), after the scaling-mode switch has produced final UVs — applying
+     * it here (rather than inside resetUVs()/updateUs()/updateVs() individually) is equivalent
+     * since none of those are ever called from outside updateState()'s switch, and each fully
+     * overwrites its axis rather than incrementing on top of a previous value.
+     */
+    void addUVOffsets ();
+
     // Cached UVs value for texture coordinates. No need to recalculate if viewport and projection haven't changed.
     struct {
 	float ustart;
@@ -135,5 +147,9 @@ private:
     // Texture scaling mode
     TextureUVsScaling m_textureUVsMode = TextureUVsScaling::DefaultUVs;
     uint32_t m_clampingMode = TextureFlags_NoFlags;
+
+    // Custom UV offset (--offset-x/--offset-y), applied on top of whatever the scaling mode computed
+    float m_offsetX = 0.0f;
+    float m_offsetY = 0.0f;
 };
 } // namespace WallpaperEngine::Render
