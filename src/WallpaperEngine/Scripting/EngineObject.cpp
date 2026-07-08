@@ -5,8 +5,6 @@
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 
-#include <ranges>
-
 using namespace WallpaperEngine::Scripting;
 
 extern float g_Time;
@@ -341,7 +339,12 @@ EngineObject::~EngineObject () {
 uint32_t EngineObject::reserveNextTimeoutId (JSValue function, uint64_t duration) {
     const auto id = ++this->m_nextTimeoutId;
 
-    this->m_timeouts[id] = Timeout { .callback = function,
+    // argv-sourced JSValues (e.g. from the setTimeout/setInterval JS bindings) are borrowed
+    // references owned by the caller's stack frame -- QuickJS frees them once the enclosing
+    // JS statement finishes. Storing one here beyond that point without duplicating it first
+    // leaves this map holding a dangling reference that later use (JS_Call/JS_FreeValue in
+    // tick()/clearTimeout/~EngineObject) touches as a use-after-free.
+    this->m_timeouts[id] = Timeout { .callback = JS_DupValue (this->m_engine.getContext (), function),
 				     .duration = std::chrono::milliseconds (duration),
 				     .next = std::chrono::steady_clock::now () + std::chrono::milliseconds (duration) };
 
@@ -351,8 +354,9 @@ uint32_t EngineObject::reserveNextTimeoutId (JSValue function, uint64_t duration
 uint32_t EngineObject::reserveNextIntervalId (JSValue function, uint64_t duration) {
     const auto id = ++this->m_nextIntervalId;
 
+    // see the matching comment in reserveNextTimeoutId -- same borrowed-reference issue
     this->m_intervals[id]
-	= Timeout { .callback = function,
+	= Timeout { .callback = JS_DupValue (this->m_engine.getContext (), function),
 		    .duration = std::chrono::milliseconds (duration),
 		    .next = std::chrono::steady_clock::now () + std::chrono::milliseconds (duration) };
 
@@ -423,33 +427,66 @@ void EngineObject::tick () {
 	}
     }
 
-    // check any interval and run them if needed
-    for (auto& timeout : this->m_intervals | std::views::values) {
-	if (timeout.next > now) {
-	    continue;
+    JSContext* ctx = this->m_engine.getContext ();
+
+    // Snapshot which intervals/timeouts are due *before* calling into any JS, since a
+    // callback can reentrantly call engine.setInterval/setTimeout/clearInterval/
+    // clearTimeout on this same EngineObject (a very common self-rescheduling pattern),
+    // mutating m_intervals/m_timeouts while we'd otherwise still be iterating them —
+    // erasing the entry currently being visited (e.g. a timeout clearing itself) leaves
+    // a dangling reference and crashes on the next access to it.
+    std::vector<uint32_t> dueIntervals;
+    for (const auto& [id, timeout] : this->m_intervals) {
+	if (timeout.next <= now) {
+	    dueIntervals.push_back (id);
 	}
-
-	timeout.next = now + timeout.duration;
-
-	JS_Call (this->m_engine.getContext (), timeout.callback, JS_NULL, 0, nullptr);
     }
 
-    std::vector<uint32_t> removeTimeouts;
+    // check any interval and run them if needed
+    for (auto id : dueIntervals) {
+	const auto it = this->m_intervals.find (id);
+
+	if (it == this->m_intervals.end ()) {
+	    continue; // cleared reentrantly by an earlier callback this tick
+	}
+
+	it->second.next = now + it->second.duration;
+
+	// keep the callback alive for the duration of the call: a reentrant
+	// clearInterval(id) from within the callback itself would otherwise free the
+	// JSValue we're still executing
+	const JSValue callback = JS_DupValue (ctx, it->second.callback);
+	JS_Call (ctx, callback, JS_NULL, 0, nullptr);
+	JS_FreeValue (ctx, callback);
+    }
+
+    std::vector<uint32_t> dueTimeouts;
+    for (const auto& [id, timeout] : this->m_timeouts) {
+	if (timeout.next <= now) {
+	    dueTimeouts.push_back (id);
+	}
+    }
 
     // check any timeout and run them if needed
-    for (auto& [id, timeout] : this->m_timeouts) {
-	if (timeout.next > now) {
-	    continue;
+    for (auto id : dueTimeouts) {
+	const auto it = this->m_timeouts.find (id);
+
+	if (it == this->m_timeouts.end ()) {
+	    continue; // cleared reentrantly by an earlier callback this tick
 	}
 
-	JS_Call (this->m_engine.getContext (), timeout.callback, JS_NULL, 0, nullptr);
+	const JSValue callback = JS_DupValue (ctx, it->second.callback);
+	JS_Call (ctx, callback, JS_NULL, 0, nullptr);
+	JS_FreeValue (ctx, callback);
 
-	JS_FreeValue (this->m_engine.getContext (), timeout.callback);
+	// the callback may have already cleared this exact timeout (self-clearing
+	// pattern); re-lookup rather than reusing `it`, which erase() may have
+	// invalidated, and only free/erase what's still actually there
+	const auto current = this->m_timeouts.find (id);
 
-	removeTimeouts.push_back (id);
-    }
-
-    for (auto id : removeTimeouts) {
-	this->m_timeouts.erase (id);
+	if (current != this->m_timeouts.end ()) {
+	    JS_FreeValue (ctx, current->second.callback);
+	    this->m_timeouts.erase (current);
+	}
     }
 }

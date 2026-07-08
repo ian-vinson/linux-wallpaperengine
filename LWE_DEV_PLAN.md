@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-08 (#20 DONE — multiple audio sources fixed. The original NeXx42-fork lead turned out not to apply here (that client was already correctly gated); real cause live-caught on the developer's own running session — SDLAudioDriver opened unconditionally on every run regardless of whether any wallpaper had a sound object. Fixed with a new NullAudioDriver plus a rebindable AudioContext and ensureAudioForProject(), mirroring the existing ensureBrowserForProject() lazy-upgrade pattern to correctly handle playlists rotating in sound-bearing wallpapers later. Verified live: client count 4 → 2 on the developer's own session, zero regression on real sound playback, full 358-wallpaper regression clean. Active Priority Order: #22, #23, #24, #25, #26)
+**Last updated:** 2026-07-08 (#22 DONE, with an important self-correction — the original "ffmpeg concurrent-decode" classification from earlier this session was wrong; real cause was a QuickJS use-after-free in engine.setTimeout/setInterval storing a borrowed argv[0] JSValue without JS_DupValue, crashing on any single wallpaper using an inline-closure timeout, nothing to do with video decode or concurrency. Fixed, verified via 24/24 clean repeated runs and a full regression cross-checked against raw coredumpctl (0 crashes post-fix vs. 6+ pre-fix). Also surfaced two new tracked items: #27, a real blind spot in batch_test.py's own crash detection (only checks for the string "terminate", misses real SIGSEGV/SIGABRT — worth knowing this whole session's past "0 crashes" claims weren't independently signal-checked, though nothing found suggests any specific one was actually wrong), and #28, a known setTimeout/setInterval cancel-closure API-compatibility gap left deliberately out of scope. Active Priority Order: #23, #24, #25, #26, #27, #28)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,45 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #22 — Concurrent multi-video decode can segfault under sustained load (found via `#19`'s regression testing, not yet investigated)
-
-Found 2026-07-07 as a side effect of verifying `#19`'s fix, not
-investigated further this session. `#19`'s fix correctly makes video-
-backed textures that are only referenced as effect/material inputs
-(day/night blend textures, etc) actually decode — meaning wallpapers
-using this pattern now run **multiple simultaneous `mpv`/ffmpeg decoder
-instances within a single process**, where previously at most one ever
-ran (the others were structurally inert).
-
-**Real evidence, not a hunch**: two full 358-wallpaper batch regression
-runs with `#19`'s fix both showed the exact same wallpaper
-(`2974757317`, "麻匪 音频识别 悬浮窗 Media Player") crashing — a
-controlled A/B against the pre-fix code under identical full-batch
-conditions showed zero crashes, isolating this to the fix specifically.
-Root-caused via `journalctl`/kernel log (not guessed): a genuine
-**kernel-level SIGSEGV inside an ffmpeg H264 decode thread**
-(`av:h264:df1`, signal 11), timestamped to the exact minute of the
-batch run. Does **not** reproduce in 10+ isolated single-wallpaper
-retries (matching the batch harness's exact subprocess invocation) —
-only manifests under the full batch's sustained back-to-back load,
-suggesting a resource/timing-sensitive concurrency issue (possibly
-related to NVDEC's known concurrent-hardware-decode-session limits on
-consumer GeForce cards, though not confirmed) rather than a logic bug
-in `#19`'s own usage-count bookkeeping (verified separately to be
-correctly balanced).
-
-**Scope/impact**: does not reproduce in normal single-wallpaper desktop
-use (the way a real user actually runs this engine) — only under
-artificial, fast, back-to-back automated stress across the whole
-workshop corpus. Shipped `#19`'s fix anyway after explicit user sign-off
-given this tradeoff (see `#19`'s closure entry for the full decision
-context). Worth investigating properly before this fork is used in any
-context that might run many video-heavy wallpapers back-to-back (e.g. a
-future batch-preview/thumbnail-generation feature) — likely needs either
-a concurrency cap on simultaneous decoder instances, or a deeper look at
-`mpv`/ffmpeg thread-safety when multiple decoder contexts share a
-process.
-
 ### #23 — Contrast/saturation/border-colour post-processing, universal for all wallpaper types (`--contrast`/`--saturation`/`--border-colour`), from NeXx42's engine fork
 
 Researched 2026-07-07 alongside `#17`'s UV offset, same source
@@ -460,6 +421,62 @@ each is small and well-isolated:
   the pause) are both small, additive refinements checked directly in
   `WaylandFullScreenDetector.cpp`.
 
+### #27 — `batch_test.py`'s crash detection has a real blind spot: real SIGSEGV/SIGABRT crashes get silently reported as "clean"
+
+Found 2026-07-08 as a side effect of `#22`'s re-investigation, not yet
+fixed. `batch_test.py`'s crash detection only checks for the literal
+string `"terminate"` appearing in a wallpaper's captured output — it
+does **not** check the process's actual exit code/signal, and does not
+cross-reference `coredumpctl`/`journalctl`. A real, silent `SIGSEGV`
+(the exact crash `#22` root-caused) produces no `"terminate"` string in
+stdout/stderr, so the harness reported **"0 crashes"** across multiple
+full regression runs while `coredumpctl` independently showed **6+ real
+coredumps** sitting on disk from those same runs.
+
+**Why this matters beyond just `#22`**: this whole session has used
+`batch_test.py`'s own "X clean, Y errors, **0 crashes**" summary as a
+trusted verification signal at nearly every step, for nearly every fix.
+This blind spot means that claim specifically — the "0 crashes" part —
+was not as reliable as it was treated as being, for any run before this
+was discovered. This is **not** a reason to distrust every prior
+fix's overall conclusion (most verification also included independent
+evidence beyond the harness — screenshots, direct pixel readbacks,
+specific error-message cross-checks, live reproduction, etc. — and nothing
+found so far suggests any *specific* prior "0 crashes" claim was
+actually masking a real crash), but it's a real gap worth closing so
+future "0 crashes" claims from this harness are trustworthy on their own
+without needing a manual `coredumpctl` cross-check every time, which is
+what `#22`'s own final verification had to fall back on to get a
+genuinely trustworthy answer.
+
+**Fix, whenever picked up**: check the actual subprocess exit
+code/signal (a process killed by `SIGSEGV`/`SIGABRT`/etc. has a
+distinguishable negative/signal-indicating return from Python's
+`subprocess` module) in addition to or instead of the current
+string-matching approach, and/or cross-reference `coredumpctl` for new
+coredumps generated during the specific test run's time window,
+attributing each to the specific wallpaper being tested at that moment.
+
+### #28 — `engine.setTimeout`/`setInterval` return a plain numeric ID, not real WE's cancel-closure — known, deliberate compatibility gap
+
+Found 2026-07-08 during `#22`'s fix, deliberately left out of scope
+there. Real Wallpaper Engine's `engine.setTimeout`/`setInterval` return
+a **callable cancel closure**, not a numeric ID — real-world scripts
+commonly rely on this exact idiom: `let t = engine.setTimeout(fn, ms);
+if (t) t();` to cancel it, rather than passing an ID to a separate
+`clearTimeout(t)` call. This fork's implementation returns a plain
+number instead. Both wallpapers that surfaced `#22`'s crash used this
+exact pattern (`stopTimeout = engine.setTimeout(...)`, later called as
+a function) — after `#22`'s fix, calling the returned number as a
+function now throws a clean, caught/logged JS `TypeError` instead of
+crashing (correct and safe), but the script's own cancel logic silently
+doesn't do what its author intended, which is a real, if minor,
+behavioral compatibility gap rather than full parity with real WE.
+Fix, whenever picked up: have `engine.setTimeout`/`setInterval` return a
+real callable JS function (closing over the reserved id and calling
+`clearTimeout`/`clearInterval` internally) instead of a plain number,
+matching real WE's documented behavior.
+
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -468,6 +485,98 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #22 — DONE 2026-07-08: original "ffmpeg concurrent-decode" classification was WRONG — real cause was a QuickJS use-after-free in `engine.setTimeout`/`setInterval`, fixed
+
+**This corrects a real mistake made earlier in this same extended
+session, reported plainly rather than glossed over.** `#22` was
+originally classified (via `journalctl`/kernel-log evidence) as a
+kernel-level `SIGSEGV` inside an ffmpeg H264 decode thread, attributed
+to `#19`'s fix newly enabling concurrent multi-video decode within one
+process. That classification did not hold up under direct
+re-investigation — the actual root cause has nothing to do with video
+decoding, ffmpeg, mpv, or concurrency at all.
+
+**Real repro, much simpler than believed**: no elaborate multi-video
+setup was needed at all. Any single scene wallpaper using
+`engine.setTimeout()` with an inline closure reliably crashes within
+seconds of completely normal single-instance playback — confirmed via
+`journalctl`/`coredumpctl` coredumps already sitting on disk from
+routine batch-test runs across several prior days (dozens of them,
+predating this specific investigation).
+
+**Precise, symbol-resolved crash signature, identical across every
+sample checked**: `JS_FreeValueRT()` ← `EngineObject::tick()` ←
+`ScriptEngine::tick()` ← `CScene::renderFrame()`, on the main thread —
+no ffmpeg/mpv/decode thread present in any of the three independently-
+traced crashes (only an idling NVIDIA EGL thread and this fork's own
+*audio* decode thread, both unrelated bystanders).
+
+**Real root cause**: `EngineObject::reserveNextTimeoutId`/
+`reserveNextIntervalId` stored the raw `argv[0]` `JSValue` from
+`engine.setTimeout(callback, delay)`/`setInterval` directly, without
+`JS_DupValue()`. In QuickJS, `argv[]` values are *borrowed* references
+that the interpreter frees once the enclosing JS statement finishes —
+so any script passing an inline closure (`engine.setTimeout(() => {...},
+ms)`, an extremely common real-world pattern, present in both
+originally-crashing wallpapers via `stopTimeout = engine.setTimeout(...)`)
+immediately left a dangling reference stored in the timeout/interval
+map. The next tick that touched it (`JS_Call`, or `JS_FreeValue` in
+`clearTimeout`/`clearInterval`/`~EngineObject`) hit freed memory. **This
+bug has existed since the feature was originally written** — every
+`JS_FreeValue` call site on these callbacks was already assuming
+ownership it never actually held.
+
+**A real, separate reentrancy hazard was also found and fixed along the
+way**, before the actual root cause was identified: `EngineObject::tick()`'s
+timeout/interval-firing loops iterated `m_intervals`/`m_timeouts`
+directly while invoking JS callbacks that can reentrantly call
+`engine.setInterval`/`setTimeout`/`clearInterval`/`clearTimeout` on the
+same `EngineObject` (a common self-rescheduling script pattern) —
+mutating the very map being iterated. Fixed by snapshotting which
+IDs are due *before* invoking any callback, and holding a strong
+reference (`JS_DupValue`) to each callback across its own call so a
+reentrant `clearTimeout`/`clearInterval` can't free it out from under
+the call in progress. **This fix alone did not eliminate the crash**
+(confirmed by testing it in isolation first, rather than assuming
+success) — it was a real, independently-necessary correctness fix, but
+the actual root cause was the missing `JS_DupValue` at the point of
+*storage*, found afterward via a debug build and a real symbol-resolved
+backtrace.
+
+**Fix**: added `JS_DupValue()` in both `reserveNextTimeoutId`/
+`reserveNextIntervalId`, establishing correct ownership at the one
+place that actually matters, alongside the reentrancy hardening above —
+both are needed for full correctness; the `JS_DupValue` fix is what
+actually eliminates the crash.
+
+**Verification, all real**:
+- 24/24 repeated runs (8 each, across all three previously-crashing
+  wallpapers) — zero crashes.
+- Full 358-wallpaper regression: 357 clean, 1 pre-existing unrelated
+  shader bug (the long-documented Chainsaw Man GLSL flake). The
+  "Horror Anime Girl" wallpaper — previously segfaulting and
+  misleadingly tagged `SCRIPT_EXCEPTION`/`SHADER_COMBO_JSON` by the test
+  harness — now runs fully clean, confirming those tags were
+  crash-adjacent noise from the harness misreading a crashing process's
+  partial output, not real independent issues.
+- **Cross-checked against raw `coredumpctl`, not just the harness's own
+  self-reporting** — necessary precisely because this investigation
+  separately discovered the harness's crash detection has a real blind
+  spot (see new `#27`). Zero `SIGSEGV`/`SIGABRT` coredumps during the
+  entire post-fix run, versus 6+ during the pre-fix run. The one new
+  coredump present was investigated and confirmed to be a genuinely
+  separate, pre-existing `SIGFPE` (integer divide-by-zero) on a
+  different wallpaper (`3320489297`), present in this fork's crash
+  history well before this fix.
+
+**Deliberately left out of scope, tracked separately as `#28`**: real
+Wallpaper Engine's `setTimeout`/`setInterval` return a callable cancel
+closure, not a numeric ID — a real, common script idiom
+(`let t = engine.setTimeout(fn, ms); if (t) t();`) that both originally-
+crashing wallpapers used. This fork returns a plain number, so calling
+it now throws a clean, caught/logged `TypeError` instead of crashing —
+correct and safe, but not full API compatibility.
 
 ### #20 — DONE 2026-07-08: multiple audio sources fixed — root cause was NOT what NeXx42's fork's lead suggested, found instead by live-reproducing on the developer's own running session
 
