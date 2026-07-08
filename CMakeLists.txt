@@ -352,6 +352,8 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Audio/Drivers/AudioDriver.h
     src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.cpp
     src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.h
+    src/WallpaperEngine/Audio/Drivers/NullAudioDriver.cpp
+    src/WallpaperEngine/Audio/Drivers/NullAudioDriver.h
     src/WallpaperEngine/Audio/AudioContext.cpp
     src/WallpaperEngine/Audio/AudioContext.h
     src/WallpaperEngine/Audio/AudioStream.cpp

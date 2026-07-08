@@ -66,9 +66,17 @@ namespace Audio {
 	 */
 	[[nodiscard]] Drivers::AudioDriver& getDriver () const;
 
+	/**
+	 * Swaps the underlying audio driver (e.g. upgrading from a no-op driver to a real one
+	 * once a background that actually needs playback is loaded, such as via a playlist).
+	 *
+	 * @param driver
+	 */
+	void setDriver (Drivers::AudioDriver& driver);
+
     private:
 	/** The audio driver in use */
-	Drivers::AudioDriver& m_driver;
+	Drivers::AudioDriver* m_driver;
     };
 } // namespace Audio
 } // namespace WallpaperEngine

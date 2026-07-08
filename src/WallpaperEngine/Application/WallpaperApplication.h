@@ -13,7 +13,7 @@
 #include "WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.h"
 #include "WallpaperEngine/Render/RenderContext.h"
 
-#include "WallpaperEngine/Audio/Drivers/SDLAudioDriver.h"
+#include "WallpaperEngine/Audio/Drivers/AudioDriver.h"
 
 #include "WallpaperEngine/Input/InputContext.h"
 #include "WallpaperEngine/WebBrowser/WebBrowserContext.h"
@@ -189,6 +189,15 @@ private:
     bool preflightWallpaper (const std::string& path);
     std::vector<std::size_t> buildPlaylistOrder (const ApplicationContext::PlaylistDefinition& definition);
     void ensureBrowserForProject (const Project& project);
+    /**
+     * Upgrades the audio driver from the no-op driver to a real SDL-backed one the first time a
+     * loaded background actually contains a sound object (e.g. a playlist rotating in a scene
+     * wallpaper with sound after starting on a video-only/silent one). Never downgrades, to avoid
+     * tearing down live streams.
+     *
+     * @param project
+     */
+    void ensureAudioForProject (const Project& project);
     bool makeAnyViewportCurrent () const;
 
     /** The application context that contains the current app settings */
@@ -199,7 +208,7 @@ private:
 
     std::unique_ptr<WallpaperEngine::Audio::Drivers::Detectors::AudioPlayingDetector> m_audioDetector = nullptr;
     std::unique_ptr<WallpaperEngine::Audio::AudioContext> m_audioContext = nullptr;
-    std::unique_ptr<WallpaperEngine::Audio::Drivers::SDLAudioDriver> m_audioDriver = nullptr;
+    std::unique_ptr<WallpaperEngine::Audio::Drivers::AudioDriver> m_audioDriver = nullptr;
     std::unique_ptr<WallpaperEngine::Audio::Drivers::Recorders::PlaybackRecorder> m_audioRecorder = nullptr;
     std::unique_ptr<WallpaperEngine::Render::RenderContext> m_renderContext = nullptr;
     std::unique_ptr<WallpaperEngine::Render::Drivers::VideoDriver> m_videoDriver = nullptr;

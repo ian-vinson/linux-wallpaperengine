@@ -4,6 +4,8 @@
 #include "WallpaperEngine/Application/ApplicationState.h"
 #include "WallpaperEngine/Assets/AssetLoadException.h"
 #include "WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.h"
+#include "WallpaperEngine/Audio/Drivers/NullAudioDriver.h"
+#include "WallpaperEngine/Audio/Drivers/SDLAudioDriver.h"
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Render/Drivers/VideoFactories.h"
@@ -347,6 +349,33 @@ void WallpaperApplication::ensureBrowserForProject (const Project& project) {
     }
 }
 
+void WallpaperApplication::ensureAudioForProject (const Project& project) {
+    if (!this->m_context.settings.audio.enabled) {
+	return;
+    }
+
+    if (!project.wallpaper->is<Scene> ()) {
+	return;
+    }
+
+    const bool hasSound = std::ranges::any_of (
+	project.wallpaper->as<Scene> ()->objects, [] (const auto& object) { return object->template is<Sound> (); }
+    );
+
+    if (!hasSound) {
+	return;
+    }
+
+    if (dynamic_cast<WallpaperEngine::Audio::Drivers::SDLAudioDriver*> (this->m_audioDriver.get ()) != nullptr) {
+	return;
+    }
+
+    this->m_audioDriver = std::make_unique<WallpaperEngine::Audio::Drivers::SDLAudioDriver> (
+	this->m_context, *this->m_audioDetector, *this->m_audioRecorder
+    );
+    this->m_audioContext->setDriver (*this->m_audioDriver);
+}
+
 bool WallpaperApplication::makeAnyViewportCurrent () const {
     if (!this->m_renderContext) {
 	return false;
@@ -452,6 +481,7 @@ void WallpaperApplication::advancePlaylist (
 
 	this->setupPropertiesForProject (*project);
 	this->ensureBrowserForProject (*project);
+	this->ensureAudioForProject (*project);
 
 	this->m_backgrounds[screen] = std::move (project);
 
@@ -831,10 +861,30 @@ void WallpaperApplication::setupAudio () {
 	);
     }
 
-    // initialize sdl audio driver
-    m_audioDriver = std::make_unique<WallpaperEngine::Audio::Drivers::SDLAudioDriver> (
-	this->m_context, *this->m_audioDetector, *this->m_audioRecorder
-    );
+    // only open a real SDL audio device (and its backend connection) if audio is enabled and some
+    // loaded background actually has a sound object to play -- otherwise an idle, unused audio
+    // client would show up for every session regardless of content (e.g. video-only wallpapers,
+    // whose audio is handled entirely by mpv, or scenes with no sound object at all)
+    const bool playbackRequired = this->m_context.settings.audio.enabled
+	&& std::ranges::any_of (
+	       this->m_backgrounds, [] (const std::pair<const std::string, ProjectUniquePtr>& pair) -> bool {
+		   return pair.second->wallpaper->is<Scene> ()
+		       && std::ranges::any_of (
+			      pair.second->wallpaper->as<Scene> ()->objects,
+			      [] (const auto& object) { return object->template is<Sound> (); }
+			  );
+	       }
+	   );
+
+    if (playbackRequired) {
+	m_audioDriver = std::make_unique<WallpaperEngine::Audio::Drivers::SDLAudioDriver> (
+	    this->m_context, *this->m_audioDetector, *this->m_audioRecorder
+	);
+    } else {
+	m_audioDriver = std::make_unique<WallpaperEngine::Audio::Drivers::NullAudioDriver> (
+	    this->m_context, *this->m_audioDetector, *this->m_audioRecorder
+	);
+    }
     // initialize audio context
     m_audioContext = std::make_unique<WallpaperEngine::Audio::AudioContext> (*m_audioDriver);
 }

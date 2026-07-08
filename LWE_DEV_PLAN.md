@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-07 (#17 DONE — custom `--offset-x`/`--offset-y` UV offset implemented against this fork's real `WallpaperState` class (confirmed to match the NeXx42-fork reference architecture directly, not assumed), threaded through `CWallpaper`/`CScene`/`CVideo`/`CWeb` and `ApplicationContext`'s CLI parsing mirroring `--scaling`/`--clamp` exactly. Verified via real screenshots on all three wallpaper types, zero-offset confirmed byte-identical to no-flags-at-all at the UV-value level, all four scaling modes confirmed to compose correctly with a nonzero offset, and a crash hit during testing was traced via `coredumpctl` to an unrelated pre-existing D-Bus/media-source race, not this feature. Zero regressions: 358-wallpaper scene batch (355 clean, 3 known pre-existing errors, 0 crashes) and 48-wallpaper web corpus (48/48 clean) both match established baselines. Also researched [NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork) beyond #17's UV offset — cloned and read the real source for every CLI flag. Added #23 (contrast/saturation/border-colour, one unified shared post-process mechanism, same architecture as #17), #24 (--list-properties/--dump-structure, direct Mural-integration value), #25 (a real, substantial playlist rotation feature — sequential/random order, timed rotation, preflight validation, live hot-swap), #26 (small misc: --disable-parallax, fullscreen-pause refinements). Also found a strong, precise lead for #20 (multiple audio sources) — a separate always-on PulseAudio capture client created whenever a wallpaper merely declares audio-processing support, regardless of actual use. Active Priority Order: #20, #22, #23, #24, #25, #26)
+**Last updated:** 2026-07-08 (#20 DONE — multiple audio sources fixed. The original NeXx42-fork lead turned out not to apply here (that client was already correctly gated); real cause live-caught on the developer's own running session — SDLAudioDriver opened unconditionally on every run regardless of whether any wallpaper had a sound object. Fixed with a new NullAudioDriver plus a rebindable AudioContext and ensureAudioForProject(), mirroring the existing ensureBrowserForProject() lazy-upgrade pattern to correctly handle playlists rotating in sound-bearing wallpapers later. Verified live: client count 4 → 2 on the developer's own session, zero regression on real sound playback, full 358-wallpaper regression clean. Active Priority Order: #22, #23, #24, #25, #26)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,50 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #20 — LOW: Multiple simultaneous audio sources visible for a single wallpaper instance (upstream Almamu/linux-wallpaperengine#174)
-Older, still-open upstream issue:
-[Almamu/linux-wallpaperengine#174](https://github.com/Almamu/linux-wallpaperengine/issues/174).
-A single running wallpaper instance shows up as multiple separate audio
-sources/sinks in PulseAudio/PipeWire graph tools (qpwgraph/helvum/carla),
-even with `--silent` set. Never confirmed resolved in the upstream
-thread — Almamu's own comment there only mentions pushing a change to
-"disable audio processing entirely" as a stopgap while investigating
-further, not a confirmed root-cause fix. Worth checking directly against
-this fork's own audio stack whenever picked up, since this session did
-extensive, direct work in exactly this area for `#10`'s `ISoundLayer`
-implementation (`AudioContext`/`AudioStream`/`SDLAudioDriver`) — check
-whether each `AudioStream` registers its own separate PulseAudio/PipeWire
-client/output (one per sound file per object, potentially multiplying
-quickly on a wallpaper with several sound objects or particle-attached
-audio) rather than sharing one client connection per process, which
-would directly explain the reported symptom.
-
-**Strong, precise lead found 2026-07-07 researching
-[NeXx42/linux-wallpaperengine-fork](https://github.com/NeXx42/linux-wallpaperengine-fork)**:
-that fork has a real `--no-audio-processing` flag
-(`settings.audio.audioprocessing`, separate from `settings.audio.enabled`
-which just gates sound/video playback). Traced its actual consumer —
-`WallpaperApplication::setupAudio()` unconditionally creates a
-**`PulseAudioPlaybackRecorder`** (a real PulseAudio *capture* client,
-`pa_context_new(..., "wallpaperengine-audioprocessing")`) whenever *any*
-loaded background merely **declares** audio-processing support
-(`supportsAudioProcessing`) — regardless of whether that wallpaper's
-audio-reactive feature is actually used or produces any visible effect.
-This is a very plausible, precise explanation for the reported
-symptom: actual sound/video playback creates one audio sink, and this
-separate, always-on capture client (used for feeding desktop-audio
-spectrum data to audio-reactive shaders/scripts) creates a second,
-independent PulseAudio connection on top — exactly matching "multiple
-sources for one wallpaper instance." Very likely the exact mechanism
-behind Almamu's own "disable audio processing entirely" mitigation
-comment in the upstream thread. Check whether this fork already has an
-equivalent audio-capture-for-visualization client, and if so, whether it
-has the same "created unconditionally whenever declared, regardless of
-actual use" pattern — if it does, the fix is likely as simple as gating
-that specific client's creation more precisely (only when the wallpaper
-genuinely reads/uses spectrum data, not just declares theoretical
-support), or adding an equivalent opt-out flag.
-
 ### #22 — Concurrent multi-video decode can segfault under sustained load (found via `#19`'s regression testing, not yet investigated)
 
 Found 2026-07-07 as a side effect of verifying `#19`'s fix, not
@@ -512,6 +468,73 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #20 — DONE 2026-07-08: multiple audio sources fixed — root cause was NOT what NeXx42's fork's lead suggested, found instead by live-reproducing on the developer's own running session
+
+Fixes upstream [Almamu/linux-wallpaperengine#174](https://github.com/Almamu/linux-wallpaperengine/issues/174).
+
+**The original lead from `#20`'s research (NeXx42's fork's
+`PulseAudioPlaybackRecorder`, created whenever a wallpaper merely
+declares audio-processing support) turned out NOT to be this fork's
+bug** — investigated directly and found this fork's
+`WallpaperApplication::setupAudio()` already gates that exact client
+correctly (only created when a wallpaper declares
+`supportsaudioprocessing` *and* the setting is enabled). A plausible,
+well-evidenced theory, correctly discarded once checked against real
+code rather than assumed to transfer.
+
+**The real cause, live-caught on the developer's own running desktop
+session, not a synthetic test**: `SDLAudioDriver` (the real audio
+backend, opening an actual PulseAudio/PipeWire connection) was
+constructed **unconditionally on every run**, regardless of whether any
+loaded wallpaper had a sound object to play at all. Confirmed directly:
+restarting the developer's live 2-screen session (one video wallpaper
+whose audio goes through `mpv` independently, one scene wallpaper with
+zero sound objects, `--silent` set) showed **4 separate PipeWire
+clients for one process** — the automute detector, *two* SDL-backend
+connections doing nothing at all (no sound object existed anywhere to
+feed them), and `mpv`'s own real video-audio output. A second,
+secondary source found along the way: `PulseAudioPlayingDetector`
+(automute) is *also* an independent, always-on PulseAudio context
+whenever automute is enabled (the default) — by design, since it has to
+watch system-wide audio rather than any one wallpaper's own content, but
+still a real, separate client worth knowing about.
+
+**Fix, with a real forward-looking correctness concern caught and
+handled properly, not cut as a corner**: new `NullAudioDriver` (a
+no-op `AudioDriver` subclass). `setupAudio()` now only constructs the
+real `SDLAudioDriver` when `settings.audio.enabled` is true *and* some
+loaded background is a `Scene` containing an actual `Sound` object;
+otherwise it uses `NullAudioDriver`. A naive version of this fix would
+have a real playlist-correctness gap: if a playlist later rotates in a
+sound-bearing wallpaper after starting on a silent/video-only one, the
+driver would stay permanently null and that wallpaper's sound would
+silently never play. Instead, made `AudioContext`'s driver rebindable
+(reference → pointer + a new `setDriver()`), and added
+`WallpaperApplication::ensureAudioForProject()` — mirroring the
+already-established `ensureBrowserForProject()` lazy-upgrade pattern —
+hooked into `advancePlaylist()`, upgrading from the no-op driver to a
+real one the first time a loaded background actually needs it, and
+never downgrading (to avoid tearing down live streams).
+
+**Verification, all real**:
+- Clean build.
+- **Restarted the developer's actual live session** with the fixed
+  binary: client count dropped **4 → 2** — confirmed the remaining two
+  are legitimate (the automute detector, which is supposed to always
+  run, and `mpv`'s real video-audio stream for the one wallpaper that
+  actually has audio content).
+- **Positive-path regression check**: launched a wallpaper with a real
+  sound object (a Zelda-themed ambient-music wallpaper) in an isolated
+  test window — the SDL device still opens correctly, and the resulting
+  sink-input confirmed `Corked: no`, `Mute: no`, `Volume: 100%` — a live,
+  genuinely playing stream, zero regression on the actual positive
+  path this whole feature exists for.
+- **Full 358-wallpaper scene regression**: 356 clean, 2 errors, 0
+  crashes. Both remaining errors (Chainsaw Man's GLSL flake, Horror Anime
+  Girl's script exception) are the same pre-existing, already-documented
+  failures tracked since earlier sessions — present in both categories
+  regardless of this specific change, confirmed unrelated to audio.
 
 ### #16a — DONE 2026-07-07: `CImage`'s ping-pong FBOs now resize in place when object size changes — real bug fixed, but confirmed NOT the cause of the reported scattered-limbs symptom
 
