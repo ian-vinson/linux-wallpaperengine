@@ -20,8 +20,11 @@ using namespace WallpaperEngine::WebBrowser::CEF;
 CWeb::CWeb (
     const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext, WebBrowserContext& browserContext,
     const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const float& offsetX,
-    const float& offsetY
-) : CWallpaper (wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY),
+    const float& offsetY, const float& contrast, const float& saturation, const glm::vec3& borderColour
+) :
+    CWallpaper (
+	wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY, contrast, saturation, borderColour
+    ),
     m_browserContext (browserContext) {
     // Seed m_width/m_height from the output before creating framebuffers and the CEF browser.
     // Without this, CreateBrowserSync triggers GetViewRect and receives 16×17 — the wrong size.

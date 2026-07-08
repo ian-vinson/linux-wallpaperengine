@@ -12,10 +12,11 @@ using namespace WallpaperEngine::Render;
 CWallpaper::CWallpaper (
     const Wallpaper& wallpaperData, RenderContext& context, AudioContext& audioContext,
     const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const float& offsetX,
-    const float& offsetY
+    const float& offsetY, const float& contrast, const float& saturation, const glm::vec3& borderColour
 ) :
     ContextAware (context), FBOProvider (nullptr), m_wallpaperData (wallpaperData), m_audioContext (audioContext),
-    m_state (scalingMode, clampMode, offsetX, offsetY) {
+    m_state (scalingMode, clampMode, offsetX, offsetY), m_contrast (contrast), m_saturation (saturation),
+    m_borderColour (borderColour) {
     // generate the VAO to stop opengl from complaining
     glGenVertexArrays (1, &this->m_vaoBuffer);
     glBindVertexArray (this->m_vaoBuffer);
@@ -108,13 +109,32 @@ void CWallpaper::setupShaders () {
     const GLuint fragmentShaderID = glCreateShader (GL_FRAGMENT_SHADER);
 
     // give shader's source code to OpenGL to be compiled
+    //
+    // final compositing post-processing (contrast/saturation/border-colour), ported from
+    // NeXx42/linux-wallpaperengine-fork's postprocess.frag. Runs as the last step for every
+    // wallpaper type (CScene/CVideo/CWeb all render into m_sceneFBO first via renderFrame(),
+    // then this shader composites that texture to the destination framebuffer) -- universal by
+    // construction, no separate pass needed. The alpha-test fallback is what makes border-colour
+    // show up specifically in the letterboxed/empty area when using clamp/border scaling mode.
     sourcePointer = "#version 330\n"
 		    "precision highp float;\n"
 		    "uniform sampler2D g_Texture0;\n"
+		    "uniform float u_Saturation;\n"
+		    "uniform float u_Contrast;\n"
+		    "uniform vec3 u_BorderColour;\n"
 		    "in vec2 v_TexCoord;\n"
 		    "out vec4 out_FragColor;\n"
 		    "void main () {\n"
-		    "out_FragColor = texture (g_Texture0, v_TexCoord);\n"
+		    "vec4 tex = texture (g_Texture0, v_TexCoord);\n"
+		    "if (tex.a < 0.01) {\n"
+		    "out_FragColor = vec4 (u_BorderColour, 1.0);\n"
+		    "return;\n"
+		    "}\n"
+		    "vec3 color = tex.rgb;\n"
+		    "float lum = dot (color, vec3 (0.2126, 0.7152, 0.0722));\n"
+		    "color = mix (vec3 (lum), color, u_Saturation);\n"
+		    "color = (color - 0.5) * u_Contrast + 0.5;\n"
+		    "out_FragColor = vec4 (color, 1.0);\n"
 		    "}";
 
     glShaderSource (fragmentShaderID, 1, &sourcePointer, nullptr);
@@ -179,6 +199,17 @@ void CWallpaper::setupShaders () {
     this->g_Texture0 = glGetUniformLocation (this->m_shader, "g_Texture0");
     this->a_Position = glGetAttribLocation (this->m_shader, "a_Position");
     this->a_TexCoord = glGetAttribLocation (this->m_shader, "a_TexCoord");
+    this->u_Saturation = glGetUniformLocation (this->m_shader, "u_Saturation");
+    this->u_Contrast = glGetUniformLocation (this->m_shader, "u_Contrast");
+    this->u_BorderColour = glGetUniformLocation (this->m_shader, "u_BorderColour");
+
+    // contrast/saturation/border-colour are set once here, not re-applied every frame in
+    // render() -- matches NeXx42's fork's actual behaviour (a known limitation for live-
+    // adjustable sliders, not something this port expands on)
+    glUseProgram (this->m_shader);
+    glUniform1f (this->u_Saturation, this->m_saturation);
+    glUniform1f (this->u_Contrast, this->m_contrast);
+    glUniform3f (this->u_BorderColour, this->m_borderColour.r, this->m_borderColour.g, this->m_borderColour.b);
 }
 
 void CWallpaper::setDestinationFramebuffer (GLuint framebuffer) { this->m_destFramebuffer = framebuffer; }
@@ -346,23 +377,27 @@ std::shared_ptr<const CFBO> CWallpaper::getFBO () const { return this->m_sceneFB
 std::unique_ptr<CWallpaper> CWallpaper::fromWallpaper (
     const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
     WebBrowser::WebBrowserContext* browserContext, const WallpaperState::TextureUVsScaling& scalingMode,
-    const uint32_t& clampMode, const float& offsetX, const float& offsetY
+    const uint32_t& clampMode, const float& offsetX, const float& offsetY, const float& contrast,
+    const float& saturation, const glm::vec3& borderColour
 ) {
     if (wallpaper.is<Scene> ()) {
 	return std::make_unique<WallpaperEngine::Render::Wallpapers::CScene> (
-	    wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY
+	    wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY, contrast, saturation,
+	    borderColour
 	);
     }
 
     if (wallpaper.is<Video> ()) {
 	return std::make_unique<WallpaperEngine::Render::Wallpapers::CVideo> (
-	    wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY
+	    wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY, contrast, saturation,
+	    borderColour
 	);
     }
 
     if (wallpaper.is<Web> ()) {
 	return std::make_unique<WallpaperEngine::Render::Wallpapers::CWeb> (
-	    wallpaper, context, audioContext, *browserContext, scalingMode, clampMode, offsetX, offsetY
+	    wallpaper, context, audioContext, *browserContext, scalingMode, clampMode, offsetX, offsetY, contrast,
+	    saturation, borderColour
 	);
     }
 

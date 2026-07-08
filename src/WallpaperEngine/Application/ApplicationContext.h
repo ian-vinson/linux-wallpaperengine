@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
 #include "ApplicationState.h"
@@ -74,6 +75,9 @@ public:
 	TextureFlags clamp = TextureFlags_ClampUVs;
 	float offsetX = 0.0f;
 	float offsetY = 0.0f;
+	float contrast = 1.0f;
+	float saturation = 1.0f;
+	glm::vec3 borderColour = { 0.0f, 0.0f, 0.0f };
     };
 
     struct {
@@ -110,6 +114,12 @@ public:
 	    std::map<std::string, float> screenOffsetsX;
 	    /** The vertical UV offset for different screens (--offset-y) */
 	    std::map<std::string, float> screenOffsetsY;
+	    /** Contrast multiplier for different screens (--contrast) */
+	    std::map<std::string, float> screenContrasts;
+	    /** Saturation multiplier for different screens (--saturation) */
+	    std::map<std::string, float> screenSaturations;
+	    /** Border colour shown in empty/letterboxed areas for different screens (--border-colour) */
+	    std::map<std::string, glm::vec3> screenBorderColours;
 	    /** Playlists selected per screen */
 	    std::map<std::string, PlaylistDefinition> screenPlaylists;
 	    /** Playlist used in window mode */
@@ -156,6 +166,10 @@ public:
 		/** Custom UV offset used in window mode (--offset-x/--offset-y) */
 		float offsetX;
 		float offsetY;
+		/** Post-processing contrast/saturation/border-colour used in window mode */
+		float contrast;
+		float saturation;
+		glm::vec3 borderColour;
 	    } window;
 
 	    struct {
@@ -214,6 +228,9 @@ public:
             .screenClamps = {},
             .screenOffsetsX = {},
             .screenOffsetsY = {},
+            .screenContrasts = {},
+            .screenSaturations = {},
+            .screenBorderColours = {},
             .screenPlaylists = {},
             .defaultPlaylist = std::nullopt,
             .spanGroups = {},
@@ -238,6 +255,9 @@ public:
                 .scalingMode = WallpaperEngine::Render::WallpaperState::TextureUVsScaling::DefaultUVs,
                 .offsetX = 0.0f,
                 .offsetY = 0.0f,
+                .contrast = 1.0f,
+                .saturation = 1.0f,
+                .borderColour = { 0.0f, 0.0f, 0.0f },
             },
             .wayland = {
                 .layer = WAYLAND_LAYER_BOTTOM,

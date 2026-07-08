@@ -12,7 +12,8 @@ public:
     CVideo (
 	const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
 	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const float& offsetX = 0.0f,
-	const float& offsetY = 0.0f
+	const float& offsetY = 0.0f, const float& contrast = 1.0f, const float& saturation = 1.0f,
+	const glm::vec3& borderColour = { 0.0f, 0.0f, 0.0f }
     );
 
     ~CVideo () override;

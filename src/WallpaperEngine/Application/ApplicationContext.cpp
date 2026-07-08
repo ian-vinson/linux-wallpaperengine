@@ -315,6 +315,9 @@ void ApplicationContext::loadSettingsFromArgv () {
 	    this->settings.general.screenClamps[lastScreen] = this->settings.render.window.clamp;
 	    this->settings.general.screenOffsetsX[lastScreen] = this->settings.render.window.offsetX;
 	    this->settings.general.screenOffsetsY[lastScreen] = this->settings.render.window.offsetY;
+	    this->settings.general.screenContrasts[lastScreen] = this->settings.render.window.contrast;
+	    this->settings.general.screenSaturations[lastScreen] = this->settings.render.window.saturation;
+	    this->settings.general.screenBorderColours[lastScreen] = this->settings.render.window.borderColour;
 	})
 	.append ();
     backgroundGroup.add_argument ("--screen-span")
@@ -360,6 +363,9 @@ void ApplicationContext::loadSettingsFromArgv () {
 	    group.clamp = this->settings.render.window.clamp;
 	    group.offsetX = this->settings.render.window.offsetX;
 	    group.offsetY = this->settings.render.window.offsetY;
+	    group.contrast = this->settings.render.window.contrast;
+	    group.saturation = this->settings.render.window.saturation;
+	    group.borderColour = this->settings.render.window.borderColour;
 	    this->settings.general.spanGroups.push_back (std::move (group));
 	    // set lastScreen to a synthetic name so --bg/--scaling/--clamp can target this group
 	    lastScreen = "span:" + value;
@@ -515,6 +521,84 @@ void ApplicationContext::loadSettingsFromArgv () {
 		}
 	    } else {
 		this->settings.render.window.offsetY = offset;
+	    }
+	})
+	.append ();
+    backgroundGroup.add_argument ("--contrast")
+	.help (
+	    "Contrast multiplier applied to the final output (1.0 = no change), this applies to the previous "
+	    "--window, --screen-root, or --screen-span output, or the default background if no other background is "
+	    "specified"
+	)
+	.action ([this, &lastScreen] (const std::string& value) -> void {
+	    float contrast;
+
+	    try {
+		contrast = std::stof (value);
+	    } catch (const std::exception&) {
+		sLog.exception ("Invalid contrast value: ", value);
+	    }
+
+	    if (this->settings.render.mode == DESKTOP_BACKGROUND) {
+		this->settings.general.screenContrasts[lastScreen] = contrast;
+		// also update span group if targeting one
+		if (lastScreen.rfind ("span:", 0) == 0 && !this->settings.general.spanGroups.empty ()) {
+		    this->settings.general.spanGroups.back ().contrast = contrast;
+		}
+	    } else {
+		this->settings.render.window.contrast = contrast;
+	    }
+	})
+	.append ();
+    backgroundGroup.add_argument ("--saturation")
+	.help (
+	    "Saturation multiplier applied to the final output (1.0 = no change, 0.0 = grayscale), this applies to "
+	    "the previous --window, --screen-root, or --screen-span output, or the default background if no other "
+	    "background is specified"
+	)
+	.action ([this, &lastScreen] (const std::string& value) -> void {
+	    float saturation;
+
+	    try {
+		saturation = std::stof (value);
+	    } catch (const std::exception&) {
+		sLog.exception ("Invalid saturation value: ", value);
+	    }
+
+	    if (this->settings.render.mode == DESKTOP_BACKGROUND) {
+		this->settings.general.screenSaturations[lastScreen] = saturation;
+		// also update span group if targeting one
+		if (lastScreen.rfind ("span:", 0) == 0 && !this->settings.general.spanGroups.empty ()) {
+		    this->settings.general.spanGroups.back ().saturation = saturation;
+		}
+	    } else {
+		this->settings.render.window.saturation = saturation;
+	    }
+	})
+	.append ();
+    backgroundGroup.add_argument ("--border-colour")
+	.help (
+	    "Colour shown in empty/letterboxed areas when clamp mode leaves the background from filling the whole "
+	    "screen, given as three space-separated 0-1 components \"R G B\" (default \"0 0 0\", black); this "
+	    "applies to the previous --window, --screen-root, or --screen-span output, or the default background if "
+	    "no other background is specified"
+	)
+	.action ([this, &lastScreen] (const std::string& value) -> void {
+	    glm::vec3 colour;
+	    std::istringstream ss (value);
+
+	    if (!(ss >> colour.r >> colour.g >> colour.b)) {
+		sLog.exception ("Invalid border-colour value (expected \"R G B\"): ", value);
+	    }
+
+	    if (this->settings.render.mode == DESKTOP_BACKGROUND) {
+		this->settings.general.screenBorderColours[lastScreen] = colour;
+		// also update span group if targeting one
+		if (lastScreen.rfind ("span:", 0) == 0 && !this->settings.general.spanGroups.empty ()) {
+		    this->settings.general.spanGroups.back ().borderColour = colour;
+		}
+	    } else {
+		this->settings.render.window.borderColour = colour;
 	    }
 	})
 	.append ();

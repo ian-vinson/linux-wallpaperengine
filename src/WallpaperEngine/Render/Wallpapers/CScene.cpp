@@ -29,8 +29,11 @@ using namespace WallpaperEngine::Render::Wallpapers;
 CScene::CScene (
     const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
     const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const float& offsetX,
-    const float& offsetY
-) : CWallpaper (wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY) {
+    const float& offsetY, const float& contrast, const float& saturation, const glm::vec3& borderColour
+) :
+    CWallpaper (
+	wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY, contrast, saturation, borderColour
+    ) {
     // caller should check this, if not a std::bad_cast is good to throw
     auto scene = wallpaper.as<Scene> ();
 

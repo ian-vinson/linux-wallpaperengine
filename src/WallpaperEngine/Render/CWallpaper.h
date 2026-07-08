@@ -140,14 +140,17 @@ public:
     static std::unique_ptr<CWallpaper> fromWallpaper (
 	const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
 	WebBrowser::WebBrowserContext* browserContext, const WallpaperState::TextureUVsScaling& scalingMode,
-	const uint32_t& clampMode, const float& offsetX = 0.0f, const float& offsetY = 0.0f
+	const uint32_t& clampMode, const float& offsetX = 0.0f, const float& offsetY = 0.0f,
+	const float& contrast = 1.0f, const float& saturation = 1.0f,
+	const glm::vec3& borderColour = { 0.0f, 0.0f, 0.0f }
     );
 
 protected:
     CWallpaper (
 	const Wallpaper& wallpaperData, RenderContext& context, AudioContext& audioContext,
 	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const float& offsetX = 0.0f,
-	const float& offsetY = 0.0f
+	const float& offsetY = 0.0f, const float& contrast = 1.0f, const float& saturation = 1.0f,
+	const glm::vec3& borderColour = { 0.0f, 0.0f, 0.0f }
     );
 
     /**
@@ -184,6 +187,9 @@ private:
     GLint g_Texture0 = GL_NONE;
     GLint a_Position = GL_NONE;
     GLint a_TexCoord = GL_NONE;
+    GLint u_Saturation = GL_NONE;
+    GLint u_Contrast = GL_NONE;
+    GLint u_BorderColour = GL_NONE;
     /** The framebuffer to draw the background to */
     GLuint m_destFramebuffer = GL_NONE;
     /** Setups OpenGL's shaders for this wallpaper backbuffer */
@@ -194,6 +200,11 @@ private:
     AudioContext& m_audioContext;
     /** Current Wallpaper state */
     WallpaperState m_state;
+    /** Post-processing contrast/saturation/border-colour, applied by the final compositing shader.
+     *  Set as uniforms once in setupShaders() (not re-applied per frame), matching NeXx42's fork. */
+    float m_contrast = 1.0f;
+    float m_saturation = 1.0f;
+    glm::vec3 m_borderColour = { 0.0f, 0.0f, 0.0f };
     /** Span info for multi-monitor spanning (optional) */
     std::optional<SpanInfo> m_spanInfo = std::nullopt;
     /** Frame counter to avoid redundant renderFrame calls when shared across viewports */

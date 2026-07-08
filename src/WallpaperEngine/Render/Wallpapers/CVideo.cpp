@@ -12,8 +12,11 @@ using namespace WallpaperEngine::VideoPlayback::MPV;
 CVideo::CVideo (
     const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
     const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const float& offsetX,
-    const float& offsetY
-) : CWallpaper (wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY) {
+    const float& offsetY, const float& contrast, const float& saturation, const glm::vec3& borderColour
+) :
+    CWallpaper (
+	wallpaper, context, audioContext, scalingMode, clampMode, offsetX, offsetY, contrast, saturation, borderColour
+    ) {
     // setup framebuffers
     this->setupFramebuffers ();
 
