@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-08 (#23 DONE — contrast/saturation/border-colour post-processing implemented, following #17's exact established pattern (same per-screen storage convention, same CWallpaper/CScene/CVideo/CWeb threading). No new compositing pass needed — CWallpaper's existing final-compositing shader was already the right hook, extended in place. Verified with real quantitative RGB proof for saturation/contrast and a real UV-overflow test for border-colour; one specific sub-case (aspect-mismatch + --scaling fit) was honestly reported as inconclusive rather than folded into a blanket pass. Full regression clean, matching baseline exactly. Active Priority Order: #24, #25, #26, #28, #31, #32)
+**Last updated:** 2026-07-08 (#24 DONE — --format json for --list-properties/--dump-structure. Both flags already existed and worked substantially before this item was touched — a genuine surprise, confirmed rather than assumed. Added JSON alongside the existing text default via a new Property::dumpJson()/JsonPrinter, using plain nlohmann::json to avoid an awkward backward dependency on the fork's own specialized JSON type. Found and fixed two real bugs along the way: --dump-structure never exiting after printing, and both dumpers silently skipping Text/Particle/CameraObject objects entirely. Verified with real matching text/JSON output across varied wallpapers, full regression clean. Flagged a real, honest integration caveat for Mural (stdout intermixes log lines with JSON, a consumer needs to find the outermost {...}) rather than glossing over it. Active Priority Order: #25, #26, #28, #31, #32)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,30 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #24 — Introspection CLI flags for Mural integration: `--list-properties` and `--dump-structure`, from NeXx42's engine fork
-
-Researched 2026-07-07, same source as `#17`/`#23`. Directly valuable for
-Mural specifically — both let an external tool (Mural) query a
-wallpaper's real structure/properties via CLI rather than re-implementing
-`project.json`/`scene.json` parsing on Mural's own side.
-
-- `--list-properties` (`-l`): for every loaded background, iterates its
-  parsed properties and logs each one's `dump()` output (whatever a
-  property's own `dump()` method already produces — this fork almost
-  certainly has an equivalent property object with similar
-  introspection potential, worth checking). Implementation is a thin,
-  simple loop — low effort if the underlying property model is similar.
-- `--dump-structure` (`-z`): uses a dedicated `Data::Dumpers::StringPrinter`
-  class with a `printWallpaper()` method that pretty-prints a
-  wallpaper's full parsed layer/object tree to stdout. A real, small,
-  purpose-built dumper — worth reading in full if picked up, since the
-  exact output format matters for whatever Mural would parse back out
-  of it (plain text vs. structured/JSON — confirm which before building
-  a Mural-side consumer against it).
-
-Both are read-only, low-risk, and don't touch rendering at all — good
-candidates for a quick, contained implementation session.
-
 ### #25 — Wallpaper playlist rotation (`--playlist`), a substantial standalone feature, from NeXx42's engine fork
 
 Researched 2026-07-07, same source as `#17`/`#23`/`#24`. This is a real,
@@ -425,6 +401,65 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #24 — DONE 2026-07-08: `--format json` for `--list-properties`/`--dump-structure` (Mural integration)
+
+**A genuine surprise, confirmed rather than assumed**: both flags
+already existed and worked substantially in this fork before this item
+was touched — `Property::dump()` already covered all 8 property types
+(slider, boolean, color, combo, text, scenetexture, file, textinput)
+with full metadata, and an existing `StringPrinter` class already
+walked the scene object tree. Not a from-scratch implementation, as the
+original research had assumed might be needed.
+
+**A real bug found and fixed along the way**: `--dump-structure`
+printed its dump then fell straight through into normal rendering,
+never exiting — unlike `--list-properties`, which correctly exits
+early. Fixed by setting `keepRunning = false` right after printing, in
+both format branches.
+
+**Format decision**: kept the existing plain-text format as the
+unconditional default (no disruption to anything already consuming it);
+added `--format json` applying to both flags. Used plain
+`nlohmann::json` rather than this fork's own specialized `Data::JSON`
+type — that type pulls in parser-side `UserSettingBuilder`/
+`VectorBuilder` infrastructure and would create an awkward backward
+dependency from `Data::Model` into `Data::Parsers`-adjacent code for
+what's purely a serialization concern.
+
+**Implementation**: `Property::dumpJson()` — a new virtual method,
+implemented on all 8 property subclasses, a structural equivalent of
+`dump()` (type/text/value, plus slider min/max/step and combo options).
+New `JsonPrinter` class (`Data::Dumpers`), mirroring `StringPrinter`'s
+method set 1:1, building `nlohmann::json` trees instead of an indented
+text stream.
+
+**Bonus completeness fix, found and fixed along the way**: both
+`StringPrinter` and `JsonPrinter` previously silently skipped `Text`,
+`Particle`, and `CameraObject` objects entirely (only `Image`/`Sound`
+were handled). Extended both to cover them — verified on a real
+wallpaper with 8 text objects and 1 particle system, all now correctly
+detailed in both formats.
+
+**Verification**: real, accurate output confirmed against real
+wallpapers with varied property types and object structures — text and
+JSON output matched exactly for the same wallpaper in every case
+checked. Early-exit fix confirmed via exit code (`exit=0`, not the
+timeout). Normal rendering confirmed unaffected when the flags aren't
+used (a full-timeout run, unchanged). Full 358-wallpaper regression:
+356 clean, 1 pre-existing shader error, 1 pre-existing unrelated
+`SIGFPE` (`#32`) — identical to the established baseline, zero new
+failures, as expected for a purely additive change.
+
+**Real, honestly-flagged integration caveat for Mural, not introduced
+by this change**: stdout intermixes ordinary diagnostic log lines
+(GLEW/fullscreen-detector warnings, `"Stopping"`) with the JSON block —
+a consumer needs to locate the outermost `{...}` rather than treat all
+of stdout as pure JSON. This is a pre-existing characteristic of the
+CLI's logging design (the text format has the exact same
+intermingling); properly isolating structured output on its own stream
+would need a larger redesign (a separate stream or file) and was left
+out of scope here.
 
 ### #23 — DONE 2026-07-08: contrast/saturation/border-colour post-processing implemented, following `#17`'s exact established pattern
 
