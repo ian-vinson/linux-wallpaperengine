@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-08 (#26 DONE, zero code changes needed — --disable-parallax and both fullscreen-pause refinements were all already fully implemented before this item was touched. Real verification performed anyway: a genuine live xdotool-based test for parallax (a 4x diff-pixel difference with/without the flag, matching the classic camera-pan signature), and a sanctioned fallback verification for the fullscreen-pause flags after hitting genuine Wayland/XWayland environmental friction. Full regression clean. Also flagged a recurring process issue: Claude Code's own self-reported "N items uncommitted" claims were repeatedly stale/wrong across the last three items, directly contradicted by fresh git status checks each time — worth real skepticism of that specific claim going forward. Active Priority Order: #25, #28, #31, #32)
+**Last updated:** 2026-07-09 (#28 DONE — engine.setTimeout/setInterval now return a real callable cancel closure via JS_NewCFunctionData, matching real WE's documented behavior confirmed directly against lib.sceneScript.d.ts. Kept backward compatibility with the old clearTimeout(t)/clearInterval(t) numeric-id path via a hidden __id property. Verified against a live-built binary: direct-call cancellation genuinely works, uncancelled timers unaffected, and the actual #22 crashing idiom (recovered via byte-level extraction from a real wallpaper's compiled scene.pkg, present in 14 wallpapers via a shared template) now cancels cleanly instead of throwing. Full regression clean, cross-checked against coredumpctl. Active Priority Order: #25, #31, #32)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -355,26 +355,6 @@ more specific phrase `"terminate called after throwing"` (the actual
 libstdc++ message for an uncaught C++ exception) rather than the bare
 substring `"terminate"`.
 
-### #28 — `engine.setTimeout`/`setInterval` return a plain numeric ID, not real WE's cancel-closure — known, deliberate compatibility gap
-
-Found 2026-07-08 during `#22`'s fix, deliberately left out of scope
-there. Real Wallpaper Engine's `engine.setTimeout`/`setInterval` return
-a **callable cancel closure**, not a numeric ID — real-world scripts
-commonly rely on this exact idiom: `let t = engine.setTimeout(fn, ms);
-if (t) t();` to cancel it, rather than passing an ID to a separate
-`clearTimeout(t)` call. This fork's implementation returns a plain
-number instead. Both wallpapers that surfaced `#22`'s crash used this
-exact pattern (`stopTimeout = engine.setTimeout(...)`, later called as
-a function) — after `#22`'s fix, calling the returned number as a
-function now throws a clean, caught/logged JS `TypeError` instead of
-crashing (correct and safe), but the script's own cancel logic silently
-doesn't do what its author intended, which is a real, if minor,
-behavioral compatibility gap rather than full parity with real WE.
-Fix, whenever picked up: have `engine.setTimeout`/`setInterval` return a
-real callable JS function (closing over the reserved id and calling
-`clearTimeout`/`clearInterval` internally) instead of a plain number,
-matching real WE's documented behavior.
-
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -383,6 +363,60 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #28 — DONE 2026-07-09: `engine.setTimeout`/`setInterval` now return a real callable cancel closure, matching real WE's documented behavior
+
+Real WE's `setTimeout`/`setInterval` return a callable `Function`, not a
+numeric ID — confirmed directly against `lib.sceneScript.d.ts`, which
+explicitly documents `clearTimeout`/`clearInterval` as *"Not
+implemented. Use returned function to clear."* This fork previously
+returned a plain number; both wallpapers that surfaced `#22`'s
+use-after-free used the real-WE idiom (`stopTimeout =
+engine.setTimeout(...)`, later called as a function to cancel) — after
+`#22`'s fix this threw a clean, caught `TypeError` instead of crashing,
+but the script's own cancel logic silently didn't do what its author
+intended.
+
+**Implementation**: new `makeCancelClosure()` builds the returned value
+via `JS_NewCFunctionData` — the same pattern this fork already uses for
+`ScriptableObjectAdapter`'s texture-animation closures — capturing
+`[instanceId, id]`. Calling it invokes `engine_cancel_timeout`/
+`engine_cancel_interval`, which route to the existing
+`EngineObject::clearTimeout`/`clearInterval`. The storage maps and
+`tick()` firing loop — hardened against use-after-free by `#22` — are
+completely untouched by this change.
+
+**Backward compatibility**: kept this fork's own `clearTimeout`/
+`clearInterval` globals working with both the new closure and the old
+numeric id — the closure carries a hidden, non-enumerable `__id`
+property that a new `getCancelClosureId()` helper checks first, falling
+back to the old `JS_ToInt32` path otherwise.
+
+**Verification, against a live-built binary and real workshop
+wallpapers, not just unit-level reasoning**:
+- Direct-call cancellation (`let t = engine.setTimeout(fn, ms); t();`)
+  confirmed the callback genuinely never fires — logged over a real 6s
+  run, not just "doesn't throw."
+- Uncancelled timers/intervals still fire correctly at the right
+  cadence — no regression to `#22`'s reentrancy/ownership fix.
+- Old-style `clearTimeout(t)`/`clearInterval(t)` (passing the closure
+  instead of calling it) confirmed working via the `__id` fallback.
+- **Found the actual crashing idiom from `#22` via real byte-level
+  extraction from a wallpaper's compiled `scene.pkg`** — the original
+  two wallpaper IDs weren't recoverable from `#22`'s own compressed
+  session transcripts, an honest limitation rather than a fabricated
+  match. The extracted idiom (`stopTimeout = engine.setTimeout(...);
+  ...; if (stopTimeout) stopTimeout();`) is present verbatim in **14
+  real wallpapers** via a shared template. A minimal repro of that
+  exact extracted code showed the precise contrast: pre-fix → silent
+  `TypeError: not a function`, callback fires anyway (the original bug);
+  post-fix → clean cancel, no throw, callback never fires.
+- Full 358-wallpaper regression: 356 clean, 1 pre-existing GLSL error
+  (Chainsaw Man), 1 pre-existing crash (Blue Archive, `SIGFPE` in
+  particle rendering, unrelated to scripting) — exactly the documented
+  baseline, zero new failures. Cross-checked against `coredumpctl`:
+  exactly one coredump during the run, matching that same pre-existing
+  bug.
 
 ### #26 — DONE 2026-07-08 (verification only — zero code changes needed): `--disable-parallax`, `--fullscreen-pause-only-active`, `--fullscreen-pause-ignore-appid` were all already fully implemented
 
