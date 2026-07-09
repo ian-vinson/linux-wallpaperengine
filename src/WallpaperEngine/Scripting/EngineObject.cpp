@@ -78,6 +78,27 @@ JSValue engine_stop_timeout (
     return JS_UNDEFINED;
 }
 
+// setTimeout/setInterval now return a callable cancel closure (see makeCancelClosure below)
+// rather than a raw id, matching real Wallpaper Engine's documented setTimeout/setInterval
+// return type. clearTimeout/clearInterval remain as this fork's own extension for scripts
+// still using the old-style `engine.clearTimeout(t)` call: the closure carries its id in a
+// hidden, non-enumerable "__id" property so that old-style call keeps working unchanged.
+static bool getCancelClosureId (JSContext* ctx, JSValueConst value, int* id) {
+    if (!JS_IsObject (value)) {
+	return false;
+    }
+
+    JSValue idProp = JS_GetPropertyStr (ctx, value, "__id");
+    const bool found = !JS_IsUndefined (idProp);
+
+    if (found) {
+	JS_ToInt32 (ctx, id, idProp);
+    }
+
+    JS_FreeValue (ctx, idProp);
+    return found;
+}
+
 JSValue engine_clear_interval (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc != 1) {
 	return JS_ThrowTypeError (ctx, "clearInterval() expects exactly 1 argument, got %d", argc);
@@ -90,7 +111,11 @@ JSValue engine_clear_interval (JSContext* ctx, JSValueConst this_val, int argc, 
     }
 
     int id = 0;
-    JS_ToInt32 (ctx, &id, argv[0]);
+
+    if (!getCancelClosureId (ctx, argv[0], &id)) {
+	JS_ToInt32 (ctx, &id, argv[0]);
+    }
+
     it->second.clearInterval (id);
     return JS_UNDEFINED;
 }
@@ -107,7 +132,11 @@ JSValue engine_clear_timeout (JSContext* ctx, JSValueConst this_val, int argc, J
     }
 
     int id = 0;
-    JS_ToInt32 (ctx, &id, argv[0]);
+
+    if (!getCancelClosureId (ctx, argv[0], &id)) {
+	JS_ToInt32 (ctx, &id, argv[0]);
+    }
+
     it->second.clearTimeout (id);
     return JS_UNDEFINED;
 }
@@ -136,6 +165,53 @@ JSValue engine_is_portrait (JSContext* ctx, JSValueConst this_val, int argc, JSV
     return JS_NewBool (ctx, scene.getHeight () > scene.getWidth ());
 }
 
+JSValue engine_cancel_interval (
+    JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValueConst* func_data
+) {
+    int instanceId = 0;
+    int id = 0;
+    JS_ToInt32 (ctx, &instanceId, func_data[0]);
+    JS_ToInt32 (ctx, &id, func_data[1]);
+
+    const auto it = engineInstances.find (instanceId);
+
+    if (it != engineInstances.end ()) {
+	it->second.clearInterval (id);
+    }
+
+    return JS_UNDEFINED;
+}
+
+JSValue engine_cancel_timeout (
+    JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValueConst* func_data
+) {
+    int instanceId = 0;
+    int id = 0;
+    JS_ToInt32 (ctx, &instanceId, func_data[0]);
+    JS_ToInt32 (ctx, &id, func_data[1]);
+
+    const auto it = engineInstances.find (instanceId);
+
+    if (it != engineInstances.end ()) {
+	it->second.clearTimeout (id);
+    }
+
+    return JS_UNDEFINED;
+}
+
+// builds the Function that setInterval/setTimeout return to script: calling it cancels the
+// pending interval/timeout, matching real WE's documented behavior (lib.sceneScript.d.ts).
+// instanceId/id are plain QuickJS ints (immediate values, not heap-allocated), so they need no
+// JS_DupValue/JS_FreeValue bookkeeping despite being handed to JS_NewCFunctionData as JSValues.
+static JSValue makeCancelClosure (JSContext* ctx, uint32_t instanceId, uint32_t id, JSCFunctionData* cancelFn) {
+    JSValueConst boundData[]
+	= { JS_NewInt32 (ctx, static_cast<int32_t> (instanceId)), JS_NewInt32 (ctx, static_cast<int32_t> (id)) };
+    JSValue closure = JS_NewCFunctionData (ctx, cancelFn, 0, 0, 2, boundData);
+
+    JS_DefinePropertyValueStr (ctx, closure, "__id", JS_NewInt32 (ctx, static_cast<int32_t> (id)), 0);
+    return closure;
+}
+
 JSValue engine_set_interval (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
     if (argc < 1) {
 	return JS_ThrowTypeError (ctx, "setInterval() requires at least 1 argument (callback)");
@@ -159,8 +235,8 @@ JSValue engine_set_interval (JSContext* ctx, JSValueConst this_val, int argc, JS
 	return JS_ThrowReferenceError (ctx, "Could not find engine instance '%d' for setInterval", magic);
     }
 
-    int id = it->second.reserveNextIntervalId (function, delay);
-    return JS_NewInt32 (ctx, id);
+    uint32_t id = it->second.reserveNextIntervalId (function, delay);
+    return makeCancelClosure (ctx, magic, id, engine_cancel_interval);
 }
 
 JSValue engine_set_timeout (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
@@ -186,8 +262,8 @@ JSValue engine_set_timeout (JSContext* ctx, JSValueConst this_val, int argc, JSV
 	return JS_ThrowReferenceError (ctx, "Could not find engine instance '%d' for setTimeout", magic);
     }
 
-    int id = it->second.reserveNextTimeoutId (function, delay);
-    return JS_NewInt32 (ctx, id);
+    uint32_t id = it->second.reserveNextTimeoutId (function, delay);
+    return makeCancelClosure (ctx, magic, id, engine_cancel_timeout);
 }
 
 JSValue engine_register_audio_buffers (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
