@@ -606,12 +606,15 @@ void ApplicationContext::loadSettingsFromArgv () {
     backgroundGroup.add_argument ("--layer")
 	.help (
 	    "Wayland-only: which wlr-layer-shell layer to anchor the wallpaper to "
-	    "(background, bottom, top, overlay). Default: bottom. "
-	    "Use 'background' on niri to pair with the `place-within-backdrop` layer-rule, "
-	    "otherwise the wallpaper will be cloned to every workspace in the overview."
+	    "(background, bottom, top, overlay). Default: 'background' everywhere, except "
+	    "'bottom' when running under niri (detected via $NIRI_SOCKET) to pair with the "
+	    "`place-within-backdrop` layer-rule, without which niri clones the wallpaper to "
+	    "every workspace in the overview. 'background' is required on KDE/KWin to avoid "
+	    "rendering above the desktop's own icon layer, which hides icons and swallows "
+	    "right-clicks meant for the desktop."
 	)
 	.choices ("background", "bottom", "top", "overlay")
-	.default_value (std::string ("bottom"))
+	.default_value (std::string (isRunningUnderNiri () ? "bottom" : "background"))
 	.action ([this] (const std::string& value) -> void {
 	    if (value == "background") {
 		this->settings.render.wayland.layer = WAYLAND_LAYER_BACKGROUND;

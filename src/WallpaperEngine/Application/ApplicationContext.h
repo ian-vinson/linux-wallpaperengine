@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -20,6 +21,22 @@
 
 namespace WallpaperEngine::Application {
 using namespace WallpaperEngine::Data::Assets;
+
+/**
+ * Wayland-only: true when running under niri, detected via the $NIRI_SOCKET
+ * env var niri sets for every process it spawns (the same convention as
+ * $SWAYSOCK on sway or $HYPRLAND_INSTANCE_SIGNATURE on Hyprland). niri's
+ * `place-within-backdrop` layer-rule is the one documented case where the
+ * wlr-layer-shell `bottom` layer is actually the better default (see #585) —
+ * everywhere else `background` is the architecturally correct layer for a
+ * wallpaper surface (see #370: KWin maps `bottom` one layer above its own
+ * desktop-icon surface, hiding icons and swallowing right-clicks on KDE).
+ */
+inline bool isRunningUnderNiri () {
+    const char* socket = std::getenv ("NIRI_SOCKET");
+    return socket != nullptr && socket[0] != '\0';
+}
+
 /**
  * Application information as parsed off the command line arguments
  */
@@ -263,7 +280,7 @@ public:
                 .borderColour = { 0.0f, 0.0f, 0.0f },
             },
             .wayland = {
-                .layer = WAYLAND_LAYER_BOTTOM,
+                .layer = isRunningUnderNiri () ? WAYLAND_LAYER_BOTTOM : WAYLAND_LAYER_BACKGROUND,
             },
         },
         .audio = {
