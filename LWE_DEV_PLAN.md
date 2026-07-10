@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-09 (#28 DONE — engine.setTimeout/setInterval now return a real callable cancel closure via JS_NewCFunctionData, matching real WE's documented behavior confirmed directly against lib.sceneScript.d.ts. Kept backward compatibility with the old clearTimeout(t)/clearInterval(t) numeric-id path via a hidden __id property. Verified against a live-built binary: direct-call cancellation genuinely works, uncancelled timers unaffected, and the actual #22 crashing idiom (recovered via byte-level extraction from a real wallpaper's compiled scene.pkg, present in 14 wallpapers via a shared template) now cancels cleanly instead of throwing. Full regression clean, cross-checked against coredumpctl. Active Priority Order: #25, #31, #32)
+**Last updated:** 2026-07-09 (#31 DONE — batch_test.py's crash-detection string check narrowed from the bare substring "terminate" to the specific libstdc++ message "terminate called after throwing", resolving #30's original false positive (a shader compiler's own benign "compilation terminated" diagnostic) without losing real detection capability. Verified via 7/7 synthetic scenarios (the original 6 from #27 plus the new case), direct confirmation against #30's actual wallpaper, and a full regression cross-checked against coredumpctl. Documentation-only closure — batch_test.py lives outside this repo. Active Priority Order: #25, #32)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -341,20 +341,6 @@ genuinely reproducible, not a one-off. Pre-existing, unrelated to
 backtrace/root-cause pass the same way `#22`/`#29` got, rather than
 assumed to be some other already-understood bug.
 
-### #31 — small hardening: `batch_test.py`'s `"terminate"` string check has a false-positive hazard on benign compiler diagnostics
-
-Found 2026-07-08 while investigating `#30` (which turned out to have no
-real bug behind it — see Completed Items). The current check
-(`"terminate" in combined.lower()`) matches **any** substring
-containing "terminate," including a shader compiler's own entirely
-benign diagnostic text (`"compilation terminated"`). This is a genuine
-false-positive class distinct from — and the opposite direction of —
-`#27`'s original fix (which was about real crashes being *under*-
-detected). Small, well-understood fix whenever picked up: require the
-more specific phrase `"terminate called after throwing"` (the actual
-libstdc++ message for an uncaught C++ exception) rather than the bare
-substring `"terminate"`.
-
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -363,6 +349,46 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #31 — DONE 2026-07-09: `batch_test.py`'s `"terminate"` string check narrowed, false-positive resolved
+
+Small, precise fix: narrowed the crash-detection string check (line
+185) from the bare substring `"terminate"` to the specific libstdc++
+message `"terminate called after throwing"`, with a short comment
+explaining why. Sits entirely after `#27`'s signal-code check, which
+remains untouched and stays the primary, authoritative crash signal —
+this only narrows the secondary string-based fallback.
+
+**Verification, all real**:
+- 7/7 synthetic scenarios pass — the original 6 from `#27`
+  (`SIGSEGV`, `SIGABRT`, clean exit, terminate-string-without-signal,
+  unbounded hang, invalid-UTF-8-before-timeout) plus the new `#31`-
+  specific case (a synthetic "compilation terminated" diagnostic with a
+  nonzero exit) — confirmed the new case now correctly classifies as
+  *not* `CRASH`.
+- **`#30`'s original false positive directly resolved**: wallpaper
+  `2974757317` no longer gets flagged as `CRASH` — confirmed its raw
+  output contains the exact benign `"compilation terminated"`
+  diagnostic that previously triggered the false match, now correctly
+  tagged `GLSL_COMPILE_FAIL`/`GLSL_ERROR`/`OBJECT_SETUP_FAIL` under
+  `ERRORS` instead. (In the full batch run it happened to come back
+  `CLEAN` rather than `ERRORS` — expected, consistent with `#30`'s own
+  finding that this wallpaper's GLSL failure is itself non-deterministic
+  across run contexts, unrelated to this fix; the only thing that
+  matters here is it never appears in the crash list.)
+- A real `std::terminate()` (a synthetic script producing the actual
+  libstdc++ message) with a nonzero exit still correctly classifies as
+  `CRASH` — the narrowing didn't lose real detection capability.
+- Full 358-wallpaper regression: 356 clean, 1 pre-existing GLSL error
+  (Chainsaw Man), 1 pre-existing crash (Blue Archive, `SIGFPE`) —
+  identical to the established baseline, zero new failures.
+  Cross-checked against `coredumpctl`: exactly one coredump during the
+  run window, matching that same pre-existing crash by PID and signal.
+
+Since `batch_test.py` lives outside this git repository entirely
+(confirmed earlier this session — no git history for it at all), this
+closes as a documentation-only update; there's no engine-repo commit
+for this fix.
 
 ### #28 — DONE 2026-07-09: `engine.setTimeout`/`setInterval` now return a real callable cancel closure, matching real WE's documented behavior
 
