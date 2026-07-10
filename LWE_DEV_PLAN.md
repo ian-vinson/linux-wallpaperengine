@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-10 (#32 DONE — Blue Archive's SIGFPE fixed, a genuine integer modulo-by-zero in CParticle's map-sequence-around-control-point initializer (the wallpaper's own particle config explicitly sets "count": 0, and integer % 0 traps as SIGFPE on x86 unlike the adjacent, otherwise-identical float division which just yields inf/nan). Fixed with a clamp at the read site matching the code's own documented default. Verified via 12/12 clean repeated runs, zero new coredumps, and a full regression (357 clean, 1 pre-existing unrelated error, 0 crashes). Active Priority Order: #25)
+**Last updated:** 2026-07-10 (#25 CLOSED — --playlist was already fully implemented (merged upstream via a real commit predating this fork's own fix history), caught before any wasted design effort. Confirmed live, not just by code reading: backed up the real Steam config.json, ran a real 2-item timed test playlist for 75s, confirmed a clean rotation with zero errors, then restored the original config (byte-verified) and confirmed the source tree clean. Two combinations left genuinely untested (video/web types mid-playlist, multi-screen span groups + playlist) — noted, not confirmed broken. This closes the last item on the entire tracked list — Priority Order is now empty)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,40 +296,9 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #25 — Wallpaper playlist rotation (`--playlist`), a substantial standalone feature, from NeXx42's engine fork
-
-Researched 2026-07-07, same source as `#17`/`#23`/`#24`. This is a real,
-complete, non-trivial feature, not a small flag — worth scoping as its
-own larger session rather than a quick add.
-
-Uses **Wallpaper Engine's own `config.json` playlist format** directly
-(not a custom format built from scratch) — `--playlist <name>` resolves
-a named playlist from config, applies per-screen if used after
-`--screen-root`, otherwise used in windowed mode. Confirmed via
-`WallpaperApplication::advancePlaylist()`: a genuinely complete rotation
-system —
-- Sequential or random order (`playlist.definition.settings.order`),
-  reshuffling on each full cycle for random mode.
-- Timed rotation via `delayMinutes`, tracked per-playlist with a real
-  `nextSwitch` timestamp (`std::chrono::steady_clock`).
-- **Preflight validation** — `preflightWallpaper()` checks a candidate
-  loads successfully before committing to it; failed items are recorded
-  (`failedIndices`) and skipped on future rotations; if every item in a
-  playlist fails, logs an error and keeps the current wallpaper rather
-  than crashing or going blank.
-- **Live hot-swap mid-run** — loads the next background, re-runs
-  `setupPropertiesForProject`/`ensureBrowserForProject` for it, and
-  explicitly carries over per-screen settings (scaling, clamp, and — for
-  a fork with `#17`'s UV offset — UV offset too) to the newly-loaded
-  wallpaper rather than resetting to defaults.
-
-**Scope for whenever this is picked up**: this is a real feature-sized
-addition (a new `ActivePlaylist`-equivalent state struct, a real
-rotation/timing loop integrated into the main render loop, preflight
-validation, config.json playlist parsing) — closer in size to `#5`
-(Mat4/Mat3) or `#14` (the use-after-free redesign) than to `#17`'s
-single-mechanism port. Worth its own dedicated scoping pass before
-starting, not a quick pickup.
+**Nothing currently tracked as open.** Every item investigated through
+2026-07-10 is closed — see Completed Items below. The next open item,
+whenever one surfaces, gets the next unused number (`#33`).
 
 ---
 
@@ -339,6 +308,64 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #25 — CLOSED 2026-07-10: `--playlist` was already fully implemented — confirmed via real, live testing, not just code reading
+
+The largest, most substantial item remaining on the entire list turned
+out to already exist, complete and production-quality — the same
+pattern that recurred throughout this whole comparative-research
+thread (`#16`'s puppet mesh, `#26`'s parallax/fullscreen-pause). Caught
+*before* any wasted design/implementation effort, not after.
+
+**Traced to a real, dated upstream commit**: merged via `22cd4f1`,
+*"Add playlist support (#429)"* (2025-12-09, author RFYates) — well
+before this fork's own fix history begins (2026-06-28). Not a stub:
+
+- Real `--playlist <name>` CLI flag (visible in `--help`), applying
+  per-screen when placed after `--screen-root`, or window-mode
+  otherwise — exactly the semantics originally researched from
+  NeXx42's fork.
+- `config.json` parsing matches real Wallpaper Engine's actual schema
+  (`steamuser.general.playlists[]` and
+  `steamuser.wallpaperconfig.selectedwallpapers.<screen>.playlist`),
+  including Windows path-translation quirks (`\\?\` prefix,
+  backslashes, drive letters) — a strong, specific signal this was
+  built against real Windows Wallpaper Engine config samples, not
+  guessed at.
+- Sequential/random order with reshuffle-on-full-cycle
+  (`buildPlaylistOrder`, `advancePlaylist`).
+- Timer-based rotation via `steady_clock`, with pause-duration
+  compensation (`nextSwitch`/`lastUpdate` correctly adjusted across
+  fullscreen pauses).
+- Real preflight validation: `preflightWallpaper()` parses
+  `project.json` and checks required fields before committing to a
+  candidate — not a reactive `try`/`catch`.
+- Failed-item tracking (`failedIndices`) skipping bad items on future
+  rotations, with a genuine "all items failed → keep current
+  wallpaper, retry later" fallback.
+- Live hot-swap already carries over all of `#17`/`#23`'s per-screen
+  settings (scaling, clamp, offset X/Y, contrast, saturation, border
+  colour) to the newly-loaded wallpaper.
+
+**Verified live, not just by reading code** — and handled carefully
+given it touches a real user configuration file: backed up the actual
+Steam `config.json` first, added a temporary 2-item test playlist
+(Blue Archive + a second local wallpaper) with a 1-minute timer, ran
+the binary for 75 seconds. Confirmed via a temporary debug probe
+(fully removed afterward) that it loaded the first wallpaper, then
+cleanly advanced to the second at the correct 60-second mark with zero
+errors and zero crashes afterward. Restored the original `config.json`
+(verified byte-for-byte identical via `md5sum`) and confirmed the
+source tree clean (`git status --short` empty) once finished.
+
+**Not tested, worth knowing if this ever needs deeper scrutiny**:
+video/web wallpaper types mid-playlist rotation, and multi-screen span
+groups combined with a playlist — neither combination was exercised by
+this pass's smoke test. No known issue with either; just genuinely
+untested, not confirmed working.
+
+**This closes the last item on the entire tracked list** — nothing
+remains open as of 2026-07-10.
 
 ### #32 — DONE 2026-07-10: Blue Archive's `SIGFPE` fixed — a genuine integer modulo-by-zero in `CParticle`'s map-sequence-around-control-point initializer
 
