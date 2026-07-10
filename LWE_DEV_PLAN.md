@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-09 (#31 DONE — batch_test.py's crash-detection string check narrowed from the bare substring "terminate" to the specific libstdc++ message "terminate called after throwing", resolving #30's original false positive (a shader compiler's own benign "compilation terminated" diagnostic) without losing real detection capability. Verified via 7/7 synthetic scenarios (the original 6 from #27 plus the new case), direct confirmation against #30's actual wallpaper, and a full regression cross-checked against coredumpctl. Documentation-only closure — batch_test.py lives outside this repo. Active Priority Order: #25, #32)
+**Last updated:** 2026-07-10 (#32 DONE — Blue Archive's SIGFPE fixed, a genuine integer modulo-by-zero in CParticle's map-sequence-around-control-point initializer (the wallpaper's own particle config explicitly sets "count": 0, and integer % 0 traps as SIGFPE on x86 unlike the adjacent, otherwise-identical float division which just yields inf/nan). Fixed with a clamp at the read site matching the code's own documented default. Verified via 12/12 clean repeated runs, zero new coredumps, and a full regression (357 clean, 1 pre-existing unrelated error, 0 crashes). Active Priority Order: #25)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -331,16 +331,6 @@ validation, config.json playlist parsing) — closer in size to `#5`
 single-mechanism port. Worth its own dedicated scoping pass before
 starting, not a quick pickup.
 
-### #32 — Blue Archive (3320489297): `SIGFPE` (integer divide-by-zero), found as a side effect of `#29`'s verification
-
-Found 2026-07-08, confirmed via a matching `coredumpctl` entry during
-`#29`'s spot-check of other real audio-bearing wallpapers, plus present
-again in `#29`'s own final full-corpus regression cross-check —
-genuinely reproducible, not a one-off. Pre-existing, unrelated to
-`#22`/`#27`/`#29`'s fixes. Not yet investigated — needs its own real
-backtrace/root-cause pass the same way `#22`/`#29` got, rather than
-assumed to be some other already-understood bug.
-
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -349,6 +339,48 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #32 — DONE 2026-07-10: Blue Archive's `SIGFPE` fixed — a genuine integer modulo-by-zero in `CParticle`'s map-sequence-around-control-point initializer
+
+Root-caused via a real `gdb` backtrace on a coredump, reproducing 100%
+reliably (crashed within seconds every time before the fix).
+
+**Crash site**:
+`CParticle::createMapSequenceAroundControlPointInitializer`
+(`CParticle.cpp:941`) does `sequenceIndex = (sequenceIndex + 1) %
+count;` — an integer modulo, not float division. Blue Archive's own
+particle config (`halo_1` material, initializer id 8) explicitly
+specifies `"count": 0` for this initializer. Integer `% 0` traps as a
+real `SIGFPE` on x86 — **unlike the adjacent float division on the line
+directly above, using the exact same `count` value**, which just
+produces `inf`/`nan` and doesn't crash at all. That asymmetry between
+two adjacent lines dividing by the same variable is exactly why only
+the modulo was the actual killer, and why this bug could sit latent
+for however long despite the float division right next to it silently
+producing garbage the whole time.
+
+**Fix**: clamp `count` to `std::max(1, static_cast<int>
+(countValue->getFloat ()))` right at the read site, matching the
+code's own documented default value (`1`) already used when the JSON
+field is absent from a wallpaper's config entirely — a genuine guard
+against the zero value itself, not a `try`/`catch` (a `SIGFPE` from an
+integer divide isn't a C++ exception and can't be caught that way at
+all).
+
+**Verification, all real**:
+- Clean, fast targeted rebuild (just `CParticle.cpp` recompiled and
+  relinked, ~9s).
+- **12 back-to-back 15-second runs of Blue Archive: zero crashes** — all
+  previously crashed within seconds; all now run the full duration and
+  exit cleanly via `SIGTERM`.
+- `coredumpctl` confirmed no new coredumps since the fix.
+- Spot-checked all 113 local wallpapers containing any literal
+  `"count": 0` field — none else combine it with this specific
+  initializer, but the fix is generic to the code path, so it protects
+  any future wallpaper that hits it too.
+- Full 358-wallpaper regression: **357 clean, 1 error, 0 crashes** —
+  Blue Archive now appears in the clean list; the one remaining error
+  is the same already-documented, unrelated Chainsaw Man GLSL flake.
 
 ### #31 — DONE 2026-07-09: `batch_test.py`'s `"terminate"` string check narrowed, false-positive resolved
 
