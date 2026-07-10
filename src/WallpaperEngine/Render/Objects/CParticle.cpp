@@ -934,7 +934,12 @@ CParticle::createMapSequenceAroundControlPointInitializer (const MapSequenceArou
     return [this, controlPointValue, countValue, speedMinValue, speedMaxValue, sequenceIndex,
 	    speedOverride] (ParticleInstance& p) mutable {
 	int controlPoint = static_cast<int> (controlPointValue->getFloat ());
-	int count = static_cast<int> (countValue->getFloat ());
+	// Some particle configs specify a "count" of 0 (e.g. this initializer left
+	// unused/untuned by the wallpaper author). Guard against it: it's the divisor
+	// below (both the float angle division and the integer wraparound modulo),
+	// and an integer "% 0" traps as SIGFPE on x86, unlike float division which
+	// would merely produce inf/nan.
+	int count = std::max (1, static_cast<int> (countValue->getFloat ()));
 
 	// Calculate angle for this particle in the sequence (evenly distributed around circle)
 	float angle = (static_cast<float> (sequenceIndex) / static_cast<float> (count)) * glm::two_pi<float> ();
