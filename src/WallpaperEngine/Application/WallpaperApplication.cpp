@@ -1234,6 +1234,20 @@ void WallpaperApplication::show () {
     while (this->m_context.state.general.keepRunning) {
 	render ();
     }
+
+    // Explicitly tear down the render context (and everything it owns --
+    // CScene -> CSound -> AudioStream) here, before cleanup()'s SDL_Quit().
+    // AudioStream's destructor joins its SDL-created audio_read_thread
+    // (SDL_WaitThread), but that would otherwise only happen later, inside
+    // ~WallpaperApplication() when `delete app` runs back in main() -- i.e.
+    // AFTER SDL_Quit(). SDL_Quit() tearing down SDL's thread/audio subsystems
+    // while that thread is still alive and running is what caused a
+    // confirmed, reproducible SIGSEGV (audio_read_thread mid-loop when
+    // SDL_Quit() invalidated state out from under it -- see #37). Resetting
+    // the unique_ptr here is safe: the later implicit destructor just sees a
+    // null pointer and no-ops.
+    this->m_renderContext.reset ();
+
     cleanup ();
 }
 
