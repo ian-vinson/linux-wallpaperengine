@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-10 (#25 CLOSED — --playlist was already fully implemented (merged upstream via a real commit predating this fork's own fix history), caught before any wasted design effort. Confirmed live, not just by code reading: backed up the real Steam config.json, ran a real 2-item timed test playlist for 75s, confirmed a clean rotation with zero errors, then restored the original config (byte-verified) and confirmed the source tree clean. Two combinations left genuinely untested (video/web types mid-playlist, multi-screen span groups + playlist) — noted, not confirmed broken. This closes the last item on the entire tracked list — Priority Order is now empty)
+**Last updated:** 2026-07-10 (#33 DONE — Wayland --layer now defaults to background except under niri, fixing KDE desktop icons/right-click (upstream #370). Verified live via KWin's own w.layer property: default→DesktopLayer matching icons, explicit bottom→BelowLayer reproducing the original bug, simulated niri→BelowLayer preserving niri's behavior. A real emergency (HDMI-A-2 going black) surfaced right after and was investigated and ruled unrelated — --layer bottom also produced black on that output, definitively clearing this fix; root cause was very likely a rapid kill/respawn race from quick repeated wallpaper switches, resolved on its own once switching stopped. Two real findings from that episode added as new items: #34 (a silent no-op with no log trace if a viewport name isn't found) and #35 (a Mural-side debounce fix, cross-project). Active Priority Order: #34, #35)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,9 +296,58 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-**Nothing currently tracked as open.** Every item investigated through
-2026-07-10 is closed — see Completed Items below. The next open item,
-whenever one surfaces, gets the next unused number (`#33`).
+### #34 — `RenderContext::render()` silently does nothing if a viewport's name isn't found in the wallpaper map
+
+Found 2026-07-10 during the HDMI-A-2 black-screen investigation (see
+`#33` below) — this specific bug was **not** confirmed to be the actual
+cause that day (the real explanation was almost certainly a rapid
+kill/respawn race from repeated `SetWallpaper` calls in quick
+succession), but it's a real, independent soft spot found along the
+way: if a viewport's name is ever not found in the wallpaper map at
+render time, `RenderContext::render()` just silently does nothing —
+producing exactly a silent black frame with zero log trace, and no way
+to distinguish "this specific bug" from "still mid-restart" or any
+other black-screen cause after the fact. Small, well-understood fix
+whenever picked up: add a real log line (output name, and ideally
+which wallpaper IDs *are* currently mapped) at that exact point, so any
+future occurrence of this failure mode is immediately visible and
+diagnosable instead of presenting as an unexplained black screen.
+
+### #35 — Mural: debounce rapid wallpaper-switch requests to avoid kill/respawn races (cross-project — Mural, not this fork)
+
+Found 2026-07-10, same investigation as `#33`/`#34`. Every wallpaper
+change means this fork's binary gets fully killed and relaunched from
+scratch (new EGL context, new layer-shell surface, new decode
+pipeline) — there's no way to swap displayed content without a full
+process restart. When Mural (or a user clicking quickly) issues several
+`SetWallpaper` calls in rapid succession, a new process can get killed
+again before it finishes getting through layer-surface configure →
+first frame → commit, producing a real, user-visible black screen that
+looks like a crash but isn't one.
+
+**This is a Mural-side fix, not an engine change** — tracked here for
+visibility since it was found during this fork's own investigation, but
+belongs in Mural's own codebase/backlog. Two real options, not mutually
+exclusive:
+- **Debounce** rapid switch requests in Mural itself — coalesce several
+  quick `SetWallpaper` calls into "switch to whatever was requested
+  *last*," rather than literally respawning the process for every
+  intermediate request. Directly removes the triggering condition.
+- **A real readiness handshake**: have this fork's binary emit
+  something clear and machine-parseable once a given output has
+  actually rendered its first real frame (a distinct log line, a
+  touched state file, or a D-Bus signal — this fork's own git history
+  shows a prior move toward D-Bus-based control, worth checking if
+  that infrastructure already has a hook for this), and have Mural wait
+  for that signal before accepting another switch request for that
+  screen. Turns "hope the timing works out" into an actual, checkable
+  handshake.
+
+A more fundamental fix — letting Mural swap displayed content on an
+output without a full process teardown/rebuild — was also discussed as
+a real, more substantial architectural improvement, but deliberately
+not scoped here; worth its own dedicated investigation later rather
+than bundling into this reactive fix.
 
 ---
 
@@ -308,6 +357,74 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #33 — DONE 2026-07-10: default Wayland `--layer` to `background` except under niri, fixing KDE desktop icons/right-click (upstream Almamu/linux-wallpaperengine#370)
+
+Investigated from a real user report (a separate KDE plugin,
+`CaptSilver/wallpaper-engine-kde-plugin`, was researched first and
+found to share zero code with this fork — a genuinely separate native
+Plasma wallpaper plugin, nothing to port, but its existence confirmed
+this class of problem is architecturally solvable).
+
+**Root cause, confirmed against KWin's own current source
+(`layershellv1window.cpp`)**: `--layer`'s default of `bottom` resolves
+to KWin's `BelowLayer`, while plasmashell's own desktop-icon
+containment resolves to `DesktopLayer`, with `DesktopLayer <
+BelowLayer` in KWin's layer ordering — the wallpaper sits one layer
+above the desktop icons by construction, guaranteed to occlude them and
+capture right-clicks meant for the desktop. The `bottom` default was
+deliberately introduced in `9e200e4` (`#585`) specifically for niri's
+`place-within-backdrop` layer-rule (without which niri clones the
+wallpaper into every workspace-overview card) — KDE was never part of
+that decision, and the global default was never revisited for it.
+
+**Fix**: new `isRunningUnderNiri()` (`ApplicationContext.h`), checking
+`$NIRI_SOCKET` — the same environment-variable convention niri itself
+uses, matching `$SWAYSOCK`/`$HYPRLAND_INSTANCE_SIGNATURE` precedent on
+other compositors. The default now resolves to `WAYLAND_LAYER_BOTTOM`
+only under niri, `WAYLAND_LAYER_BACKGROUND` everywhere else (including
+KDE and any other/unknown compositor). Applied consistently to both the
+real settings-struct default and `--layer`'s own reported
+`default_value`/help text. `--layer`'s explicit override is completely
+untouched. `mouse.enabled` deliberately left at `true` — a legitimate,
+widely-used core feature for interactive wallpapers across all
+compositors; the confirmed fix belongs at the layer level, not by
+disabling input globally for an unconfirmed, narrower risk.
+
+**Verified on a real, live KDE Plasma 6.7.2 Wayland session** via
+KWin's own scripting API, which turned out to expose `w.layer` as a
+plain numeric property (found by enumerating object keys) — a more
+decisive signal than the list-position inference used during
+discovery. Three-way confirmation, all with exact numeric values:
+default (no niri) → `layer=0` (`DesktopLayer`, matching the desktop
+icons); explicit `--layer bottom` → `layer=1` (`BelowLayer`,
+reproducing the original bug — proving the numeric distinction is
+real); simulated niri (`NIRI_SOCKET` set) → `layer=1` (`BelowLayer`,
+niri's original behavior fully preserved). Clean build. 3 local
+web-type wallpapers spot-checked directly (no dedicated web-corpus
+harness exists in this environment). Full 358-wallpaper scene
+regression: 357 clean, 1 pre-existing unrelated error, 0 crashes, 0 new
+coredumps.
+
+**A real, separate emergency surfaced immediately after this fix
+landed, investigated and resolved as unrelated**: the user's main
+monitor (HDMI-A-2) went solid black shortly after. Directly ruled out
+this fix as the cause via a real, controlled test — `--layer bottom`
+(the known-good, pre-existing setting) *also* produced black on that
+specific output, definitively proving the layer-default change wasn't
+responsible. Root-caused (with real, if not airtight, confidence) to a
+rapid kill/respawn race: every wallpaper switch fully kills and
+relaunches this fork's process from scratch, and several `SetWallpaper`
+calls in quick succession (both manual testing and Mural's own UI) very
+likely killed new process instances before they finished getting
+through layer-surface configure → first frame → commit. Confirmed via
+a real screenshot that both monitors render correctly once switching
+stopped. Zero code changes were needed for the black-screen episode
+itself — it resolved on its own once the rapid switching stopped. Two
+real, independent findings from this episode tracked separately as
+`#34` (a genuine soft spot: silent no-op with no log trace if a
+viewport name isn't found) and `#35` (a Mural-side debounce
+fix — cross-project, not an engine change).
 
 ### #25 — CLOSED 2026-07-10: `--playlist` was already fully implemented — confirmed via real, live testing, not just code reading
 
