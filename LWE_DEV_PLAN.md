@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-10 (#33 DONE — Wayland --layer now defaults to background except under niri, fixing KDE desktop icons/right-click (upstream #370). Verified live via KWin's own w.layer property: default→DesktopLayer matching icons, explicit bottom→BelowLayer reproducing the original bug, simulated niri→BelowLayer preserving niri's behavior. A real emergency (HDMI-A-2 going black) surfaced right after and was investigated and ruled unrelated — --layer bottom also produced black on that output, definitively clearing this fix; root cause was very likely a rapid kill/respawn race from quick repeated wallpaper switches, resolved on its own once switching stopped. Two real findings from that episode added as new items: #34 (a silent no-op with no log trace if a viewport name isn't found) and #35 (a Mural-side debounce fix, cross-project). Active Priority Order: #34, #35)
+**Last updated:** 2026-07-11 (#38 DONE — built tools/visual_triage.py, a real triage pipeline beyond crash/error-log detection (object-count cross-reference, resolution-scaling correctness, blank-frame detection, motion-sanity check). Found and fixed two real bugs in the tool's own logic along the way, same self-correcting discipline as every other fix this session. A 40-wallpaper sample run immediately surfaced two major findings, now HIGH PRIORITY tracked items: #36, --scaling is a confirmed no-op for any scene with an orthogonal projection (CScene.cpp:84 hardcodes "fill" — affects 35 of 38 sampled wallpapers, ~25.6% forced crop on the user's ultrawide monitor, likely the real explanation behind the user's original "objects out of place" concern, unrelated to #16's narrow puppet-mesh fix); #37, a confirmed intermittent shutdown-race SIGSEGV (a background audio thread reads the app context after the main thread starts tearing it down, found via two independent stack traces) — plausibly connected to the earlier HDMI-A-2 incident (#33), not yet verified. Also found #39, a smaller, separate, deterministic null-deref crash. Active Priority Order: #36, #37, #39, #34, #35)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,6 +296,95 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
+### #36 — HIGH PRIORITY: `--scaling` is a confirmed no-op for any scene with an orthogonal projection
+
+Found 2026-07-11 via the new visual-triage tool (`#38`, see Completed
+Items) — this is very likely the actual root cause behind the user's
+broader "objects/content out of place" concern, not a per-wallpaper
+puppet-mesh issue (`#16`'s fix was narrow and unrelated — confirmed
+both its originally-reported wallpapers render correctly; this is a
+separate, much more widespread bug).
+
+**Root cause, confirmed at the source**:
+`src/WallpaperEngine/Render/Wallpapers/CScene.cpp:84` unconditionally
+calls `setScalingMode(WallpaperState::TextureUVsScaling::ZoomFillUVs)`
+for *any* scene with an orthogonal projection (auto or explicit) —
+silently overwriting whatever `--scaling` mode was actually requested
+via CLI or Mural. Confirmed empirically first: all four `--scaling`
+modes produced pixel-identical screenshots for every scene wallpaper
+tested, which is what triggered the source-level investigation rather
+than assuming the test methodology was simply wrong.
+
+**Real-world impact, quantified**: of 38 sampled wallpapers with a
+declared native canvas size, 35 have this problem. On the user's actual
+monitor (3440×1440, an ultrawide), a typical 16:9-authored scene
+(the most common authoring aspect ratio) always renders in forced
+"fill"/crop-to-cover behavior regardless of any setting, losing a fixed
+**~25.6% of its content** to cropping — completely unfixable at the
+CLI/Mural level today, since the engine ignores the setting entirely.
+This is a single engine-wide bug, not 35 independent per-wallpaper
+defects.
+
+**Scope for whenever this is picked up**: find why line 84 unconditionally
+forces `ZoomFillUVs` rather than respecting whatever scaling mode was
+actually configured for the scene/screen — likely either a leftover
+hardcoded default that was never wired up to the real setting, or an
+intentional-but-wrong assumption that orthogonal-projection scenes
+always want fill behavior. Fix should make `--scaling`
+(`stretch`/`fit`/`fill`/`default`) actually apply to orthogonal-projection
+scenes the same way it already does for other wallpaper types — verify
+against real screenshots showing genuinely different output per mode
+this time, not assumed from the code change alone, given the original
+symptom (identical output across all 4 modes) is exactly what a correct
+fix needs to eliminate.
+
+### #37 — HIGH PRIORITY: intermittent shutdown-race `SIGSEGV` — a background audio thread reads app context after the main thread starts tearing it down
+
+Found 2026-07-11 via the new visual-triage tool (`#38`), by chasing 5
+unexplained crashes rather than writing them off as noise. Confirmed
+via two independent `gdb` stack traces on different wallpapers:
+`audio_read_thread` calls `AudioDriver::getApplicationContext()` after
+the main thread has already begun tearing down that context during
+process exit — a genuine data race between the audio thread's
+lifecycle and the main thread's shutdown sequence.
+
+**This explains real, previously-unexplained flakiness observed
+elsewhere this session**: the same wallpaper crashed 3/3 in isolated
+testing but showed "clean" in some full-corpus batch runs — exactly
+the signature of a genuine timing race, not a deterministic bug that
+would always or never trigger. Of a 40-wallpaper sample, 5 hit this
+exact signature (`--dump-structure` printing valid JSON, then crashing
+during exit/teardown) — given the race-condition nature, the true
+incidence across the full corpus and across *normal* wallpaper exit
+(not just this specific diagnostic flag) is very plausibly higher than
+5/40, and **very plausibly relevant to the HDMI-A-2 black-screen
+incident (`#33`)** — that incident's own leading theory was a rapid
+kill/respawn race, and this is a real, confirmed race in exactly the
+shutdown path every kill/respawn cycle exercises. Worth checking for a
+connection when this is picked up, not assumed connected without
+verification.
+
+**Scope for whenever this is picked up**: find and fix the actual
+lifecycle ordering bug — either ensure `audio_read_thread` is fully
+joined/stopped before the main thread begins tearing down the
+application context, or make the audio thread's context access safe
+against a context that's mid-teardown (a null/validity check, or a
+memory-ordering fix, whichever the real code structure calls for once
+examined directly). Verify with the same technique that found it —
+this is a race, so a single clean run proves nothing; needs repeated
+runs (ideally the same higher-volume testing that surfaced it
+originally) showing zero recurrences, not just one pass.
+
+### #39 — small, separate: deterministic null-pointer crash in `CPass::setupTextureUniforms()`, specific to one wallpaper's particle material
+
+Found 2026-07-11 via the same visual-triage sweep as `#36`/`#37`, a
+genuinely separate and much smaller issue — a real null-pointer
+dereference, deterministic (not a race), tied to a specific wallpaper's
+particle material configuration. Not yet scoped further — needs its
+own real repro/wallpaper-ID identification and root-cause trace the
+next time it's picked up (the specific wallpaper wasn't preserved in
+this session's own notes beyond the crash signature itself).
+
 ### #34 — `RenderContext::render()` silently does nothing if a viewport's name isn't found in the wallpaper map
 
 Found 2026-07-10 during the HDMI-A-2 black-screen investigation (see
@@ -357,6 +446,81 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #38 — DONE 2026-07-11: built `tools/visual_triage.py` — a real triage pipeline going beyond crash/error-log detection, immediately found `#36`/`#37`/`#39`
+
+Requested directly: the existing `batch_test.py` harness only classifies
+by log text and exit code — it has never checked whether a wallpaper
+actually *looks* correct. Built a genuinely new, separate tool
+(`tools/visual_triage.py`) with four independent checks, each recording
+its own evidence regardless of what other checks find (final category
+picked by severity at the end, nothing masked or skipped):
+
+1. **Object-count cross-reference** — `--dump-structure --format json`
+   (`#24`)'s declared object count/list vs. how many objects actually
+   survive construction (`CScene::createObject()`'s existing exception
+   logging).
+2. **Resolution-scaling correctness** — originally designed as a real
+   4-screenshot-per-mode render+compare against the user's actual
+   monitor resolution (3440×1440, confirmed via `kscreen-doctor`) — but
+   pivoted mid-build once empirical testing showed all 4 `--scaling`
+   modes producing pixel-identical output, which led directly to
+   `#36`'s discovery. Replaced with an analytical check (no wasted
+   renders) that computes the forced-fill crop percentage from
+   aspect-ratio mismatch alone, since a real screenshot sweep can't
+   show a difference `--scaling` doesn't actually produce.
+3. **Blank/degenerate-frame detection** — flags near-solid-color output
+   via mean per-channel color-stddev, the same failure class `#19`
+   turned out to be, now automatically detectable.
+4. **Motion/animation-sanity check** — for wallpapers with declared
+   particle/text objects, diffs two screenshots ~1s apart using a
+   changed-pixel-*fraction* metric (not a whole-frame mean diff, which a
+   small/localized moving element in a large static scene can dilute
+   below detection).
+
+**Two real bugs found and fixed in the tool's own logic, exactly the
+same self-correcting discipline applied to every other fix this
+session** — caught via genuine anomalies in its own output, not
+assumed correct just because it ran:
+- An early version misclassified "we killed this process after our own
+  timeout" the same as "it crashed on its own" (Python's `subprocess`
+  reports a negative return code for both) — produced a false 30/40
+  "crash" rate on the first full sample run before the fix. Corrected
+  by tracking whether the harness itself issued the kill.
+- `run_dump_structure()`'s "did valid JSON come out" check alone missed
+  processes that print a complete, valid dump and *then* crash during
+  teardown — exactly `#37`'s shutdown-race signature. Fixed to track
+  and report both signals independently, which is precisely what
+  surfaced `#37` in the first place.
+
+**Real 40-wallpaper sample run** (stride-sampled across ~440 scene
+wallpapers for diversity, not the full corpus given time cost):
+28 clean, 7 crash, 3 no-motion-detected, 2 error, 0
+object-count-mismatch, 0 blank-frame. Findings from the 7 crashes and
+the scaling-anomaly analysis are tracked as `#36` (the systemic
+`--scaling` no-op), `#37` (the shutdown-race `SIGSEGV`, found by
+chasing the crash cases rather than writing them off), and `#39` (one
+separate, deterministic null-deref). A real, published HTML report was
+produced summarizing all findings with the systemic scaling issue
+framed clearly as *one engine bug affecting many wallpapers*, not a
+list of independent per-wallpaper defects.
+
+**Known limitations, documented in the tool itself rather than
+hidden**: `--screenshot-delay` is frame-capped, not time-based, so the
+motion check's ~1s window can't detect slow, multi-second-scale motion
+(e.g. gradual parallax drift) — a real constraint of the CLI surface,
+not a simplification of convenience. `--dump-structure`'s JSON has no
+position/origin field at all (confirmed against `JsonPrinter.cpp`), so
+true projected-coordinate placement checking isn't currently possible
+from this data — the scaling check works analytically from aspect
+ratio alone instead. GPU contention from the user's own live desktop
+wallpaper process (continuously rendering throughout this session)
+measurably slowed some runs, requiring the per-run timeout to be raised
+from 25s to 45s.
+
+Tool is reusable going forward: `python3 tools/visual_triage.py
+--sample N` or `--ids <id>...`, output at
+`tools/results/visual_triage.{json,md}`.
 
 ### #33 — DONE 2026-07-10: default Wayland `--layer` to `background` except under niri, fixing KDE desktop icons/right-click (upstream Almamu/linux-wallpaperengine#370)
 
