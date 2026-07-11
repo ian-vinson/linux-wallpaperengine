@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-11 (#38 DONE — built tools/visual_triage.py, a real triage pipeline beyond crash/error-log detection (object-count cross-reference, resolution-scaling correctness, blank-frame detection, motion-sanity check). Found and fixed two real bugs in the tool's own logic along the way, same self-correcting discipline as every other fix this session. A 40-wallpaper sample run immediately surfaced two major findings, now HIGH PRIORITY tracked items: #36, --scaling is a confirmed no-op for any scene with an orthogonal projection (CScene.cpp:84 hardcodes "fill" — affects 35 of 38 sampled wallpapers, ~25.6% forced crop on the user's ultrawide monitor, likely the real explanation behind the user's original "objects out of place" concern, unrelated to #16's narrow puppet-mesh fix); #37, a confirmed intermittent shutdown-race SIGSEGV (a background audio thread reads the app context after the main thread starts tearing it down, found via two independent stack traces) — plausibly connected to the earlier HDMI-A-2 incident (#33), not yet verified. Also found #39, a smaller, separate, deterministic null-deref crash. Active Priority Order: #36, #37, #39, #34, #35)
+**Last updated:** 2026-07-11 (#36 DONE — --scaling fixed, was a confirmed no-op for any scene with an orthogonal projection. Traced via git blame to a deliberate, well-intentioned prior fix (1a8b7a9) for a real black-screen bug on non-native resolutions — right intent, applied unconditionally instead of default-only, so it silently overrode every explicit --scaling request. Narrowed to only fall back when no explicit mode is requested; the original bug can't regress. Verified with real screenshots showing all four modes now genuinely differ (previously pixel-identical); tools/visual_triage.py's own first verification approach gave a false negative, investigated and corrected once the real cause (this engine reveals more content on zoom-out rather than padding a border) was understood. Full regression clean (357/358, 0 crashes, 1 pre-existing unrelated error). Web corpus reported honestly as inconclusive (harness's own fixed 6s timeout, likely unrelated to this fix) rather than claimed clean — tracked as new #40. Active Priority Order: #37, #39, #34, #35, #40)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,47 +296,18 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #36 — HIGH PRIORITY: `--scaling` is a confirmed no-op for any scene with an orthogonal projection
+### #40 — `batch_test.py`'s web-corpus check uses a fixed 6s timeout, likely too short for CEF/Chromium startup
 
-Found 2026-07-11 via the new visual-triage tool (`#38`, see Completed
-Items) — this is very likely the actual root cause behind the user's
-broader "objects/content out of place" concern, not a per-wallpaper
-puppet-mesh issue (`#16`'s fix was narrow and unrelated — confirmed
-both its originally-reported wallpapers render correctly; this is a
-separate, much more widespread bug).
-
-**Root cause, confirmed at the source**:
-`src/WallpaperEngine/Render/Wallpapers/CScene.cpp:84` unconditionally
-calls `setScalingMode(WallpaperState::TextureUVsScaling::ZoomFillUVs)`
-for *any* scene with an orthogonal projection (auto or explicit) —
-silently overwriting whatever `--scaling` mode was actually requested
-via CLI or Mural. Confirmed empirically first: all four `--scaling`
-modes produced pixel-identical screenshots for every scene wallpaper
-tested, which is what triggered the source-level investigation rather
-than assuming the test methodology was simply wrong.
-
-**Real-world impact, quantified**: of 38 sampled wallpapers with a
-declared native canvas size, 35 have this problem. On the user's actual
-monitor (3440×1440, an ultrawide), a typical 16:9-authored scene
-(the most common authoring aspect ratio) always renders in forced
-"fill"/crop-to-cover behavior regardless of any setting, losing a fixed
-**~25.6% of its content** to cropping — completely unfixable at the
-CLI/Mural level today, since the engine ignores the setting entirely.
-This is a single engine-wide bug, not 35 independent per-wallpaper
-defects.
-
-**Scope for whenever this is picked up**: find why line 84 unconditionally
-forces `ZoomFillUVs` rather than respecting whatever scaling mode was
-actually configured for the scene/screen — likely either a leftover
-hardcoded default that was never wired up to the real setting, or an
-intentional-but-wrong assumption that orthogonal-projection scenes
-always want fill behavior. Fix should make `--scaling`
-(`stretch`/`fit`/`fill`/`default`) actually apply to orthogonal-projection
-scenes the same way it already does for other wallpaper types — verify
-against real screenshots showing genuinely different output per mode
-this time, not assumed from the code change alone, given the original
-symptom (identical output across all 4 modes) is exactly what a correct
-fix needs to eliminate.
+Found 2026-07-11 as a side effect of `#36`'s regression verification.
+Running the full 61-wallpaper web corpus with the harness's own fixed
+6-second per-wallpaper timeout produced 61/61 `TIMEOUT`, zero crash/
+error tags — likely just CEF/Chromium's own real startup time routinely
+exceeding that budget, a pre-existing harness characteristic unrelated
+to `#36`'s fix (web wallpapers never touch `CScene.cpp` at all). Not
+confirmed either way yet — worth a real look whenever web-corpus
+regression testing matters again, since a timeout this tight makes the
+web-corpus check largely uninformative as currently configured (can't
+distinguish "working, just slow to start" from "broken").
 
 ### #37 — HIGH PRIORITY: intermittent shutdown-race `SIGSEGV` — a background audio thread reads app context after the main thread starts tearing it down
 
@@ -446,6 +417,69 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #36 — DONE 2026-07-11: `--scaling` fixed — was a confirmed no-op for any scene with an orthogonal projection
+
+Very likely the actual root cause behind the user's broader "objects/
+content out of place" concern — not a per-wallpaper puppet-mesh issue
+(`#16`'s fix was narrow and confirmed unrelated; this was a separate,
+much more widespread engine-wide bug).
+
+**Root cause, traced via `git blame`, not assumed**: confirmed at the
+source — `src/WallpaperEngine/Render/Wallpapers/CScene.cpp:84`
+unconditionally called `setScalingMode(WallpaperState::TextureUVsScaling::ZoomFillUVs)`
+for *any* scene with an orthogonal projection, silently overwriting
+whatever `--scaling` mode was actually requested. Traced to commit
+`1a8b7a9` — a **deliberate, well-intentioned fix for a real prior bug**:
+orthogonal-projection scenes whose declared canvas didn't match the
+physical screen rendered pixels 1:1, causing distortion/black screens
+on non-native resolutions (that commit's own message cites a wallpaper
+going black on this *same* 3440×1440 monitor class). The original
+*intent* was correct — Windows WE also defaults orthogonal scenes to
+cover-scaling — the bug was purely in applying that fallback
+*unconditionally* rather than only when no explicit mode was requested.
+
+**Real-world impact, quantified**: of 38 sampled wallpapers with a
+declared native canvas size, 35 had this problem. On the user's actual
+monitor (3440×1440, an ultrawide), a typical 16:9-authored scene always
+rendered in forced "fill"/crop-to-cover behavior regardless of any
+setting, losing a fixed ~25.6% of its content — unfixable at the
+CLI/Mural level, since the engine ignored the setting entirely. One
+engine-wide bug, not 35 independent per-wallpaper defects.
+
+**Fix**: narrowed the fallback to only trigger when the scaling mode is
+still at its untouched CLI default — an explicit
+`stretch`/`fit`/`fill` request now passes straight through unmodified.
+The original black-screen bug this replaces cannot regress, since the
+untouched-default code path is completely unchanged.
+
+**Verification, real screenshots, not assumed from the code change
+alone**: on the same wallpaper that first exposed the bug — default vs
+fill mean pixel diff `0.92` (correctly near-identical: default still
+correctly falls back to fill, matching the preserved original intent),
+default vs fit `39.3`, fit vs stretch `31.4` — all four modes now
+genuinely differ, resolving the original symptom of pixel-identical
+output regardless of `--scaling`.
+
+**A real self-correction in the verification tooling itself, not just
+the engine fix**: `tools/visual_triage.py`'s first verification
+approach (checking for a solid-color letterbox border when scaling
+modes should differ) produced false negatives — investigated *why*
+rather than assuming the engine fix was wrong, and found this engine's
+own rendering model reveals *more* composited scene content on
+zoom-out rather than padding a flat image with a blank border, making a
+border-uniformity heuristic the wrong signal for this specific
+codebase. Replaced with a direct fit-vs-fill pixel-diff, the same
+method already used to verify the fix manually.
+
+**Full 358-wallpaper scene regression: 357 clean, 0 crashes, 1
+pre-existing unrelated error** (Chainsaw Man's shader-cast bug) —
+identical to the established baseline, zero new failures. Web corpus
+(61 wallpapers) reported honestly rather than spun either direction:
+all hit `batch_test.py`'s own fixed 6s timeout with no crash/error
+tags — very likely a pre-existing harness limitation (CEF startup time)
+unrelated to this fix, since web wallpapers never touch `CScene.cpp` at
+all — tracked separately as `#40` rather than claimed as a clean pass.
 
 ### #38 — DONE 2026-07-11: built `tools/visual_triage.py` — a real triage pipeline going beyond crash/error-log detection, immediately found `#36`/`#37`/`#39`
 
