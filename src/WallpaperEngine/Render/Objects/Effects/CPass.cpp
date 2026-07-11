@@ -832,7 +832,13 @@ void CPass::setupTextureUniforms () {
     this->addUniform ("g_Texture6", 6);
     this->addUniform ("g_Texture7", 7);
     this->addUniform ("g_TextureReductionScale", 1.0f);
-    this->m_texture0Resolution = *texture->getResolution ();
+    // resolveTexture() can legitimately return nullptr (no bind, no FBO for this index, and
+    // the renderable itself has no texture) -- setupRenderTexture() already guards the same
+    // call pattern this same way (see resolveTexture0() above); this call site didn't, which
+    // was a real, reproducible null-pointer crash for at least one particle material (#39).
+    if (texture != nullptr) {
+	this->m_texture0Resolution = *texture->getResolution ();
+    }
     this->addUniform ("g_Texture0Resolution", &this->m_texture0Resolution);
 
     for (const auto& [textureIndex, expectedTexture] : this->m_textures) {
@@ -841,7 +847,9 @@ void CPass::setupTextureUniforms () {
 	namestream << "g_Texture" << textureIndex << "Resolution";
 
 	texture = this->resolveTexture (expectedTexture->texture, textureIndex, texture);
-	this->addUniform (namestream.str (), texture->getResolution ());
+	if (texture != nullptr) {
+	    this->addUniform (namestream.str (), texture->getResolution ());
+	}
     }
 
     this->addUniform ("g_Texture0Resolution", &this->m_texture0Resolution);
