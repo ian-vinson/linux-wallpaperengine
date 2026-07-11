@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-11 (#37 DONE — the intermittent shutdown-race SIGSEGV fixed. Root cause: WallpaperApplication::show() called SDL_Quit() before m_renderContext (and the audio threads it owns) was destroyed, leaving a brand-new audio_read_thread almost no time to start before SDL's internals were torn out from under it. Fixed via an explicit m_renderContext.reset() before cleanup(). Verified via 100 repeated crash-reproducing runs (0 crashes) and a rapid kill/respawn A/B at multiple timing tiers (0 crashes pre-fix AND post-fix) — this directly and definitively rules out a connection to the earlier HDMI-A-2 incident (#33), a real, useful negative result. A suspicious 37-minute stress-test hang was investigated immediately and proven to be a genuinely separate, pre-existing GLib/GTK/libglycin issue (identical hang rate on the pre-fix binary too) — tracked as new #41. Full regression clean. Active Priority Order: #39, #34, #35, #40, #41)
+**Last updated:** 2026-07-11 (#39 DONE — null-pointer crash in CPass::setupTextureUniforms() fixed, the last real crash from the original visual-triage sweep. Wallpaper 3379996991 ("Winter Conch Street"), confirmed via a completely fresh backtrace (the prior session's notes didn't preserve the wallpaper ID). Root cause: an asymmetry within the same file — setupRenderTexture() already guards CPass::resolveTexture()'s legitimate nullptr return, setupTextureUniforms() didn't, at two call sites. Fixed by applying the identical existing guard pattern. Verified via 15/15 clean repeated runs, tools/visual_triage.py confirming the category flip from crash to clean, and a full regression matching the established baseline exactly. #36, #37, and #39 — all three real bugs from the original triage sweep — are now fixed and verified. Active Priority Order: #34, #35, #40, #41)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -326,16 +326,6 @@ only characterized enough to confirm it's real, pre-existing, and
 narrow in scope (rapid repeated process launching specifically, not
 normal single-instance use).
 
-### #39 — small, separate: deterministic null-pointer crash in `CPass::setupTextureUniforms()`, specific to one wallpaper's particle material
-
-Found 2026-07-11 via the same visual-triage sweep as `#36`/`#37`, a
-genuinely separate and much smaller issue — a real null-pointer
-dereference, deterministic (not a race), tied to a specific wallpaper's
-particle material configuration. Not yet scoped further — needs its
-own real repro/wallpaper-ID identification and root-cause trace the
-next time it's picked up (the specific wallpaper wasn't preserved in
-this session's own notes beyond the crash signature itself).
-
 ### #34 — `RenderContext::render()` silently does nothing if a viewport's name isn't found in the wallpaper map
 
 Found 2026-07-10 during the HDMI-A-2 black-screen investigation (see
@@ -397,6 +387,42 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #39 — DONE 2026-07-11: null-pointer crash in `CPass::setupTextureUniforms()` fixed — the last real crash from the original visual-triage sweep
+
+Wallpaper: `3379996991` ("Winter Conch Street"). Reproduced 3/3,
+deterministic (unlike `#37`'s race). Confirmed via a **completely
+fresh backtrace**, not relying on the prior session's own notes (the
+wallpaper ID wasn't preserved there) — matched the original signature
+exactly: `CPass::setupTextureUniforms()` ← `setupUniforms()` ←
+`setupShaders()` ← `CPass::CPass(...)` ← `CParticle::setupPass()` ←
+`setup()` ← `CScene::createObject()`.
+
+**Root cause**: `CPass::resolveTexture()` can legitimately return
+`nullptr` (no bind for that index, no matching FBO, the renderable has
+no texture). `setupRenderTexture()` — two functions away in the *same
+file* — already guards this exact call with `if (texture0 != nullptr)`.
+`setupTextureUniforms()` didn't guard the equivalent result at two
+dereference points, and this wallpaper's particle material is the one
+that actually hits the null case. A real asymmetry bug within the same
+file, not a new failure mode requiring new logic.
+
+**Fix**: applied the identical `if (texture != nullptr)` guard already
+established in the same file, at both call sites — reusing the
+existing pattern rather than inventing new logic or wrapping in
+`try`/`catch` (a null-pointer dereference isn't a C++ exception to
+begin with).
+
+**Verification**: build clean. 15/15 repeated runs on Winter Conch
+Street, 0 new coredumps. `tools/visual_triage.py` itself confirms the
+wallpaper flips from its prior `crash` category to `clean`. Full
+358-wallpaper regression: 357 clean, 0 crashes, 1 error (the same
+pre-existing Chainsaw Man shader bug) — identical to the established
+baseline, zero new failures.
+
+**This closes out the last real crash from the original visual-triage
+sweep (`#38`)** — `#36`, `#37`, and `#39` are all now fixed and
+verified.
 
 ### #37 — DONE 2026-07-11: intermittent shutdown-race `SIGSEGV` fixed — audio thread torn out from under `SDL_Quit()`; HDMI-A-2 connection directly ruled out
 
