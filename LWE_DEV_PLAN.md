@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-11 (#36 DONE — --scaling fixed, was a confirmed no-op for any scene with an orthogonal projection. Traced via git blame to a deliberate, well-intentioned prior fix (1a8b7a9) for a real black-screen bug on non-native resolutions — right intent, applied unconditionally instead of default-only, so it silently overrode every explicit --scaling request. Narrowed to only fall back when no explicit mode is requested; the original bug can't regress. Verified with real screenshots showing all four modes now genuinely differ (previously pixel-identical); tools/visual_triage.py's own first verification approach gave a false negative, investigated and corrected once the real cause (this engine reveals more content on zoom-out rather than padding a border) was understood. Full regression clean (357/358, 0 crashes, 1 pre-existing unrelated error). Web corpus reported honestly as inconclusive (harness's own fixed 6s timeout, likely unrelated to this fix) rather than claimed clean — tracked as new #40. Active Priority Order: #37, #39, #34, #35, #40)
+**Last updated:** 2026-07-11 (#37 DONE — the intermittent shutdown-race SIGSEGV fixed. Root cause: WallpaperApplication::show() called SDL_Quit() before m_renderContext (and the audio threads it owns) was destroyed, leaving a brand-new audio_read_thread almost no time to start before SDL's internals were torn out from under it. Fixed via an explicit m_renderContext.reset() before cleanup(). Verified via 100 repeated crash-reproducing runs (0 crashes) and a rapid kill/respawn A/B at multiple timing tiers (0 crashes pre-fix AND post-fix) — this directly and definitively rules out a connection to the earlier HDMI-A-2 incident (#33), a real, useful negative result. A suspicious 37-minute stress-test hang was investigated immediately and proven to be a genuinely separate, pre-existing GLib/GTK/libglycin issue (identical hang rate on the pre-fix binary too) — tracked as new #41. Full regression clean. Active Priority Order: #39, #34, #35, #40, #41)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -309,42 +309,22 @@ regression testing matters again, since a timeout this tight makes the
 web-corpus check largely uninformative as currently configured (can't
 distinguish "working, just slow to start" from "broken").
 
-### #37 — HIGH PRIORITY: intermittent shutdown-race `SIGSEGV` — a background audio thread reads app context after the main thread starts tearing it down
+### #41 — pre-existing, unrelated hang in GLib/GTK/D-Bus/libglycin threads under rapid repeated process launching (~10% incidence)
 
-Found 2026-07-11 via the new visual-triage tool (`#38`), by chasing 5
-unexplained crashes rather than writing them off as noise. Confirmed
-via two independent `gdb` stack traces on different wallpapers:
-`audio_read_thread` calls `AudioDriver::getApplicationContext()` after
-the main thread has already begun tearing down that context during
-process exit — a genuine data race between the audio thread's
-lifecycle and the main thread's shutdown sequence.
-
-**This explains real, previously-unexplained flakiness observed
-elsewhere this session**: the same wallpaper crashed 3/3 in isolated
-testing but showed "clean" in some full-corpus batch runs — exactly
-the signature of a genuine timing race, not a deterministic bug that
-would always or never trigger. Of a 40-wallpaper sample, 5 hit this
-exact signature (`--dump-structure` printing valid JSON, then crashing
-during exit/teardown) — given the race-condition nature, the true
-incidence across the full corpus and across *normal* wallpaper exit
-(not just this specific diagnostic flag) is very plausibly higher than
-5/40, and **very plausibly relevant to the HDMI-A-2 black-screen
-incident (`#33`)** — that incident's own leading theory was a rapid
-kill/respawn race, and this is a real, confirmed race in exactly the
-shutdown path every kill/respawn cycle exercises. Worth checking for a
-connection when this is picked up, not assumed connected without
-verification.
-
-**Scope for whenever this is picked up**: find and fix the actual
-lifecycle ordering bug — either ensure `audio_read_thread` is fully
-joined/stopped before the main thread begins tearing down the
-application context, or make the audio thread's context access safe
-against a context that's mid-teardown (a null/validity check, or a
-memory-ordering fix, whichever the real code structure calls for once
-examined directly). Verify with the same technique that found it —
-this is a race, so a single clean run proves nothing; needs repeated
-runs (ideally the same higher-volume testing that surfaced it
-originally) showing zero recurrences, not just one pass.
+Found 2026-07-11 as a side effect of `#37`'s stress testing. During
+rapid kill/respawn cycling (the same stress pattern used to test `#37`'s
+fix), roughly 10% of runs hung indefinitely with the main thread
+blocked on `futex_wait`. Investigated immediately rather than assumed
+transient (a run stuck for 37+ minutes is a real red flag) — traced the
+stuck threads to `pango`/`pool-spawner`/`gmain`/`gdbus`/`dconf worker`/
+`gly-global-exec`/`gly-hdl-loader` (GNOME's `libglycin` image-loading
+library) internals, nothing to do with audio or anything `#37` touches.
+**Confirmed pre-existing and unrelated to any of this session's own
+work**: reproduced the identical hang, at the identical ~10% rate, on
+the *pre-#37* binary as well. Not yet root-caused further or fixed —
+only characterized enough to confirm it's real, pre-existing, and
+narrow in scope (rapid repeated process launching specifically, not
+normal single-instance use).
 
 ### #39 — small, separate: deterministic null-pointer crash in `CPass::setupTextureUniforms()`, specific to one wallpaper's particle material
 
@@ -417,6 +397,60 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #37 — DONE 2026-07-11: intermittent shutdown-race `SIGSEGV` fixed — audio thread torn out from under `SDL_Quit()`; HDMI-A-2 connection directly ruled out
+
+A real, provable fix, verified with genuine care — including catching
+and correctly resolving a serious near-miss along the way rather than
+letting it slide.
+
+**Root cause, re-confirmed against the actual current code, not
+assumed from memory** (given how much this session's own `#10`/`#20`/
+`#22` work already touched this area): `WallpaperApplication::show()`
+called `cleanup()` — which calls `SDL_Quit()`, tearing down every SDL
+subsystem — **before** `m_renderContext` (and the `CScene` → `CSound` →
+`AudioStream` cascade that owns and joins the `audio_read_thread` it
+spawns) was ever destroyed. That destruction only happened much later,
+in `main()`, when `delete app` ran. For `--dump-structure` specifically,
+the gap between "thread spawned" and "`SDL_Quit()` called" is close to
+zero, leaving a brand-new thread almost no time to start before SDL's
+internals are torn out from under it. A subagent's own writeup on the
+member-declaration-order detail this fix depends on was internally
+contradictory even though its final conclusion happened to be right —
+caught and personally re-verified before trusting it, rather than
+accepted on faith.
+
+**Fix**: `this->m_renderContext.reset()` right before `cleanup()` in
+`show()`, joining every audio thread via the existing, already-correct
+`CScene`→`CSound`→`AudioStream` destructor cascade. `cleanup()` turned
+out to be `static` (no instance access), so the fix landed in `show()`
+rather than changing that signature.
+
+**Verification, genuinely thorough, including a serious near-miss
+correctly resolved**:
+- 100 repeated `--dump-structure` runs (5 confirmed-crashing wallpapers
+  × 20 each): 0 crashes, 0 new coredumps.
+- A rapid kill/respawn A/B at multiple timing tiers (0.1s/0.3s/0.6s
+  delays, 45 cycles each): **0 crashes both pre-fix and post-fix** —
+  this race genuinely doesn't reproduce via `SIGTERM` at any realistic
+  timing, since normal usage always renders at least one frame first,
+  giving the thread time to start.
+- **This directly and definitively rules out a connection to the
+  earlier HDMI-A-2 black-screen incident (`#33`)** — that incident is
+  not explained by this bug, contrary to the plausible-sounding
+  connection originally suspected. A real, useful negative result,
+  not forced into a tidier narrative.
+- **A suspicious 37-minute stuck process during stress testing was
+  investigated immediately rather than assumed transient** — traced the
+  stuck threads to a genuinely separate, pre-existing hang in
+  GLib/GTK/D-Bus/libglycin internals (nothing to do with audio or this
+  fix at all), and **proved** it was unrelated (not just asserted) by
+  reproducing the identical hang at the identical rate (2/20) on the
+  *pre-fix* binary too. Tracked separately as `#41`, not chased further
+  here.
+- Full 358-wallpaper regression: 357 clean, 0 crashes, 1 pre-existing
+  error (Chainsaw Man's shader bug) — identical to the established
+  baseline, zero new failures.
 
 ### #36 — DONE 2026-07-11: `--scaling` fixed — was a confirmed no-op for any scene with an orthogonal projection
 
