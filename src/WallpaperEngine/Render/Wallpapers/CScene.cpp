@@ -81,7 +81,17 @@ CScene::CScene (
     // TODO: CONVERSION
     if (scene->camera.projection.hasOrthogonal) {
         this->m_camera->setOrthogonalProjection (width, height);
-        this->setScalingMode (WallpaperState::TextureUVsScaling::ZoomFillUVs);
+        // Only fall back to "cover" scaling when the user didn't explicitly
+        // request a --scaling mode (i.e. it's still at the untouched CLI
+        // default). Some fallback is genuinely needed here -- DefaultUVs's
+        // own generic aspect-mismatch handling caused black screens/distortion
+        // for ortho scenes on non-native resolutions (commit 1a8b7a9, e.g.
+        // #3448290956, Subaru on 3440x1440) -- but forcing it unconditionally
+        // (the bug this replaces) silently overrode every explicit
+        // --scaling request for any orthogonal-projection scene.
+        if (this->getState ().getTextureUVsScaling () == WallpaperState::TextureUVsScaling::DefaultUVs) {
+            this->setScalingMode (WallpaperState::TextureUVsScaling::ZoomFillUVs);
+        }
     } else if (scene->camera.projection.perspectiveOverrideFov > 0.0f) {
         const float screenW = this->getContext ().getOutput ().getFullWidth ();
         const float screenH = this->getContext ().getOutput ().getFullHeight ();

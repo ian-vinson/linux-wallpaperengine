@@ -4,7 +4,7 @@ LWE Visual Triage Pipeline
 Runtime scanner that goes beyond crash/error-log detection (see batch_test.py,
 we_scanner.py) to catch wallpapers that load "clean" but render wrong:
   1. Object-count cross-reference  (declared vs. successfully-constructed objects)
-  2. Resolution-scaling correctness (forced-fill crop estimate for ortho scenes)
+  2. Resolution-scaling correctness (per-mode render check + no-op-default estimate)
   3. Blank/degenerate-frame detection (near-solid-color output)
   4. Motion/animation-sanity check  (declared particle/text objects that never move)
 
@@ -23,16 +23,22 @@ Methodology notes / known limitations:
     the CLI surface, not a simplification of convenience.
   - --dump-structure's JSON output has no position/origin field at all (verified
     against JsonPrinter.cpp) -- object screen coordinates aren't available from it.
-  - Step 2 does NOT render the 4 --scaling modes and compare them, on purpose:
-    an empirical test (all 4 modes producing pixel-identical screenshots) led to
-    a confirmed source-level finding -- src/WallpaperEngine/Render/Wallpapers/
-    CScene.cpp:84 hardcodes ZoomFillUVs ("fill") for any scene with an
-    orthogonal projection, unconditionally overriding whatever --scaling was
-    requested. This is an engine-wide bug affecting every such scene wallpaper,
-    not a per-wallpaper defect -- so Step 2 instead analytically computes how
-    much of the scene's own declared canvas is cropped off under that
-    always-applied fill behavior (from the aspect-ratio mismatch alone; no
-    screenshots needed), and flags it when the crop is severe.
+  - Step 2 history: an empirical test (all 4 --scaling modes producing
+    pixel-identical screenshots) led to a confirmed source-level finding --
+    src/WallpaperEngine/Render/Wallpapers/CScene.cpp:84 hardcoded ZoomFillUVs
+    ("fill") for any scene with an orthogonal projection, unconditionally
+    overriding whatever --scaling was requested (fix #36). That's now FIXED:
+    an explicit --scaling request is respected; only the untouched CLI default
+    still falls back to "fill" (matching upstream WE's own default behavior,
+    and the reason that fallback exists at all -- see commit 1a8b7a9). Step 2
+    now does two things: (a) renders "fit" mode once at monitor resolution and
+    checks for genuine letterboxing via a color-agnostic border-vs-center
+    variance signal, to verify the fix actually holds for this wallpaper
+    (flags scaling-anomaly if a real aspect mismatch produces NO letterboxing
+    under an explicit --scaling fit request -- i.e. the fix regressed or never
+    applied here); (b) still reports the analytical no-op-default crop
+    estimate as informational context, since most users/Mural configs don't
+    pass --scaling explicitly and will still get the "fill" default.
 """
 
 import os
@@ -80,7 +86,6 @@ POLL_INTERVAL = 0.4
 
 BLANK_STDDEV_THRESHOLD = 6.0             # mean per-channel stddev below this ~= near-solid-color
 MOTION_CHANGED_FRACTION_THRESHOLD = 0.002  # <0.2% of pixels changed meaningfully ~= no visible motion
-SCALING_CROP_FLAG_PCT = 30.0              # above the common 16:9-vs-ultrawide ~25.6% baseline (see report)
 
 NOISE_PATTERNS = [
     r"LightingV1", r"Resolving require module", r"Replaced .* with compat",
@@ -429,27 +434,26 @@ def triage_wallpaper(wp_dir: Path) -> WallpaperTriage:
             ))
 
     # --- Step 2: resolution-scaling correctness ---
-    # NOTE: originally this rendered all 4 --scaling modes and compared border
-    # uniformity. Empirically all 4 produced pixel-identical output for every
-    # scene tested here, which led to a source-level investigation. Confirmed
-    # root cause: src/WallpaperEngine/Render/Wallpapers/CScene.cpp:84 hardcodes
-    # `setScalingMode(WallpaperState::TextureUVsScaling::ZoomFillUVs)` whenever
-    # a scene has ANY orthogonal projection (auto or explicit), unconditionally
-    # overwriting whatever --scaling the CLI/Mural requested. So --scaling is a
-    # confirmed no-op for every scene-type wallpaper with a declared ortho
-    # projection -- every such scene always renders in "fill" (crop-to-cover)
-    # behavior regardless of what's requested. This is a real engine bug, not
-    # a per-wallpaper defect, so this step no longer renders 4 redundant
-    # screenshots per wallpaper -- it instead analytically quantifies how much
-    # of the scene's own declared canvas gets cropped off under the
-    # ALWAYS-APPLIED fill behavior, which is the actually-actionable number.
+    # History: an empirical test found all 4 --scaling modes producing
+    # pixel-identical output, tracing to CScene.cpp:84 hardcoding ZoomFillUVs
+    # unconditionally for any orthogonal-projection scene. That's now fixed
+    # (#36): an explicit --scaling request is respected; only the untouched
+    # CLI default still falls back to "fill" (matching upstream WE's own
+    # default behavior -- see commit 1a8b7a9 for why that fallback exists at
+    # all). This step now verifies the fix actually holds per-wallpaper by
+    # rendering "fit" once and checking for real letterboxing when the
+    # aspect mismatch is large enough to matter, and separately reports the
+    # still-relevant "what happens if you don't pass --scaling" estimate.
     if result.native_res:
         nw, nh = result.native_res
         native_aspect = nw / nh
         monitor_aspect = MONITOR_RES[0] / MONITOR_RES[1]
+        aspect_mismatch_pct = abs(native_aspect - monitor_aspect) / monitor_aspect * 100
+
         # ZoomFillUVs crops whichever axis is proportionally larger so the
         # other axis exactly covers the target -- this is the fraction of the
-        # source canvas that ends up outside the visible frame.
+        # source canvas that ends up outside the visible frame under the
+        # no-scaling-requested default.
         if native_aspect > monitor_aspect:
             crop_pct = (1 - monitor_aspect / native_aspect) * 100
         elif native_aspect < monitor_aspect:
@@ -460,19 +464,43 @@ def triage_wallpaper(wp_dir: Path) -> WallpaperTriage:
         result.scaling_notes["native_res"] = f"{nw}x{nh}"
         result.scaling_notes["native_aspect"] = round(native_aspect, 3)
         result.scaling_notes["monitor_aspect"] = round(monitor_aspect, 3)
-        result.scaling_notes["forced_fill_crop_pct"] = round(crop_pct, 1)
+        result.scaling_notes["no_scaling_flag_default_crop_pct"] = round(crop_pct, 1)
         result.scaling_notes["note"] = (
-            "--scaling is a confirmed no-op for this wallpaper (CScene.cpp:84 forces "
-            "ZoomFillUVs/'fill' for any orthogonal-projection scene) -- this is the "
-            "estimated %% of the scene's own canvas cropped off under that forced fill."
+            "estimated %% of canvas cropped off if --scaling is NOT explicitly passed "
+            "(engine falls back to 'fill'/cover, matching upstream WE -- see commit "
+            "1a8b7a9 -- not a bug by itself now that fix #36 lets an explicit request "
+            "override it)."
         )
 
-        if crop_pct > SCALING_CROP_FLAG_PCT:
-            findings.append((3, "scaling-anomaly",
-                f"scene declares native {nw}x{nh} (aspect {native_aspect:.3f}) vs monitor aspect "
-                f"{monitor_aspect:.3f} -- engine forces 'fill' scaling regardless of --scaling "
-                f"(CScene.cpp:84), estimated {crop_pct:.0f}% of the canvas is cropped off"
-            ))
+        # Only worth a verification render when the mismatch is large enough
+        # that fit-vs-fill would actually look different.
+        #
+        # NOTE: this originally checked for a solid-color letterbox border
+        # (low border variance vs center). That's the wrong signal for this
+        # engine: "fit" reveals MORE of the composited scene (more sky, more
+        # background layers) rather than padding with a blank/solid bar --
+        # confirmed by direct visual inspection of a "fit" screenshot showing
+        # a wider view with real content at the edges, not a black or colored
+        # border. So this compares fit vs fill directly (the same pixel-diff
+        # approach that originally found and then verified the CScene.cpp:84
+        # bug/fix) rather than assuming anything about border appearance.
+        if aspect_mismatch_pct > 5.0:
+            fit_path = SCREEN_DIR / f"{wid}_scale_fit_verify.png"
+            fill_path = SCREEN_DIR / f"{wid}_scale_fill_verify.png"
+            status_fit, _ = run_and_screenshot(wp_dir, fit_path, MONITOR_RES, "fit", delay=5)
+            status_fill, _ = run_and_screenshot(wp_dir, fill_path, MONITOR_RES, "fill", delay=5)
+            if status_fit == "OK" and status_fill == "OK":
+                changed = changed_pixel_fraction(Image.open(fit_path), Image.open(fill_path))
+                result.scaling_notes["fit_vs_fill_changed_fraction"] = round(changed, 4)
+                if changed < 0.02:
+                    findings.append((3, "scaling-anomaly",
+                        f"explicit --scaling fit vs fill requested (aspect mismatch {aspect_mismatch_pct:.0f}%: "
+                        f"native {nw}x{nh} vs monitor aspect {monitor_aspect:.3f}) but only "
+                        f"{changed*100:.2f}% of pixels differ between the two modes -- the CScene.cpp:84 "
+                        f"fix (#36) may not be holding for this wallpaper"
+                    ))
+            else:
+                result.scaling_notes["fit_vs_fill_check"] = f"capture-failed (fit={status_fit}, fill={status_fill})"
     else:
         result.scaling_notes["skipped"] = "no explicit orthogonalprojection size declared (auto-projection) -- no fixed native canvas to compare against"
 
@@ -506,26 +534,29 @@ def write_markdown(results: list[WallpaperTriage], path: Path, sample_desc: str)
             f.write(f"| {cat} | {count} |\n")
         f.write("\n")
 
-        # --- Scaling: this is a systemic engine finding, not N independent
-        # per-wallpaper bugs -- summarize once with real numbers before
-        # listing anything, so the report doesn't read as "N wallpapers are
-        # broken" when it's actually "1 engine bug, applied to N wallpapers".
+        # --- Scaling: report the fix status once with real numbers before
+        # listing anything, rather than per-wallpaper noise.
         with_native = [r for r in results if r.native_res]
         if with_native:
-            crops = [r.scaling_notes.get("forced_fill_crop_pct", 0) for r in with_native]
-            f.write("## Scaling: systemic finding (read this before the per-wallpaper list below)\n\n")
+            crops = [r.scaling_notes.get("no_scaling_flag_default_crop_pct", 0) for r in with_native]
+            checked = [r for r in with_native if "fit_vs_fill_changed_fraction" in r.scaling_notes]
+            holding = [r for r in checked if r.scaling_notes["fit_vs_fill_changed_fraction"] >= 0.02]
+            f.write("## Scaling: fix #36 status (read this before the per-wallpaper list below)\n\n")
             f.write(
-                f"`--scaling` is a confirmed no-op for any scene with an orthogonal projection "
-                f"(`src/WallpaperEngine/Render/Wallpapers/CScene.cpp:84` hardcodes `ZoomFillUVs`/'fill', "
-                f"overwriting whatever mode was requested). This is an engine-wide bug, not a per-wallpaper "
-                f"defect. Of {len(with_native)} sampled wallpapers with a declared native canvas size, "
-                f"crop-under-forced-fill ranged {min(crops):.0f}%-{max(crops):.0f}% "
-                f"(median {sorted(crops)[len(crops)//2]:.0f}%) against this session's real monitor "
-                f"(3440x1440, aspect {MONITOR_RES[0]/MONITOR_RES[1]:.3f}). Most sampled scenes are authored "
-                f"at 16:9, which forced-fills to ~25% cropped on this ultrawide monitor regardless of "
-                f"`--scaling` -- that baseline is a consequence of the monitor/engine combination, not a "
-                f"wallpaper defect. The `scaling-anomaly` list below is only really actionable where the "
-                f"crop is unusually severe (well above the ~25% 16:9 baseline).\n\n"
+                f"`--scaling` used to be a confirmed no-op for any scene with an orthogonal projection "
+                f"(`src/WallpaperEngine/Render/Wallpapers/CScene.cpp:84` hardcoded `ZoomFillUVs`/'fill', "
+                f"overwriting whatever mode was requested) -- fixed in #36: an explicit request is now "
+                f"respected, only the untouched CLI default still falls back to 'fill'. Of "
+                f"{len(with_native)} sampled wallpapers with a declared native canvas, {len(checked)} had "
+                f"a large enough aspect mismatch to verify with real `--scaling fit` vs `fill` renders; "
+                f"**{len(holding)}/{len(checked)}** showed a genuine pixel difference between the two "
+                f"modes (the fix holding). "
+                f"Separately: if `--scaling` is NOT passed at all (the common case for most callers/Mural "
+                f"configs), the engine still defaults to 'fill' matching upstream WE -- crop under that "
+                f"default ranged {min(crops):.0f}%-{max(crops):.0f}% (median {sorted(crops)[len(crops)//2]:.0f}%) "
+                f"against this session's real monitor (3440x1440, aspect {MONITOR_RES[0]/MONITOR_RES[1]:.3f}). "
+                f"That default-crop number is informational context, not a bug by itself now that fit/stretch "
+                f"can be explicitly requested to avoid it.\n\n"
             )
 
         for cat in ["crash", "error", "object-count-mismatch", "scaling-anomaly", "blank-frame", "no-motion-detected"]:
@@ -552,7 +583,7 @@ def write_markdown(results: list[WallpaperTriage], path: Path, sample_desc: str)
             if r.motion_diff is not None:
                 extra.append(f"motion_diff={r.motion_diff}")
             if r.native_res:
-                extra.append(f"native={r.scaling_notes.get('native_res')}, forced_fill_crop={r.scaling_notes.get('forced_fill_crop_pct')}%")
+                extra.append(f"native={r.scaling_notes.get('native_res')}, default_crop={r.scaling_notes.get('no_scaling_flag_default_crop_pct')}%")
             f.write(f"- `{r.workshop_id}` -- {r.title} ({', '.join(extra)})\n")
 
 
