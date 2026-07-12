@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-12 (#41 reclassified — investigated fully and confirmed via readelf/ldd that these threads genuinely belong to this fork's own process, traced to two of its own direct dependencies (bundled CEF, system ffmpeg's librsvg codec path) rather than a coincidental separate service. Ruled out mere library linkage and this fork's own code as the trigger. Best evidence-based hypothesis points to CEF racing the host's D-Bus/accessibility-bus during rapid concurrent startup, a known upstream flakiness class — but a live backtrace to fully confirm the exact call site wasn't obtainable in this environment (Wayland/X11 GL init failures), so no fix was implemented. Classified as very likely third-party, not a bug in this fork's own code. A low-risk, precedented mitigation (NO_AT_BRIDGE=1 in BrowserApp::OnBeforeCommandLineProcessing) is documented and ready whenever someone wants to apply and verify it. Active Priority Order: #35, #40)
+**Last updated:** 2026-07-12 (#40 DONE — fixed batch_test.py's web-corpus timeout (6s → type-aware 6s/25s split) and, while verifying, found and fixed a case-sensitivity bug in get_type() that had silently hidden 13 web + 82 scene wallpapers from every corpus run ever done, including the historical 358-wallpaper baseline. Web corpus now 61/61 clean at 25s; scene corpus's original 358-subset exactly matches the historical baseline (357/1), confirming zero regression. The 82 newly-included scene wallpapers surfaced 1 new crash and 3 new errors, logged separately as #42 and #43, not yet investigated. batch_test.py remains uncommitted outside the repo pending a version-control decision. Active Priority Order: #35, #42, #43)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,19 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #40 — `batch_test.py`'s web-corpus check uses a fixed 6s timeout, likely too short for CEF/Chromium startup
-
-Found 2026-07-11 as a side effect of `#36`'s regression verification.
-Running the full 61-wallpaper web corpus with the harness's own fixed
-6-second per-wallpaper timeout produced 61/61 `TIMEOUT`, zero crash/
-error tags — likely just CEF/Chromium's own real startup time routinely
-exceeding that budget, a pre-existing harness characteristic unrelated
-to `#36`'s fix (web wallpapers never touch `CScene.cpp` at all). Not
-confirmed either way yet — worth a real look whenever web-corpus
-regression testing matters again, since a timeout this tight makes the
-web-corpus check largely uninformative as currently configured (can't
-distinguish "working, just slow to start" from "broken").
-
 ### #35 — Mural: debounce rapid wallpaper-switch requests to avoid kill/respawn races (cross-project — Mural, not this fork)
 
 Found 2026-07-10, same investigation as `#33`/`#34`. Every wallpaper
@@ -345,6 +332,30 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
+### #42 — SIGSEGV crash in "Ocarina of Time" (`3737268876`), newly discovered
+
+Surfaced 2026-07-12 as a direct result of #40's case-sensitivity fix to
+`batch_test.py`'s `get_type()` — this wallpaper's `project.json` uses
+`"type": "Scene"` (capitalized), so it was silently excluded from every
+prior corpus run, including the historical 358-wallpaper baseline. Not
+yet investigated at all. Needs a fresh backtrace and root-cause pass
+from scratch, same as any other crash item.
+
+### #43 — 3 other newly-surfaced scene errors from the same corpus expansion, possibly related
+
+Also surfaced 2026-07-12 via #40's case-fix, also previously invisible
+due to capitalized `"type"` values:
+- Jinhsi (`3474820484`) — `TEXV0005_LZ4_FAIL`
+- Amiya (`3486806915`) — `TEXV0005_LZ4_FAIL`
+- Chainsaw Man-Reze (`3577990983`) — `SCRIPT_EXCEPTION`,
+  `SHADER_COMBO_JSON`, `TEXV0005_LZ4_FAIL` (a different wallpaper from
+  the unrelated, already-closed Chainsaw Man item, coincidentally same
+  title)
+
+Jinhsi and Amiya share the identical `TEXV0005_LZ4_FAIL` tag — worth
+checking whether they share a root cause before treating as 3 separate
+investigations.
+
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -353,6 +364,52 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #40 — DONE 2026-07-12: `batch_test.py`'s fixed 6s timeout was killing web wallpapers mid-startup — fixed, and along the way found a case-sensitivity bug that had been silently hiding real failures from every corpus run ever done
+
+**Root cause confirmed**: the harness's single global `TIMEOUT_SEC = 6`
+was applied identically to every wallpaper type. Measured real web
+wallpaper startup (5 samples, 3 trials each): steady-state 4.0–5.4s,
+one 10.46s cold-start outlier — both close to or past the 6s budget.
+The app's own internal logic already assumes worse:
+`MAX_WEB_LOAD_WAIT_FRAMES=600` + `WEB_SETTLE_FRAMES=90` @ 30fps = 23s
+built-in worst-case budget before the app gives up waiting on CEF.
+
+**Fix**: replaced the single constant with `TIMEOUT_BY_TYPE = {"scene":
+6, "web": 25}`, added a `--type {scene,web,all}` CLI flag (default
+`scene`, preserving old invocation behavior exactly), and extracted the
+per-corpus loop into `run_corpus()` so both types can run and report
+independently. Report filenames stay unsuffixed for `scene` so existing
+tooling pointed at the historical paths keeps working.
+
+**Bonus fix, found while verifying**: `get_type()` compared the JSON
+`"type"` field case-sensitively. 13 of 61 real web wallpapers have
+`"type": "Web"` (capital W) and 82 of 440 scene wallpapers have
+`"type": "Scene"` — all silently invisible to **every corpus run this
+harness has ever done**, including the historical 358-wallpaper
+baseline other dev-plan entries cite. Fixed by lowercasing before
+comparison, matching what `ProjectParser.cpp` already does (per #13).
+
+**Verification, with the corrected/expanded corpus**:
+- Web corpus (25s timeout, all 61 now included): **61/61 clean, 0
+  errors, 0 crashes**, 1534s (~25.6 min) wall-clock. Directly confirms
+  6s was purely a timeout artifact, not a real failure signal.
+- Scene corpus (6s timeout, unchanged — regression check): 435/440
+  clean, 4 errors, 1 crash, 2629s (~43.8 min). The original 358-subset
+  is **byte-for-byte identical to the historical baseline** (357 clean,
+  1 error — same wallpaper, same tags), confirming the 6s scene path
+  itself is completely unaffected by this change.
+- The 82 newly-included ("Scene"-cased) wallpapers are new information,
+  not a regression — never tested before today. They surfaced 3 new
+  errors and 1 previously-unknown crash — **not investigated here,
+  tracked separately as #42 and #43.**
+
+**Version control**: `batch_test.py` still lives at
+`~/Downloads/batch_test.py`, outside the repo. Recommended committing
+it as `tools/batch_test.py` — this investigation is a direct
+demonstration of why: an unreproducible historical run, and an ordinary
+case-sensitivity bug that sat undetected long enough to hide a real
+SIGSEGV. Not yet moved — pending decision.
 
 ### #41 — RECLASSIFIED 2026-07-12: pre-existing GLib/GTK/libglycin hang under rapid repeated process launching — third-party interaction, not a bug in this fork's own code
 
