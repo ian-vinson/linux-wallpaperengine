@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-12 (#34 DONE — RenderContext::render() now logs when no wallpaper is mapped for a viewport, the first fix this session backed by a real, permanent Catch2 unit test rather than manual verification alone. Confirmed the condition is genuinely an anomaly (viewports are only ever created for explicitly-requested screens), verified via a new test asserting the log fires, names the right viewport, and dedups correctly across repeated calls. Full existing test suite (27 assertions/10 cases) unaffected. One disclosed gap: the 358-wallpaper regression corpus wasn't present in this particular environment/checkout, so it wasn't re-run — worth confirming test-infrastructure availability upfront for future dispatches. Active Priority Order: #35, #40, #41)
+**Last updated:** 2026-07-12 (#41 reclassified — investigated fully and confirmed via readelf/ldd that these threads genuinely belong to this fork's own process, traced to two of its own direct dependencies (bundled CEF, system ffmpeg's librsvg codec path) rather than a coincidental separate service. Ruled out mere library linkage and this fork's own code as the trigger. Best evidence-based hypothesis points to CEF racing the host's D-Bus/accessibility-bus during rapid concurrent startup, a known upstream flakiness class — but a live backtrace to fully confirm the exact call site wasn't obtainable in this environment (Wayland/X11 GL init failures), so no fix was implemented. Classified as very likely third-party, not a bug in this fork's own code. A low-risk, precedented mitigation (NO_AT_BRIDGE=1 in BrowserApp::OnBeforeCommandLineProcessing) is documented and ready whenever someone wants to apply and verify it. Active Priority Order: #35, #40)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -309,23 +309,6 @@ regression testing matters again, since a timeout this tight makes the
 web-corpus check largely uninformative as currently configured (can't
 distinguish "working, just slow to start" from "broken").
 
-### #41 — pre-existing, unrelated hang in GLib/GTK/D-Bus/libglycin threads under rapid repeated process launching (~10% incidence)
-
-Found 2026-07-11 as a side effect of `#37`'s stress testing. During
-rapid kill/respawn cycling (the same stress pattern used to test `#37`'s
-fix), roughly 10% of runs hung indefinitely with the main thread
-blocked on `futex_wait`. Investigated immediately rather than assumed
-transient (a run stuck for 37+ minutes is a real red flag) — traced the
-stuck threads to `pango`/`pool-spawner`/`gmain`/`gdbus`/`dconf worker`/
-`gly-global-exec`/`gly-hdl-loader` (GNOME's `libglycin` image-loading
-library) internals, nothing to do with audio or anything `#37` touches.
-**Confirmed pre-existing and unrelated to any of this session's own
-work**: reproduced the identical hang, at the identical ~10% rate, on
-the *pre-#37* binary as well. Not yet root-caused further or fixed —
-only characterized enough to confirm it's real, pre-existing, and
-narrow in scope (rapid repeated process launching specifically, not
-normal single-instance use).
-
 ### #35 — Mural: debounce rapid wallpaper-switch requests to avoid kill/respawn races (cross-project — Mural, not this fork)
 
 Found 2026-07-10, same investigation as `#33`/`#34`. Every wallpaper
@@ -370,6 +353,68 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #41 — RECLASSIFIED 2026-07-12: pre-existing GLib/GTK/libglycin hang under rapid repeated process launching — third-party interaction, not a bug in this fork's own code
+
+Investigated fully. **Confirmed these threads genuinely belong to this
+fork's own process** (not a coincidentally-observed separate service,
+as originally left open as a possibility) — traced via `readelf -d`/
+`ldd` on the actual built binary to two of this fork's own direct
+dependencies: bundled `libcef.so` (Chromium) directly links
+`libglib-2.0`/`libgio-2.0`/`libgobject-2.0`/`libdbus-1`/`libpango-1.0`/
+`libcairo`/`libatk-1.0`+`libatk-bridge-2.0` (the accessibility bus)/
+`libcups`; and system `libavcodec.so.62` (loaded for audio/video on
+every wallpaper type) links `librsvg-2.so.2`, which transitively pulls
+`libgdk_pixbuf-2.0` → `libglycin-2` and the full Pango stack. Both are
+direct `NEEDED` entries of this fork's own binary.
+
+**Ruled out mere linkage as the trigger**: a throwaway probe binary
+linking the identical library set sat idle for 3 seconds with exactly
+one thread in `/proc/<pid>/task` — these libraries don't spawn anything
+just from being loaded; some actual runtime call is required.
+
+**Ruled out this fork's own code as the trigger**: a full grep across
+`src/WallpaperEngine/` found zero calls into
+Pango/GObject/GIO/gdk-pixbuf/glycin anywhere — `CText` uses raw
+FreeType directly, and `DBusMediaSource` (constructed unconditionally
+every launch) uses the raw `libdbus-1` C API, not GLib's `GDBus`, so it
+can't be the source of the specifically-named `gdbus worker` thread
+(a `GDBus`-internal naming convention, distinct from `libdbus-1`'s own
+threading model).
+
+**Best evidence-based hypothesis, not yet fully confirmed with a live
+backtrace**: the `pango`/`gdbus`/`dconf worker`/`gly-global-exec`/
+`gly-hdl-loader` combination is `glycin`'s own well-known internal
+chain (GDBus + dconf/GSettings for sandbox negotiation, spawning its
+own loader helpers). Bundled `libcef.so` is the strongest candidate,
+since it directly links the entire relevant set in one place — Chromium
+racing against the host's D-Bus/portal/accessibility-bus during rapid
+concurrent startup is a well-documented upstream flakiness class,
+fitting the ~10% incidence observed under rapid repeated launching.
+
+**Could not get a live backtrace to fully confirm the exact call
+site** — this specific investigation's sandbox environment couldn't
+get a full render loop running end-to-end to reproduce the hang live
+(Wayland driver fails with "Framebuffers are not properly set" in this
+nested/headless compositor; forcing X11 hits the same failure for
+unrelated reasons) — a real environment limitation, not part of the
+bug itself. No fix was implemented, since the exact call site
+couldn't be confirmed without that backtrace.
+
+**Classification: very likely third-party (bundled CEF and/or system
+ffmpeg's optional librsvg codec path) interacting with the host's
+GNOME desktop-integration stack — not a bug in this fork's own code,
+and not something this fork can patch directly.**
+
+**A real, low-risk, precedented mitigation is ready whenever someone
+wants to apply it** (not applied here, pending sign-off and a live
+backtrace to actually confirm it addresses this specific hang): this
+codebase already has a precedented place for CEF-specific startup
+flags (`BrowserApp::OnBeforeCommandLineProcessing`, which already sets
+several `--disable-*` CEF switches) — setting `NO_AT_BRIDGE=1` before
+`CefInitialize` (the standard GTK/AT-SPI escape hatch that skips the
+accessibility-bus D-Bus connection entirely) is a plausible, narrowly-
+scoped candidate.
 
 ### #34 — DONE 2026-07-12: `RenderContext::render()` now logs when no wallpaper is mapped for a viewport — the first fix this session backed by a real, permanent automated test
 
