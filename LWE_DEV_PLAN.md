@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-11 (#39 DONE — null-pointer crash in CPass::setupTextureUniforms() fixed, the last real crash from the original visual-triage sweep. Wallpaper 3379996991 ("Winter Conch Street"), confirmed via a completely fresh backtrace (the prior session's notes didn't preserve the wallpaper ID). Root cause: an asymmetry within the same file — setupRenderTexture() already guards CPass::resolveTexture()'s legitimate nullptr return, setupTextureUniforms() didn't, at two call sites. Fixed by applying the identical existing guard pattern. Verified via 15/15 clean repeated runs, tools/visual_triage.py confirming the category flip from crash to clean, and a full regression matching the established baseline exactly. #36, #37, and #39 — all three real bugs from the original triage sweep — are now fixed and verified. Active Priority Order: #34, #35, #40, #41)
+**Last updated:** 2026-07-12 (#34 DONE — RenderContext::render() now logs when no wallpaper is mapped for a viewport, the first fix this session backed by a real, permanent Catch2 unit test rather than manual verification alone. Confirmed the condition is genuinely an anomaly (viewports are only ever created for explicitly-requested screens), verified via a new test asserting the log fires, names the right viewport, and dedups correctly across repeated calls. Full existing test suite (27 assertions/10 cases) unaffected. One disclosed gap: the 358-wallpaper regression corpus wasn't present in this particular environment/checkout, so it wasn't re-run — worth confirming test-infrastructure availability upfront for future dispatches. Active Priority Order: #35, #40, #41)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -326,23 +326,6 @@ only characterized enough to confirm it's real, pre-existing, and
 narrow in scope (rapid repeated process launching specifically, not
 normal single-instance use).
 
-### #34 — `RenderContext::render()` silently does nothing if a viewport's name isn't found in the wallpaper map
-
-Found 2026-07-10 during the HDMI-A-2 black-screen investigation (see
-`#33` below) — this specific bug was **not** confirmed to be the actual
-cause that day (the real explanation was almost certainly a rapid
-kill/respawn race from repeated `SetWallpaper` calls in quick
-succession), but it's a real, independent soft spot found along the
-way: if a viewport's name is ever not found in the wallpaper map at
-render time, `RenderContext::render()` just silently does nothing —
-producing exactly a silent black frame with zero log trace, and no way
-to distinguish "this specific bug" from "still mid-restart" or any
-other black-screen cause after the fact. Small, well-understood fix
-whenever picked up: add a real log line (output name, and ideally
-which wallpaper IDs *are* currently mapped) at that exact point, so any
-future occurrence of this failure mode is immediately visible and
-diagnosable instead of presenting as an unexplained black screen.
-
 ### #35 — Mural: debounce rapid wallpaper-switch requests to avoid kill/respawn races (cross-project — Mural, not this fork)
 
 Found 2026-07-10, same investigation as `#33`/`#34`. Every wallpaper
@@ -387,6 +370,56 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #34 — DONE 2026-07-12: `RenderContext::render()` now logs when no wallpaper is mapped for a viewport — the first fix this session backed by a real, permanent automated test
+
+**A meaningful upgrade in verification durability, not just a fix**:
+the first item this session confirmed via a real, checked-in Catch2
+unit test rather than manual/scripted verification alone. This specific
+bug can now never silently regress without a test immediately failing.
+
+`RenderContext::render()`'s lookup of a viewport's wallpaper in
+`m_wallpapers` had no `else` branch — if a viewport's name was ever not
+found in the map, the function silently skipped rendering entirely,
+with zero trace, producing exactly a silent black frame indistinguishable
+from any other black-screen cause.
+
+**Fix**: added an `else if` branch logging once per distinct missing
+viewport name via `sLog.error()` — the same established convention
+already used for this exact map at `WallpaperApplication.cpp:751`,
+matching existing style rather than inventing something new — naming
+the offending viewport and every currently-mapped viewport name.
+Deduped via a new `std::set<std::string> m_loggedMissingViewports`
+member, since `render()` runs every frame and an unthrottled log would
+spam continuously if this condition ever actually fired.
+
+**Confirmed this is genuinely an anomaly condition, not a normal one**:
+traced through `X11Output::discoverOutputs`/`WaylandOutput` to confirm
+viewports are only ever created for screens explicitly requested via
+`--bg`/`--screen-span` — under correct configuration every viewport
+always has a wallpaper, so the new log won't produce noise in
+legitimate multi-monitor setups.
+
+**Verification, via a new, permanent test**
+(`Testing/Cases/RenderContextMissingViewport.cpp`, with a minimal
+on-disk fixture project under `Cases/Fixtures/MinimalVideoWallpaper/`):
+constructs a real `RenderContext` + GL-backed viewport, calls `render()`
+twice against a deliberately-unmapped viewport, and asserts all three
+things that actually matter — the log fires, it names the correct
+viewport, and it fires **exactly once** across both calls (confirming
+the dedup logic actually works, not just that logging exists at all).
+Full existing test suite: 27 assertions / 10 cases, all passing, no
+regressions.
+
+**Known gap, disclosed rather than hidden**: the 358-wallpaper scene
+regression corpus/script used by prior sessions this week wasn't
+present in this particular environment/checkout, so it wasn't re-run
+here — worth knowing that different Claude Code sessions may not all
+have the same test infrastructure available, and confirming that
+upfront for future dispatches rather than assuming. Given this is a
+purely additive logging change on an already-dead code branch, now
+covered by a real automated test, treated as an acceptable, clearly-
+disclosed gap rather than a blocker.
 
 ### #39 — DONE 2026-07-11: null-pointer crash in `CPass::setupTextureUniforms()` fixed — the last real crash from the original visual-triage sweep
 
