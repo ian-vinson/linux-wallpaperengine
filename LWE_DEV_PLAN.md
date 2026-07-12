@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-12 (#40 DONE — fixed batch_test.py's web-corpus timeout (6s → type-aware 6s/25s split) and, while verifying, found and fixed a case-sensitivity bug in get_type() that had silently hidden 13 web + 82 scene wallpapers from every corpus run ever done, including the historical 358-wallpaper baseline. Web corpus now 61/61 clean at 25s; scene corpus's original 358-subset exactly matches the historical baseline (357/1), confirming zero regression. The 82 newly-included scene wallpapers surfaced 1 new crash and 3 new errors, logged separately as #42 and #43, not yet investigated. batch_test.py remains uncommitted outside the repo pending a version-control decision. Active Priority Order: #35, #42, #43)
+**Last updated:** 2026-07-12 (#42 root-caused, not yet fixed — confirmed via real backtrace that the "Ocarina of Time" SIGSEGV is a stack overflow from unbounded mutual recursion in CScene::createObject(), caused by a scene-graph cycle (object 963 ↔ 989) that the existing cycle-guard misses because it marks objects as created only after their full dependency+parent chain resolves. Two fix approaches identified (mark-before-recurse vs. explicit in-progress tracking), decision and implementation pending. Active Priority Order: #35, #42, #43)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -332,14 +332,36 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #42 — SIGSEGV crash in "Ocarina of Time" (`3737268876`), newly discovered
+### #42 — SIGSEGV crash in "Ocarina of Time" (`3737268876`) — root cause confirmed, fix not yet implemented
 
 Surfaced 2026-07-12 as a direct result of #40's case-sensitivity fix to
 `batch_test.py`'s `get_type()` — this wallpaper's `project.json` uses
 `"type": "Scene"` (capitalized), so it was silently excluded from every
-prior corpus run, including the historical 358-wallpaper baseline. Not
-yet investigated at all. Needs a fresh backtrace and root-cause pass
-from scratch, same as any other crash item.
+prior corpus run, including the historical 358-wallpaper baseline.
+
+**Root cause, confirmed via real backtrace** (`coredumpctl gdb`, `bt
+full` on an actual core, reproduces 100% deterministically across 4
+runs): not a null-pointer crash — a stack overflow, ~104,000 frames
+deep, from unbounded mutual recursion in `CScene::createObject()`
+(`CScene.cpp:221-266`). The cycle-guard there only marks an object as
+created (`m_objects.emplace(...)`) *after* its full dependency+parent
+chain has already recursed — so a cycle that closes before either
+call returns is invisible to the guard. Confirmed with a temporary,
+reverted diagnostic print: object `963` (parent `626`, deps
+`[989, 1287]`) and object `989` (parent `963`) form a mutual cycle
+straddling the dependency and parent link types. This is data-driven —
+a genuine cycle in this wallpaper's own `scene.json` — not a JSON
+parsing bug, but since this is arbitrary Steam Workshop content, the
+engine crashing on a cyclic scene graph is a real robustness gap, not
+just "that wallpaper's fault." Confirmed unrelated to #43 — no
+`TEXV0005_LZ4_FAIL` or any other error tag appears before the crash.
+
+Two fix approaches identified, not yet chosen between: (1) mark an
+object as in-progress *before* recursing into its dependencies/parent,
+so the existing guard actually catches the cycle on re-entry, or (2)
+track an explicit "currently resolving" set separately and log a clear
+cycle-detected error if re-entered, without changing the existing
+insert-after-resolution structure. Neither implemented yet.
 
 ### #43 — 3 other newly-surfaced scene errors from the same corpus expansion, possibly related
 
