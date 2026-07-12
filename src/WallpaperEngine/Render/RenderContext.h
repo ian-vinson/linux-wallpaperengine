@@ -2,6 +2,7 @@
 
 #include <glm/vec4.hpp>
 #include <memory>
+#include <set>
 #include <vector>
 
 #include "TextureCache.h"
@@ -55,6 +56,8 @@ namespace Render {
 	Drivers::VideoDriver& m_driver;
 	/** Maps screen -> wallpaper list */
 	std::map<std::string, std::shared_ptr<CWallpaper>> m_wallpapers = {};
+	/** Viewport names already logged as missing from m_wallpapers, so render() only warns once per name */
+	std::set<std::string> m_loggedMissingViewports = {};
 	/** App that holds the render context */
 	WallpaperApplication& m_app;
 	/** Source for the media playback information */

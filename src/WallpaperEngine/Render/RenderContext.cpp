@@ -6,6 +6,7 @@
 #include "RenderContext.h"
 
 #include "WallpaperEngine/Data/Model/Project.h"
+#include "WallpaperEngine/Logging/Log.h"
 
 namespace WallpaperEngine::Render {
 RenderContext::RenderContext (
@@ -29,6 +30,23 @@ void RenderContext::render (Drivers::Output::OutputViewport* viewport) {
     if (const auto ref = this->m_wallpapers.find (viewport->name); ref != this->m_wallpapers.end ()) {
 	ref->second->render (
 	    viewport->viewport, this->getOutput ().renderVFlip (), viewport->globalPosition, viewport->logicalSize
+	);
+    } else if (this->m_loggedMissingViewports.insert (viewport->name).second) {
+	// only log once per distinct missing viewport name -- render() runs every frame, and this
+	// condition (if it ever triggers) is a static configuration mismatch, not a transient one
+	std::string mapped;
+
+	for (const auto& name : this->m_wallpapers | std::views::keys) {
+	    if (!mapped.empty ())
+		mapped += ", ";
+
+	    mapped += name;
+	}
+
+	sLog.error (
+	    "RenderContext::render: no wallpaper mapped for viewport \"", viewport->name,
+	    "\", rendering nothing this frame; currently mapped viewport(s): ",
+	    mapped.empty () ? "(none)" : mapped
 	);
     }
 
