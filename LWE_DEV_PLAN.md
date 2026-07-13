@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-13 (#43 DONE — fixed TEXV0005_LZ4_FAIL on multi-frame raw-GL textures (Jinhsi, Amiya, Chainsaw Man-Reze): TextureParser::parseMipmap() was missing a per-frame prefix read for image>0's mip 0, confirmed via byte-level diagnostic proof and fixed with a single condition change (imageIndex > 0 || mipIndex > 0) that correctly handles both confirmed variants. Verified via exit codes, zero LZ4 errors, visual screenshot confirmation, and a full 440-wallpaper regression (432 clean, 8 errors, 0 crashes vs #42's 438/2/0 baseline — the differing error set confirmed as pre-existing corpus-timing flakiness, not a regression). Two new findings logged separately: #44 (Abyss Gaming's real script TypeError bug) and #45 (Ocarina of Time renders grey/broken post-#42-fix, not yet investigated). Active Priority Order: #35, #44, #45)
+**Last updated:** 2026-07-13 (#44 DONE — reversed a deliberate-but-unvalidated design decision in ScriptEngine::runPendingInits(): applyUserProperties() now fires after init()/its update() fallback instead of before, matching init()'s documented intent. The original order was introduced in commit 62bb3ed and validated by a regression that structurally couldn't have caught this — Abyss Gaming, the wallpaper that trips it, was invisible to that corpus due to the same case-sensitivity bug #40 later fixed. Verified via direct proof the value populates correctly before applyUserProperties() runs, plus a full 440-wallpaper regression (438 clean, 2 errors, 0 crashes — better than #43's 432/8/0 baseline, remaining 2 errors confirmed pre-existing and unrelated). Abyss Gaming's separate combo-JSON error left undocumented-but-unfixed as genuinely invalid third-party content. Active Priority Order: #35, #45)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -332,23 +332,6 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #44 — Abyss Gaming (`3675966045`) has a real, reproducible script bug, unrelated to #43
-
-Surfaced 2026-07-13 while investigating #43 (checking whether Abyss
-Gaming's corpus-run `SCRIPT_EXCEPTION` was real or the same load-timing
-flakiness as Gengar's). Confirmed real and deterministic across 3
-standalone runs, unlike Gengar's (which didn't reproduce and was
-correctly dropped as noise):
-ScriptEngine [scale_764]: TypeError: cannot read property 'multiply' of undefined
-ScriptEngine [scale_764]:     at applyUserProperties (scale_764:61:24)
-
-Also has its own separate combo-JSON parse error in a different shader
-(`workshop/3235948233/effects/auto_sway`) than Chainsaw Man-Reze's
-(`procedural_noise`) -- likely two independent authoring mistakes, or a
-shared parser-strictness gap (nlohmann::json rejecting a lenient
-dialect real WE tolerates), not dug into further since it's non-fatal.
-Not yet investigated beyond confirming reproducibility.
-
 ### #45 — "Ocarina of Time" renders grey/broken after #42's crash fix — GLSL shader failures + multiple script TypeErrors, not yet investigated
 
 Surfaced 2026-07-13 during manual verification of #42's fix: the crash
@@ -379,6 +362,62 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #44 — DONE 2026-07-13: fixed applyUserProperties()/init() call order in ScriptEngine::runPendingInits() — a deliberate but unvalidated design decision, reversed
+
+**Context**: the original order (applyUserProperties() before init())
+was not an oversight -- it was deliberately introduced in commit
+62bb3ed, whose message states applyUserProperties() "fires once per
+script module before init()/update()," and LWE_DEV_PLAN.md itself
+documented this as intentional. Reversing it required real
+justification, not just a plausible-looking bug report.
+
+**Why the original order didn't hold up**: neither bundled doc source
+actually settles per-object scene-script ordering -- lib.sceneScript.d.ts
+describes init() and applyUserProperties() independently without
+stating which runs first; WE_DOCS_REFERENCE.md's matching section
+documents a different scripting context entirely (the web-wallpaper
+window.wallpaperPropertyListener contract, not per-object scene
+scripts). More importantly, the 356-wallpaper regression that
+originally "confirmed" the applyUserProperties-first order couldn't
+have caught this: Abyss Gaming (3675966045) -- whose script trips
+exactly this ordering issue -- wasn't in that corpus. It's one of the
+capitalized `"type": "Scene"` wallpapers #40's case-sensitivity fix
+later surfaced; the pattern that breaks (a script setting a variable
+in init() and reading it in applyUserProperties()) was never actually
+exercised by the verification that supposedly validated the original
+order. Real published Steam Workshop content (scale_764's script) is
+written entirely around init()-first being safe -- a common, idiomatic
+authoring pattern that would be broken on real Wallpaper Engine too if
+applyUserProperties-first were actually correct.
+
+**Fix**: `ScriptEngine.cpp`'s `runPendingInits()` -- restructured the
+`continue`-based early-exit branching into `if`/`else-if`/`else` so
+`applyUserProperties()` still fires unconditionally for every script,
+same as before, just repositioned to run after `init()` (or its
+`update()` fallback when no `init()` is exported) instead of before.
+
+**Verification**:
+- Direct proof, not just absence of error: a temporary, reverted
+  diagnostic confirmed `init()` runs successfully and populates the
+  value (`1.53846 1.53846 1`) before `applyUserProperties()` executes
+  -- not just "no error happened to print."
+- Abyss Gaming (3675966045): 3 direct runs, zero TypeError, confirmed
+  on both the fix build and the final diagnostic-free rebuild.
+- Full 440-wallpaper regression: 438 clean, 2 errors, **0 crashes** --
+  better than #43's baseline (432 clean, 8 errors, 0 crashes), not just
+  numerically similar. Confirmed rather than assumed: the 2 remaining
+  errors (Power | Chainsaw Man [4K], Floating Ducks.) are both
+  pre-existing from prior runs and structurally unrelated to the
+  init/applyUserProperties code path this fix touches -- no new
+  regression.
+- `git diff` confirmed the change is scoped to exactly this fix.
+
+**Not fixed, by design**: the combo-JSON parse error in Abyss Gaming's
+bundled `auto_sway` effect package remains as found -- confirmed
+genuinely invalid third-party JSON (missing quote characters) in a
+shared community effect package, not an engine parsing gap. No
+engine-side fix warranted.
 
 ### #43 — DONE 2026-07-13: fixed TEXV0005_LZ4_FAIL on multi-frame raw-GL textures (Jinhsi, Amiya, Chainsaw Man-Reze) — a missing per-frame prefix read
 

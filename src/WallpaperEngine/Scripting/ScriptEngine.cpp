@@ -834,6 +834,41 @@ void ScriptEngine::runPendingInits () {
 		this->m_context, this->m_globalThis, "thisLayer", this->m_adapters.object->instantiate (loaded.object)
 	    );
 
+	    // Call init() if the script exports it — it sets up initial state (e.g. transition
+	    // timer, shared palette values) and returns the correct starting value. Fall back to
+	    // update() for scripts that don't export init. This runs before applyUserProperties()
+	    // below so that state init() sets up (e.g. capturing the object's starting value into a
+	    // module-level variable) is already available the first time a script's
+	    // applyUserProperties() runs — scripts commonly rely on that ordering (#44).
+	    JSValue initArgs[] = { this->dynamicToJs (currentValue) };
+	    JSValue initResult = this->call (module, 1, initArgs, "init");
+
+	    ScopeGuard initGuard ([this, initArgs, initResult] () {
+		JS_FreeValue (this->m_context, initResult);
+		JS_FreeValue (this->m_context, initArgs[0]);
+	    });
+
+	    if (JS_IsException (initResult)) {
+		logJSException (this->m_context, key.c_str ());
+	    } else if (!JS_IsUndefined (initResult)) {
+		jsToDynamicValue (this->m_context, initResult, currentValue);
+	    } else {
+		// No init() exported — fall back to a first update() call to prime the value.
+		JSValue args[] = { this->dynamicToJs (currentValue) };
+		JSValue result = this->call (module, 1, args, "update");
+
+		ScopeGuard guard2 ([this, args, result] () {
+		    JS_FreeValue (this->m_context, result);
+		    JS_FreeValue (this->m_context, args[0]);
+		});
+
+		if (JS_IsException (result)) {
+		    logJSException (this->m_context, key.c_str ());
+		} else {
+		    jsToDynamicValue (this->m_context, result, currentValue);
+		}
+	    }
+
 	    JSValue propsArgs[] = { this->buildUserPropertiesObject () };
 	    JSValue propsResult = this->call (module, 1, propsArgs, "applyUserProperties");
 
@@ -845,43 +880,6 @@ void ScriptEngine::runPendingInits () {
 	    if (JS_IsException (propsResult)) {
 		logJSException (this->m_context, key.c_str ());
 	    }
-
-	    // Call init() if the script exports it — it sets up initial state (e.g. transition
-	    // timer, shared palette values) and returns the correct starting value. Fall back to
-	    // update() for scripts that don't export init.
-	    JSValue initArgs[] = { this->dynamicToJs (currentValue) };
-	    JSValue initResult = this->call (module, 1, initArgs, "init");
-
-	    ScopeGuard initGuard ([this, initArgs, initResult] () {
-		JS_FreeValue (this->m_context, initResult);
-		JS_FreeValue (this->m_context, initArgs[0]);
-	    });
-
-	    if (JS_IsException (initResult)) {
-		logJSException (this->m_context, key.c_str ());
-		continue;
-	    }
-
-	    if (!JS_IsUndefined (initResult)) {
-		jsToDynamicValue (this->m_context, initResult, currentValue);
-		continue;
-	    }
-
-	    // No init() exported — fall back to a first update() call to prime the value.
-	    JSValue args[] = { this->dynamicToJs (currentValue) };
-	    JSValue result = this->call (module, 1, args, "update");
-
-	    ScopeGuard guard2 ([this, args, result] () {
-		JS_FreeValue (this->m_context, result);
-		JS_FreeValue (this->m_context, args[0]);
-	    });
-
-	    if (JS_IsException (result)) {
-		logJSException (this->m_context, key.c_str ());
-		continue;
-	    }
-
-	    jsToDynamicValue (this->m_context, result, currentValue);
 	}
     }
 }
