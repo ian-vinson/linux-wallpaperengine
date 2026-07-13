@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-12 (#42 root-caused, not yet fixed — confirmed via real backtrace that the "Ocarina of Time" SIGSEGV is a stack overflow from unbounded mutual recursion in CScene::createObject(), caused by a scene-graph cycle (object 963 ↔ 989) that the existing cycle-guard misses because it marks objects as created only after their full dependency+parent chain resolves. Two fix approaches identified (mark-before-recurse vs. explicit in-progress tracking), decision and implementation pending. Active Priority Order: #35, #42, #43)
+**Last updated:** 2026-07-13 (#42 DONE — fixed the "Ocarina of Time" SIGSEGV by detecting scene-graph cycles via explicit in-progress tracking in CScene::createObject() and breaking the cycle instead of recursing forever; chosen over a placeholder-based approach since m_objects presence is relied on elsewhere as "successfully constructed." Verified deterministic across 4 runs, confirmed the scene continues past many other cycles in the same graph, and confirmed via full 440-wallpaper regression: 0 crashes (down from 1), 438 clean, 2 errors. The 2-error set differs from #40's 4-error baseline; confirmed this fix is provably inert for all 6 wallpapers involved (0 cycle-detection hits) — the real cause is pre-existing harness timeout/load flakiness, noted on #43 for whoever investigates it next. Active Priority Order: #35, #43)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -332,37 +332,6 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #42 — SIGSEGV crash in "Ocarina of Time" (`3737268876`) — root cause confirmed, fix not yet implemented
-
-Surfaced 2026-07-12 as a direct result of #40's case-sensitivity fix to
-`batch_test.py`'s `get_type()` — this wallpaper's `project.json` uses
-`"type": "Scene"` (capitalized), so it was silently excluded from every
-prior corpus run, including the historical 358-wallpaper baseline.
-
-**Root cause, confirmed via real backtrace** (`coredumpctl gdb`, `bt
-full` on an actual core, reproduces 100% deterministically across 4
-runs): not a null-pointer crash — a stack overflow, ~104,000 frames
-deep, from unbounded mutual recursion in `CScene::createObject()`
-(`CScene.cpp:221-266`). The cycle-guard there only marks an object as
-created (`m_objects.emplace(...)`) *after* its full dependency+parent
-chain has already recursed — so a cycle that closes before either
-call returns is invisible to the guard. Confirmed with a temporary,
-reverted diagnostic print: object `963` (parent `626`, deps
-`[989, 1287]`) and object `989` (parent `963`) form a mutual cycle
-straddling the dependency and parent link types. This is data-driven —
-a genuine cycle in this wallpaper's own `scene.json` — not a JSON
-parsing bug, but since this is arbitrary Steam Workshop content, the
-engine crashing on a cyclic scene graph is a real robustness gap, not
-just "that wallpaper's fault." Confirmed unrelated to #43 — no
-`TEXV0005_LZ4_FAIL` or any other error tag appears before the crash.
-
-Two fix approaches identified, not yet chosen between: (1) mark an
-object as in-progress *before* recursing into its dependencies/parent,
-so the existing guard actually catches the cycle on re-entry, or (2)
-track an explicit "currently resolving" set separately and log a clear
-cycle-detected error if re-entered, without changing the existing
-insert-after-resolution structure. Neither implemented yet.
-
 ### #43 — 3 other newly-surfaced scene errors from the same corpus expansion, possibly related
 
 Also surfaced 2026-07-12 via #40's case-fix, also previously invisible
@@ -378,6 +347,21 @@ Jinhsi and Amiya share the identical `TEXV0005_LZ4_FAIL` tag — worth
 checking whether they share a root cause before treating as 3 separate
 investigations.
 
+**Update 2026-07-13, from #42's regression verification**: re-running
+Jinhsi, Amiya, and Chainsaw Man-Reze standalone reproduces their
+TEXV0005_LZ4_FAIL errors reliably (large 7680-7840px textures). But in
+a full 440-wallpaper corpus run under load, all three -- plus Power |
+Chainsaw Man [4K] -- came back clean instead, because the failure
+didn't finish within the harness's 6s timeout and batch_test.py's
+TimeoutExpired path discards all output/tags. Two previously-clean
+wallpapers (Gengar `3244466773`, Abyss Gaming `3675966045`) showed a
+fresh SCRIPT_EXCEPTION in that same run, likely the same load-timing
+class of flakiness rather than something new. Net: pass/fail status
+for these wallpapers is not deterministic under the current harness --
+whoever investigates #43 should expect standalone runs to be the
+reliable signal, not corpus-run categorization, and may want to check
+whether Gengar/Abyss Gaming belong in scope too.
+
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -386,6 +370,53 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #42 — DONE 2026-07-13: SIGSEGV in "Ocarina of Time" fixed — scene-graph cycle now detected and broken instead of crashing
+
+**Fix**: `CScene::createObject()` (`CScene.cpp`) + `CScene.h`. Chose
+explicit in-progress tracking (approach 2) over a placeholder-in-
+`m_objects` approach (1), because `m_objects` presence is relied on
+elsewhere in the codebase as "successfully constructed" —
+`addObjectToRenderOrder()` treats absence as "legitimately not
+created" (e.g. disabled particle systems), and the public `getObject()`
+getter dereferences the pointer directly. A placeholder would have
+risked leaking an incomplete/null `CObject*` into those paths — a
+second bug on top of the first. Added a `std::unordered_set<int>
+m_objectsBeingResolved` member; on re-entry for an id already being
+resolved, logs the specific object id and the full currently-resolving
+set, skips creating that one object (breaking the cycle at that edge),
+and lets the rest of the scene continue loading. An RAII guard
+(`ResolvingGuard`) removes each id from the set on every exit path
+(normal return, early return, or exception unwinding), so the set
+can't leak stale entries.
+
+**Verification**:
+- Crash fixed, deterministic across 4 direct runs: exit code went from
+  139 (SIGSEGV) to 124 (timeout-while-running-normally — the expected
+  steady state for any live scene wallpaper). Log now shows explicit
+  cycle-detected messages naming the object ids.
+- Confirmed the scene keeps loading past *many* other cycles in the
+  same graph (963<->989 was only the first one previously hit before
+  the stack overflowed) — e.g. 589<->629, 1223<->1253, 795<->872,
+  834<->1241 — each logged and skipped individually, not just the one
+  known pair.
+- Full 440-wallpaper scene regression: 438 clean, 2 errors, **0
+  crashes** (down from 1), wall-clock 1296s (~21.6 min, notably faster
+  than #40's baseline ~44 min since nothing hangs on infinite recursion
+  anymore). Ocarina of Time itself: STATUS TIMEOUT, TAGS [] — confirmed
+  fixed.
+- The 438/2/0 split doesn't match the naive 436/4/0 prediction, and
+  that discrepancy was run down rather than glossed over: the 2 errors
+  this run (Gengar, Abyss Gaming) are different wallpapers than the 4
+  #40-baseline errors (all of which showed clean this run). Confirmed
+  via direct re-run that none of those 6 wallpapers ever executes the
+  new cycle-detection code path (0 "Scene graph cycle detected" log
+  lines for all of them) — so this fix is provably inert for them.
+  Root cause is pre-existing, load/timing-dependent flakiness in the
+  harness's fixed 6s timeout racing against large-texture LZ4
+  decompression, predating and unrelated to this fix — carried
+  forward as a note on #43, since #43 is the item that will need to
+  account for it.
 
 ### #40 — DONE 2026-07-12: `batch_test.py`'s fixed 6s timeout was killing web wallpapers mid-startup — fixed, and along the way found a case-sensitivity bug that had been silently hiding real failures from every corpus run ever done
 

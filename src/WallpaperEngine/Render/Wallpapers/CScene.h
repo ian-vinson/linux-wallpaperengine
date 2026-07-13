@@ -101,6 +101,10 @@ private:
     std::vector<ObjectUniquePtr> m_dynamicObjectsData = {};
     int m_nextDynamicObjectId = -1000000;
     std::map<int, CObject*> m_objects = {};
+    /** Object ids currently partway through createObject()'s dependency/parent walk -- lets a
+     * scene-graph cycle (which closes before any of the recursive calls involved has returned,
+     * so isn't yet in m_objects) be detected and broken instead of recursing forever. */
+    std::unordered_set<int> m_objectsBeingResolved = {};
     std::vector<CObject*> m_objectsByRenderOrder = {};
     std::unordered_set<int> m_pendingDestruction = {};
     std::vector<DynamicValue*> m_scriptedValues = {};

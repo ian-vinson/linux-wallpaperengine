@@ -226,6 +226,30 @@ Render::CObject* CScene::createObject (const Object& object) {
 	return current->second;
     }
 
+    // A cycle across dependency/parent links (e.g. object A depends on B, B's parent is A) would
+    // otherwise recurse forever: an object is only added to m_objects (the check above) once its
+    // ENTIRE dependency+parent chain has already resolved, so re-entering a cycle that closes
+    // before any of those calls returns is invisible to that check. Track in-progress ids
+    // separately to catch it here instead.
+    if (!this->m_objectsBeingResolved.insert (object.id).second) {
+	std::string resolving;
+	for (const int id : this->m_objectsBeingResolved) {
+	    resolving += std::to_string (id) + " ";
+	}
+	sLog.error (
+	    "Scene graph cycle detected: object ", object.id,
+	    " is already being resolved (dependency/parent cycle) -- currently resolving: [", resolving,
+	    "] -- skipping this edge to break the cycle"
+	);
+	return nullptr;
+    }
+
+    struct ResolvingGuard {
+	std::unordered_set<int>& set;
+	int id;
+	~ResolvingGuard () { set.erase (id); }
+    } resolvingGuard { this->m_objectsBeingResolved, object.id };
+
     // check dependencies too!
     for (const auto& cur : object.dependencies) {
 	// self-dependency is a possibility...
