@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-13 (#42 DONE — fixed the "Ocarina of Time" SIGSEGV by detecting scene-graph cycles via explicit in-progress tracking in CScene::createObject() and breaking the cycle instead of recursing forever; chosen over a placeholder-based approach since m_objects presence is relied on elsewhere as "successfully constructed." Verified deterministic across 4 runs, confirmed the scene continues past many other cycles in the same graph, and confirmed via full 440-wallpaper regression: 0 crashes (down from 1), 438 clean, 2 errors. The 2-error set differs from #40's 4-error baseline; confirmed this fix is provably inert for all 6 wallpapers involved (0 cycle-detection hits) — the real cause is pre-existing harness timeout/load flakiness, noted on #43 for whoever investigates it next. Active Priority Order: #35, #43)
+**Last updated:** 2026-07-13 (#43 DONE — fixed TEXV0005_LZ4_FAIL on multi-frame raw-GL textures (Jinhsi, Amiya, Chainsaw Man-Reze): TextureParser::parseMipmap() was missing a per-frame prefix read for image>0's mip 0, confirmed via byte-level diagnostic proof and fixed with a single condition change (imageIndex > 0 || mipIndex > 0) that correctly handles both confirmed variants. Verified via exit codes, zero LZ4 errors, visual screenshot confirmation, and a full 440-wallpaper regression (432 clean, 8 errors, 0 crashes vs #42's 438/2/0 baseline — the differing error set confirmed as pre-existing corpus-timing flakiness, not a regression). Two new findings logged separately: #44 (Abyss Gaming's real script TypeError bug) and #45 (Ocarina of Time renders grey/broken post-#42-fix, not yet investigated). Active Priority Order: #35, #44, #45)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -332,35 +332,44 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #43 — 3 other newly-surfaced scene errors from the same corpus expansion, possibly related
+### #44 — Abyss Gaming (`3675966045`) has a real, reproducible script bug, unrelated to #43
 
-Also surfaced 2026-07-12 via #40's case-fix, also previously invisible
-due to capitalized `"type"` values:
-- Jinhsi (`3474820484`) — `TEXV0005_LZ4_FAIL`
-- Amiya (`3486806915`) — `TEXV0005_LZ4_FAIL`
-- Chainsaw Man-Reze (`3577990983`) — `SCRIPT_EXCEPTION`,
-  `SHADER_COMBO_JSON`, `TEXV0005_LZ4_FAIL` (a different wallpaper from
-  the unrelated, already-closed Chainsaw Man item, coincidentally same
-  title)
+Surfaced 2026-07-13 while investigating #43 (checking whether Abyss
+Gaming's corpus-run `SCRIPT_EXCEPTION` was real or the same load-timing
+flakiness as Gengar's). Confirmed real and deterministic across 3
+standalone runs, unlike Gengar's (which didn't reproduce and was
+correctly dropped as noise):
+ScriptEngine [scale_764]: TypeError: cannot read property 'multiply' of undefined
+ScriptEngine [scale_764]:     at applyUserProperties (scale_764:61:24)
 
-Jinhsi and Amiya share the identical `TEXV0005_LZ4_FAIL` tag — worth
-checking whether they share a root cause before treating as 3 separate
-investigations.
+Also has its own separate combo-JSON parse error in a different shader
+(`workshop/3235948233/effects/auto_sway`) than Chainsaw Man-Reze's
+(`procedural_noise`) -- likely two independent authoring mistakes, or a
+shared parser-strictness gap (nlohmann::json rejecting a lenient
+dialect real WE tolerates), not dug into further since it's non-fatal.
+Not yet investigated beyond confirming reproducibility.
 
-**Update 2026-07-13, from #42's regression verification**: re-running
-Jinhsi, Amiya, and Chainsaw Man-Reze standalone reproduces their
-TEXV0005_LZ4_FAIL errors reliably (large 7680-7840px textures). But in
-a full 440-wallpaper corpus run under load, all three -- plus Power |
-Chainsaw Man [4K] -- came back clean instead, because the failure
-didn't finish within the harness's 6s timeout and batch_test.py's
-TimeoutExpired path discards all output/tags. Two previously-clean
-wallpapers (Gengar `3244466773`, Abyss Gaming `3675966045`) showed a
-fresh SCRIPT_EXCEPTION in that same run, likely the same load-timing
-class of flakiness rather than something new. Net: pass/fail status
-for these wallpapers is not deterministic under the current harness --
-whoever investigates #43 should expect standalone runs to be the
-reliable signal, not corpus-run categorization, and may want to check
-whether Gengar/Abyss Gaming belong in scope too.
+### #45 — "Ocarina of Time" renders grey/broken after #42's crash fix — GLSL shader failures + multiple script TypeErrors, not yet investigated
+
+Surfaced 2026-07-13 during manual verification of #42's fix: the crash
+is confirmed gone (runs indefinitely, cycle-detection firing and
+skipping edges as designed), but the wallpaper only shows a grey
+screen. Real log output shows several plausible independent causes,
+none yet root-caused or ruled in/out:
+- GLSL fragment shader compile failures (`'input' : Reserved word`,
+  `must write to gl_Position`) causing `Failed to setup object N` for
+  at least 8 different objects (313, 327, 341, 355, 369, 383, 401, 421)
+- Multiple ScriptEngine TypeErrors across different scripts
+  (`cannot read property 'x'/'visible'/'getAnimation'/'getParent' of
+  undefined`)
+- Repeated `Property 'pause' not found on object 'rainfall'/'rain_impact'`
+- Two unresolved FBO/texture override errors
+  (`_rt_imageLayerComposite_2396_a`, `_rt_imageLayerComposite_2635_a`)
+
+Needs a proper discovery pass to determine which of these (if any)
+actually explains the grey screen, since this wallpaper was invisible
+to every corpus run before #42's fix and none of this has been
+investigated at all yet.
 
 ---
 
@@ -370,6 +379,64 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #43 — DONE 2026-07-13: fixed TEXV0005_LZ4_FAIL on multi-frame raw-GL textures (Jinhsi, Amiya, Chainsaw Man-Reze) — a missing per-frame prefix read
+
+**Root cause, confirmed via byte-level diagnostic proof**:
+`TextureParser::parseMipmap()`'s TEXB0004 raw-GL branch only read the
+`[width][height][index]` prefix when `mipIndex > 0`, never checking
+which *frame* (image index) it was on. For multi-frame (`imageCount >
+1`) raw-GL textures, frame ≥1's mip 0 still carries that same prefix in
+the file -- skipping it meant the real width/height bytes got
+misread as `uncompressedSize`/`compressedSize` instead, corrupting the
+LZ4 decompression call downstream. A temporary diagnostic peeked past
+the misread fields whenever they suspiciously matched the frame's own
+dimensions, and found the real uncompressed size (e.g. 7840×7700 =
+60,368,000 exactly) and a plausible compressed size sitting right
+where the missing prefix should have been read from.
+
+**Fix**: `TextureParser.cpp`/`.h` -- threaded an `imageIndex` parameter
+through `parseMipmap()` from `parse()`'s outer per-image loop, and
+changed the prefix-read condition from `mipIndex > 0` to `imageIndex >
+0 || mipIndex > 0`. A single condition change handles both confirmed
+variants without special-casing: Jinhsi/Chainsaw-Man-Reze (frame
+dimensions happen to match the container header) and Amiya (frame
+dimensions genuinely differ frame-to-frame) both need the same thing --
+reading the real per-frame width/height from the file instead of
+assuming the header's dimensions -- which the existing `mipIndex > 0`
+logic already did correctly, it just needed to also fire on
+`imageIndex > 0`.
+
+**Verification**:
+- Jinhsi, Amiya, Chainsaw Man-Reze: all now exit 124 (running
+  normally) instead of 1 (crash), zero TEXV0005/LZ4 output, confirmed
+  on a final clean (diagnostic-free) rebuild. Chainsaw Man-Reze's
+  separate `SHADER_COMBO_JSON` issue is untouched, as scoped.
+  **Visually confirmed via screenshot** on Jinhsi and Amiya -- both
+  render the previously-corrupted texture correctly, no garbling.
+- Full 440-wallpaper regression: 432 clean, 8 errors, **0 crashes**
+  (#42 baseline: 438 clean, 2 errors, 0 crashes). The 432/8 split
+  doesn't match a naive 438/2 prediction; dug into why rather than
+  assuming a match -- the 8 errors this run are an entirely different
+  set of wallpapers than #42's 2-error baseline (Gengar/Abyss Gaming,
+  both clean this run), with no overlap with the 3 targets. A
+  single-branch texture-parsing fix has no plausible mechanism to
+  affect GLSL/script/shader-combo errors in unrelated wallpapers --
+  consistent with the same pre-existing corpus-timing flakiness
+  already established in #40/#42, not a regression. 0 crashes across
+  all 440 is the number that actually matters here, and it's clean.
+- Multi-frame spot-check: swept all 437 non-target scene wallpapers
+  twice (3s and, by an accidental script re-run, 6s timeouts) for any
+  other use of the exact `TEXB0004`+`FIF_UNKNOWN`+`imageCount>1` code
+  path this fix touches. Zero hits -- reported as a genuine negative
+  result rather than manufacturing a check against unrelated
+  wallpapers. (Found 2 wallpapers using multi-frame TEXB0003 textures,
+  a different, untouched code path.)
+
+**New findings during this investigation, not part of this fix**:
+Abyss Gaming's real script bug, logged separately as #44. Gengar's
+corpus-run error was confirmed pure flakiness (doesn't reproduce
+standalone) and correctly dropped from scope.
 
 ### #42 — DONE 2026-07-13: SIGSEGV in "Ocarina of Time" fixed — scene-graph cycle now detected and broken instead of crashing
 

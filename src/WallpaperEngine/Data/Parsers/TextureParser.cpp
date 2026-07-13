@@ -25,7 +25,7 @@ TextureUniquePtr TextureParser::parse (const BinaryReader& file) {
 	MipmapList mipmaps;
 
 	for (uint32_t mipmap = 0; mipmap < mipmapCount; mipmap++) {
-	    mipmaps.emplace_back (parseMipmap (file, *result, mipmap));
+	    mipmaps.emplace_back (parseMipmap (file, *result, image, mipmap));
 	}
 
 	result->images.emplace (image, mipmaps);
@@ -40,20 +40,26 @@ TextureUniquePtr TextureParser::parse (const BinaryReader& file) {
     return result;
 }
 
-MipmapSharedPtr TextureParser::parseMipmap (const BinaryReader& file, const Texture& header, uint32_t mipIndex) {
+MipmapSharedPtr TextureParser::parseMipmap (
+    const BinaryReader& file, const Texture& header, uint32_t imageIndex, uint32_t mipIndex
+) {
     auto result = std::make_shared<Mipmap> ();
 
     // TEXB0004 raw-GL variant (DXT5/BC7): no JSON, compression inferred from sizes.
-    // Mip 0: no per-mip header; width/height come from the TEXI header.
-    // Mip 1+: prefixed with [width u32][height u32][index u32] before the size fields.
+    // Only the very first mip of the very first image (image 0, mip 0) omits a per-mip header --
+    // width/height come from the TEXI header there. Every other mip -- including mip 0 of every
+    // image/frame after the first, for an animated/multi-frame texture (imageCount > 1) -- is
+    // prefixed with [width u32][height u32][index u32] before the size fields. Previously this
+    // only checked mipIndex > 0, so frame >= 1's mip 0 skipped a prefix that's actually still
+    // there, misreading its real width/height as uncompressedSize/compressedSize instead (#43).
     if (header.containerVersion == ContainerVersion_TEXB0004 && header.freeImageFormat == FIF_UNKNOWN) {
 	uint32_t mipWidth = header.textureWidth;
 	uint32_t mipHeight = header.textureHeight;
 
-	if (mipIndex > 0) {
+	if (imageIndex > 0 || mipIndex > 0) {
 	    mipWidth = file.nextUInt32 ();
 	    mipHeight = file.nextUInt32 ();
-	    std::ignore = file.nextUInt32 (); // redundant mip index field
+	    std::ignore = file.nextUInt32 (); // redundant mip/frame index field
 	}
 
 	result->width = mipWidth;
