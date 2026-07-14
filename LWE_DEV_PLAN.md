@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-13 (#44 DONE — reversed a deliberate-but-unvalidated design decision in ScriptEngine::runPendingInits(): applyUserProperties() now fires after init()/its update() fallback instead of before, matching init()'s documented intent. The original order was introduced in commit 62bb3ed and validated by a regression that structurally couldn't have caught this — Abyss Gaming, the wallpaper that trips it, was invisible to that corpus due to the same case-sensitivity bug #40 later fixed. Verified via direct proof the value populates correctly before applyUserProperties() runs, plus a full 440-wallpaper regression (438 clean, 2 errors, 0 crashes — better than #43's 432/8/0 baseline, remaining 2 errors confirmed pre-existing and unrelated). Abyss Gaming's separate combo-JSON error left undocumented-but-unfixed as genuinely invalid third-party content. Active Priority Order: #35, #45)
+**Last updated:** 2026-07-13 (#45 root-caused and closed (no independent fix — see #46): "Ocarina of Time"'s grey screen is a direct, exact consequence of #42's cycle-guard — every one of ~20 playable characters (45 body/eyes/mouth sub-objects) is caught in the same cyclic scene-graph pattern #42 detects, and cross-referencing #42's cycle log against a full --render-debug pass-log capture showed all 45 are completely absent from every render pass while nothing else in the cycle list ever renders either — an exact, total overlap. Conclusion: #42 correctly stops the crash but its cycle-skip appears to cascade into the entire dependent object cluster never being constructed, not just the one cyclic link. Real remediation is a design question, tracked as #46: reconsider whether a cycle-skip should just leave one link unresolved (object still built) rather than aborting the whole object's construction. Active Priority Order: #35, #46)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -332,27 +332,34 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #45 — "Ocarina of Time" renders grey/broken after #42's crash fix — GLSL shader failures + multiple script TypeErrors, not yet investigated
+### #46 — Reconsider #42's cycle-handling blast radius: skipping one cyclic edge appears to silently drop the entire object, not just that link
 
-Surfaced 2026-07-13 during manual verification of #42's fix: the crash
-is confirmed gone (runs indefinitely, cycle-detection firing and
-skipping edges as designed), but the wallpaper only shows a grey
-screen. Real log output shows several plausible independent causes,
-none yet root-caused or ruled in/out:
-- GLSL fragment shader compile failures (`'input' : Reserved word`,
-  `must write to gl_Position`) causing `Failed to setup object N` for
-  at least 8 different objects (313, 327, 341, 355, 369, 383, 401, 421)
-- Multiple ScriptEngine TypeErrors across different scripts
-  (`cannot read property 'x'/'visible'/'getAnimation'/'getParent' of
-  undefined`)
-- Repeated `Property 'pause' not found on object 'rainfall'/'rain_impact'`
-- Two unresolved FBO/texture override errors
-  (`_rt_imageLayerComposite_2396_a`, `_rt_imageLayerComposite_2635_a`)
+Surfaced 2026-07-13 while investigating #45 (see #45's closure in
+Completed Items for the full finding). #42's cycle-guard correctly
+stops the crash, but on "Ocarina of Time" it appears to cause every
+one of ~20 playable characters (45 body/eyes/mouth sub-objects total,
+all caught in the identical cycle pattern) to never render at all --
+not just the specific cyclic link being dropped. Hypothesis, not yet
+confirmed: a body object's eyes/mouth overlay lists the body as its
+*parent* (transform inheritance) while the body separately lists the
+eyes/mouth as a *dependency* (draw/composite order) -- a legitimate,
+probably common WE authoring pattern -- and if a failed parent/
+dependency resolution (nullptr from the cycle guard) currently causes
+the *caller* to abort its own construction rather than just leaving
+that one slot unresolved, a single skipped edge would cascade into
+the entire connected cluster never being built, exactly matching what
+was observed.
 
-Needs a proper discovery pass to determine which of these (if any)
-actually explains the grey screen, since this wallpaper was invisible
-to every corpus run before #42's fix and none of this has been
-investigated at all yet.
+Needs a discovery pass to confirm the actual propagation mechanism
+(what happens to a nullptr dependency/parent return value in
+CScene::createObject() and its callers) before deciding on a fix.
+Leaning toward changing a cycle-skip into a *tolerated missing link*
+(log a warning, leave that slot unresolved, still construct and
+register the object using whatever it did resolve) rather than a more
+invasive two-pass build-then-link restructure -- but only if the
+codebase doesn't already assume "if a CObject* exists, all its links
+are fully resolved" (the same kind of assumption that ruled out
+approach 1 back in #42 -- worth checking for the same landmine here).
 
 ---
 
@@ -362,6 +369,70 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #45 — DONE 2026-07-13 (root-caused, no independent fix — remediation folded into #46): "Ocarina of Time"'s grey screen is a direct consequence of #42 correctly handling this wallpaper's own cyclic scene graph, not a new bug
+
+**Investigation, using the engine's own built-in --render-debug tools
+rather than only custom diagnostics**:
+- Confirmed the symptom precisely via screenshot: all 4,953,600 pixels
+  exactly (195,195,195), zero variation anywhere on the 3440x1440
+  canvas -- genuinely uniform, not "mostly grey."
+- Used --render-debug pass-log to capture every real GPU draw call
+  across a full run (9,126 "Render pass" lines) -- no code changes
+  needed. The 8 GLSL-failing objects (int_slot_0-7, from a genuine
+  reserved-word/missing-gl_Position shader error) are small
+  non-fullscreen inventory-panel backgrounds, confirmed via the pass
+  log to be unrelated to the grey screen regardless of their shader
+  failure.
+- Used --render-debug base-only to isolate the base 3D scene: still
+  solid grey, exact pixel match (178,178,178 = 0.7 precisely) to the
+  scene's own raw authored clear color, confirmed via a temporary
+  diagnostic. This proved the base scene renders nothing at all --
+  not a partially-obscured or overlay problem.
+- Initially suspected "White Fade" (a tint overlay) was stuck visible;
+  checked directly via diagnostic and found the hypothesis wrong --
+  its g_BlendAlpha uniform is genuinely 0 every frame, correctly
+  invisible. Also ruled out the 2 FBO resolution failures
+  (_rt_imageLayerComposite_2396_a/2635_a) via blend.frag's actual
+  TRANSFORMUV clipping logic -- both clip to a small screen-space
+  rectangle, not the full screen.
+- **Decisive finding**: cross-referenced every object ID involved in
+  a scene-graph cycle (#42's own detection log) against the pass-log's
+  object roster. Every one of ~20 playable characters (Link, Zelda,
+  Malon, Nabooru, Mido, Impa, Darunia, Epona, Talon, Saria, Ruto,
+  Rauru, Kaepora Gaebora -- each split into body/eyes/mouth
+  sub-layers, 45 object IDs total) is caught in the identical cycle
+  pattern, and every single one is completely absent from all 9,126
+  render-pass lines. Every object that DOES render (interface UI,
+  particles) never appears in the cycle list. The overlap is exact
+  and total.
+
+**Conclusion**: not a new bug from #42 -- #42's fix correctly stops
+the crash, but breaking a cycle by skipping an edge appears to cascade
+into the entire dependent object cluster never being constructed, not
+just that one link being dropped. Before #42: instant crash on any
+character. After #42: no crash, but also no characters -- the
+wallpaper no longer crashes but shows nothing of substance either.
+This is a meaningfully different outcome than "fixed," and the real
+remediation is a design question about #42's cycle-handling scope,
+not a quick fix specific to this wallpaper -- tracked separately as
+#46.
+
+**Also traced and separated**:
+- Related to the same root cause: 3 of the ScriptEngine
+  "Property 'getAnimation' not found" errors are on exactly 3 of the
+  45 cycle-caught objects -- worth noting these specific objects DO
+  get constructed as ScriptableObjects, just without a getAnimation()
+  registered, so it's not a pure "never created" story for every
+  affected object. Worth a look if #46 gets picked up.
+- Confirmed independent/unrelated: the 2 FBO failures (ruled out via
+  shader source, above), repeated "pause" errors on rainfall/
+  rain_impact particle objects (not in the cycle list, separate
+  missing-method gap), and a TypeError on the base "3D Camera" object
+  (also not in the cycle list, its own separate scripting bug).
+
+All temporary diagnostics reverted; git diff confirmed clean. No fix
+implemented for #45 itself.
 
 ### #44 — DONE 2026-07-13: fixed applyUserProperties()/init() call order in ScriptEngine::runPendingInits() — a deliberate but unvalidated design decision, reversed
 
