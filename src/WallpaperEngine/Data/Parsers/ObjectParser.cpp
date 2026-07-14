@@ -1,6 +1,7 @@
 #include "ObjectParser.h"
 #include "EffectParser.h"
 #include "MaterialParser.h"
+#include "MdlvMeshParser.h"
 #include "ModelParser.h"
 
 #include "ShaderConstantParser.h"
@@ -13,6 +14,7 @@
 
 #include <glm/gtc/constants.hpp>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 
 using namespace WallpaperEngine::Data::Parsers;
@@ -45,6 +47,7 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
     // use shape to refer to VolumeLight
     const auto shapeIt = it.find ("shape");
     const auto cameraIt = it.find ("camera");
+    const auto modelIt = it.find ("model");
 
     // Parse base object data
     // Some particle objects have numeric 'name' fields, so handle type mismatches gracefully
@@ -95,6 +98,25 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	return parseText (it, project, std::move (basedata));
     } else if (cameraIt != it.end () && cameraIt->is_string ()) {
 	return parseCamera (it, project, std::move (basedata));
+    } else if (modelIt != it.end () && modelIt->is_string ()) {
+	auto model3D = parseModel3D (it, project, std::move (basedata), *modelIt);
+	if (model3D != nullptr) {
+	    return model3D;
+	}
+	// The referenced .mdl has an "MDLS" skeleton section (rigged/animated model, out of
+	// scope) or couldn't be read/parsed at all -- fall through to the exact same typeless
+	// placeholder every other unrecognized object gets. basedata was already moved into
+	// parseModel3D above, so rebuild it fresh from `it` rather than reusing it.
+	return std::make_unique<Object> (ObjectData {
+	    .id = it.require<int> ("id", "Object must have an id"),
+	    .name = it.require<std::string> ("name", "Object must have a name"),
+	    .dependencies = parseDependencies (it),
+	    .parent = it.optional<int> ("parent"),
+	    .origin = it.user ("origin", project.properties, glm::vec3 (0.0f)),
+	    .groupScale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
+	    .groupAngles = it.user ("angles", project.properties, glm::vec3 (0.0f)),
+	    .groupVisible = it.user ("visible", project.properties, true),
+	});
     } else if (lightIt != it.end ()) {
 	sLog.debug ("Light object skipped (not yet implemented): id=", basedata.id, " name=", basedata.name);
     } else if (shapeIt != it.end ()) {
@@ -945,6 +967,101 @@ CameraObjectUniquePtr ObjectParser::parseCamera (const JSON& it, const Project& 
 	CameraObjectData {
 	    .cameraName = it.optional<std::string> ("camera", "default"),
 	    .zoom = it.user ("zoom", project.properties, 1.0f),
+	}
+    );
+}
+
+Model3DUniquePtr
+ObjectParser::parseModel3D (const JSON& it, const Project& project, ObjectData base, const std::string& modelPath) {
+    std::vector<char> data;
+    try {
+	const auto stream = project.assetLocator->read (modelPath);
+	data.assign (std::istreambuf_iterator<char> (*stream), std::istreambuf_iterator<char> ());
+    } catch (const std::exception& e) {
+	sLog.error ("Cannot read model '", modelPath, "': ", e.what (), ", skipping object");
+	return nullptr;
+    }
+
+    const auto mesh = parseMdlv (data);
+
+    if (mesh.hasSkeleton) {
+	// Rigged/animated model -- out of scope, let the caller fall through to the existing
+	// typeless placeholder exactly as it did before this object type existed.
+	return nullptr;
+    }
+
+    if (mesh.subMeshes.empty ()) {
+	sLog.error ("No usable static mesh data found in model '", modelPath, "', skipping object");
+	return nullptr;
+    }
+
+    std::vector<Model3DSubMesh> subMeshes;
+    std::vector<MaterialPassUniquePtr> passes;
+    subMeshes.reserve (mesh.subMeshes.size ());
+    passes.reserve (mesh.subMeshes.size ());
+
+    for (const auto& sub : mesh.subMeshes) {
+	MaterialPassUniquePtr pass;
+
+	if (sub.materialPath.has_value ()) {
+	    try {
+		auto material = MaterialParser::load (project, *sub.materialPath);
+		if (!material->passes.empty ()) {
+		    pass = std::move (material->passes.front ());
+		}
+	    } catch (const std::exception& e) {
+		sLog.error ("Cannot load material '", *sub.materialPath, "' for model '", modelPath, "': ", e.what ());
+	    }
+	}
+
+	if (pass == nullptr) {
+	    // No usable material reference -- fall back to a plain untextured pass rather than
+	    // dropping the sub-mesh entirely.
+	    pass = std::make_unique<MaterialPass> (MaterialPass {
+		.blending = BlendingMode_Normal,
+		.cullmode = CullingMode_Disable,
+		.depthtest = DepthtestMode_Enabled,
+		.depthwrite = DepthwriteMode_Enabled,
+		.shader = "genericimage4",
+		.textures = { { 0, "util/white" } },
+		.usertextures = {},
+		.combos = {},
+		.constants = {},
+	    });
+	}
+
+	// This build has no lighting/reflection/fog system -- force these off regardless of what
+	// the wallpaper's own material JSON requested (generic4.frag defaults LIGHTING and FOG to
+	// 1), so the shader takes its unlit ambient-only path instead of reading uninitialized
+	// per-light-source state. Depth test/write are forced on regardless of the material's own
+	// (usually disabled, painterly-2D-compositing) defaults -- real 3D geometry needs correct
+	// depth sorting between sub-meshes, unlike a flat 2D image stack.
+	pass->combos["LIGHTING"] = 0;
+	pass->combos["REFLECTION"] = 0;
+	pass->combos["FOG"] = 0;
+	pass->depthtest = DepthtestMode_Enabled;
+	pass->depthwrite = DepthwriteMode_Enabled;
+
+	passes.push_back (std::move (pass));
+	subMeshes.push_back (Model3DSubMesh {
+	    .positions = sub.positions,
+	    .normals = sub.normals,
+	    .uvs = sub.uvs,
+	    .indices = sub.indices,
+	});
+    }
+
+    auto material = std::make_unique<Material> (Material { .filename = modelPath, .passes = std::move (passes) });
+
+    return std::make_unique<Model3D> (
+	std::move (base),
+	Model3DData {
+	    .scale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
+	    .angles = it.user ("angles", project.properties, glm::vec3 (0.0f)),
+	    .visible = it.user ("visible", project.properties, true),
+	    .modelPath = modelPath,
+	    .subMeshes = std::move (subMeshes),
+	    .material = std::move (material),
 	}
     );
 }

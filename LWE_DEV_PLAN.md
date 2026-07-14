@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-14 (#46 DONE — fixed the universal property-registration collision in ScriptableObject::registerProperty() (last-wins overwrite + deferred, once-per-object script-queuing via finalizeProperties()), confirmed via 100% collision rate across every scene wallpaper tested. Verified safe: #44 interaction explicitly checked (sequential, non-overlapping stages), full regression better than baseline (439/1/0 vs 438/2/0), and a new crash risk found during longer manual verification was run to ground and confirmed unrelated — a pre-existing D-Bus/album-art race first seen in #4, now logged as #48. Two loose ends spun off, neither blocking this fix: #47 (Ocarina of Time still renders grey — registration bug fixed but 42 of 45 characters remain invisible for an unidentified reason) and #48 (the AlbumTexture/D-Bus race itself, hit twice now, not yet root-caused). Active Priority Order: #35, #47, #48)
+**Last updated:** 2026-07-14 (#47 PARKED — attempted static-mesh 3D model support for Ocarina of Time's "model"-keyed objects (39% of its scene, previously silently discarded by ObjectParser). Built a new CModel render class + generalized MdlvMeshParser utility (safely refactored from the existing puppet-mesh finder, zero regression verified against its historical baseline), but discovered the static-file mesh-layout heuristic doesn't generalize the way scoping estimated — 0/115 static objects produced valid geometry, a real reverse-engineering task, not the "cheap" tier assumed. Chose to fail safe (fall through to the existing placeholder) rather than ship wrong geometry; full regression confirmed clean via git-stash comparison. Decided to park rather than continue open-ended reverse-engineering for one confirmed corpus outlier (0/156 other sampled wallpapers affected). This closes out the full Ocarina of Time investigation thread that ran through #42/#45/#46/#47. Active Priority Order: #35, #48)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -332,53 +332,6 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #47 — Ocarina of Time's grey screen is NOT primarily about the 45 character sub-objects — it's a missing "model"-keyed 3D object type, affecting 39% of the scene
-
-**Original hypothesis, refuted 2026-07-14**: suspected character-select
-scripts targeting plain (non-ScriptableObject) containers like
-link_child/link_adult couldn't take effect because those containers
-can't be scripted. Confirmed this premise is factually TRUE (verified
-via live diagnostic: object.is<Image>()=0 for these containers, and
-their own "visible" fields do carry real character-select scripts,
-e.g. link_adult: update() returns visible=(shared.timeTravel==1)) --
-but confirmed it's NOT the actual gate. Directly checked CScene's
-render loop and CImage::render(): there is no ancestor-visibility
-propagation anywhere in the codebase -- each object's render() checks
-only its own "visible" field, never a parent container's. So even a
-perfectly-wired container script would have zero effect on whether
-children draw.
-
-**The real cause, confirmed via the same --render-debug pass-log
-cross-reference technique #45 used**: `ObjectParser::parse()`
-(ObjectParser.cpp:88-128) has no handling at all for a top-level
-"model" key (Wallpaper Engine's format for actual 3D geometry layers,
-distinct from flat "image" sprites) -- it only recognizes "image",
-"sound", "particle", "text", "camera". Any object using "model":
-"<path>.mdl" instead of "image" falls straight into the generic/
-pure-group fallback and is silently discarded as an empty placeholder
-with zero geometry. Confirmed scene-wide via a direct count: 148 of
-381 objects (39%) in this scene use "model" without "image" --
-including sky_day, sky_night, sky_cloudy, castle_courtyard (the entire
-environment) and every character's actual 3D body, not just the
-eyes/mouth overlays originally suspected. Cross-checked against
---render-debug pass-log: none of these 148 objects ever receive a draw
-call. Only 33 of 381 objects render at all in a full run (UI/interface
-elements).
-
-**Reframing**: this was never really about 45 character sub-objects --
-it's that this fork appears to have no parsing/rendering support for
-Wallpaper Engine's 3D-model scene-object type at all, unlike existing
-bugs in this session (#40-#46), which were all cases of existing logic
-doing something incorrectly. This looks like an unimplemented feature,
-not a bug in existing code. The eyes/mouth static "visible"=false gap
-(no script at all) is real but secondary -- even fully fixed, character
-bodies still wouldn't render without "model" support.
-
-**Next step, per direction from Ian**: scope how large "supporting
-3D-model objects" actually is before deciding whether to pursue it (see
-next investigation) -- not yet decided whether this gets implemented,
-documented as a known limitation, or something in between.
-
 ### #48 — AlbumTexture/D-Bus album-art race — real, pre-existing crash, hit twice across unrelated sessions, not yet fixed
 
 A rare, timing-dependent SIGSEGV in AlbumTexture::copyContents(),
@@ -406,6 +359,80 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #47 — PARKED 2026-07-14: static-mesh 3D model support attempted, built safely, but the real goal (Ocarina of Time rendering) was not achieved
+
+**Full arc**: started as "Ocarina of Time still grey after #46's fix."
+Refuted the character-select/plain-container hypothesis (factually
+true -- containers can't be scripted -- but not the actual gate, since
+no code path propagates visibility from a parent container to its
+children). Found the real cause: ObjectParser::parse() has no handling
+for a top-level "model" key at all, silently discarding any object
+using WE's 3D-model format -- confirmed scene-wide at 148/381 objects
+(39%), including the entire environment and every character's body,
+not just the 45 originally-suspected sub-objects. A feasibility
+scoping pass found CImage::loadPuppetMesh() already parses the same
+MDLV binary format for an unrelated feature (puppet-warp), and split
+the work into two tiers: static geometry (no "MDLS" skeleton section,
+115/148 objects, estimated cheap/reusable) vs. full skeletal-animated
+characters (33/148, confirmed multi-week, undocumented binary format).
+Corpus-wide, this pattern was found in zero of 156 other sampled
+workshop wallpapers -- a genuine outlier, not a common gap.
+
+**Decision**: pursue the static tier only, given the low estimated
+cost and the skeletal tier's confirmed large scope for one outlier
+wallpaper.
+
+**What was actually built**: a new CModel render class (parallel to
+CImage/CParticle/CText, using real 3D world-space transforms via the
+existing camera projection code, reusing the existing shader/material
+pipeline with forced LIGHTING=0/REFLECTION=0/FOG=0 combo overrides), a
+generalized MdlvMeshParser utility extracted from the existing
+puppet-mesh finder (with the original puppet-warp code refactored to a
+thin wrapper -- zero behavior change, verified against its historical
+baseline), and safe MDLS-based routing (model+no MDLS -> new static
+path, model+MDLS -> unchanged existing placeholder, no model key ->
+unchanged existing behavior).
+
+**Why it didn't achieve the goal**: the static-tier cost estimate,
+made during scoping, turned out to be wrong once actually attempted.
+The existing mesh-block-finding heuristic (correct for puppet-warp's
+character-mesh region) does not generalize to genuinely static .mdl
+files -- tested across all 115 static objects in this scene, 0
+produced valid geometry; every candidate block failed index-sanity
+validation as a false-positive byte-pattern match. Static .mdl files
+use a different internal layout the puppet-mesh parser was never
+designed for, and reverse-engineering that layout is itself a real,
+unscoped investigation -- not the "nearly free" tier originally
+estimated.
+
+**Verified safe rather than shipped broken**: parseModel3D() returns
+nullptr whenever no valid sub-mesh is found, so every static object
+falls through to the exact same placeholder as before this change --
+chose not to ship code that would silently render garbled/wrong
+geometry. Verification: Ocarina of Time's screenshot is pixel-identical
+to before (confirmed via diff, not just "looks similar"); all 33
+skeletal character objects still correctly route through the
+unchanged hasSkeleton early-return; puppet-warp's existing feature
+(Gwen Stacy, 3002198572) regression-checked clean against its exact
+historical baseline (vertices=4631, MDLV0019); full 440-wallpaper
+regression showed 434 clean/6 errors/0 crashes (vs #46's 439/1/0),
+investigated rather than accepted at face value -- confirmed via git
+stash + direct re-test that every new/changed entry (including a
+CRASH_EXCEPTION on Honkai: Star Rail) reproduces byte-identically on
+the original pre-#47 code, consistent with the corpus-timing flakiness
+already documented throughout this session (#40/#42/#43/#46), not a
+real regression.
+
+**Decision to park, not continue**: given the static-tier estimate
+already proved wrong once, the real remaining work is now genuine,
+unscoped binary reverse-engineering for one confirmed corpus outlier
+(0/156 other sampled wallpapers affected) -- not pursued further.
+The shipped code is safe and inert for this wallpaper (falls back
+identically to before), but has independent value: the shared
+MdlvMeshParser utility is cleaner than the prior single-purpose
+puppet-mesh finder it replaces, and a real CModel class now exists as
+a foundation if this is ever picked back up.
 
 ### #46 — DONE 2026-07-14: fixed silent property-registration collision in ScriptableObject::registerProperty() — confirmed universal across scene wallpapers, fix verified safe
 

@@ -25,6 +25,10 @@ private:
     static ParticleUniquePtr parseParticle (const JSON& it, const Project& project, ObjectData base);
     static TextUniquePtr parseText (const JSON& it, const Project& project, ObjectData base);
     static CameraObjectUniquePtr parseCamera (const JSON& it, const Project& project, ObjectData base);
+    // Returns nullptr (falls through to the existing typeless placeholder, unchanged) when the
+    // referenced .mdl carries an "MDLS" skeleton section -- rigged/animated models are explicitly
+    // out of scope. Also returns nullptr if the asset can't be read/parsed at all.
+    static Model3DUniquePtr parseModel3D (const JSON& it, const Project& project, ObjectData base, const std::string& modelPath);
     static std::vector<ImageEffectUniquePtr> parseEffects (const JSON& it, const Project& project);
     static ImageEffectUniquePtr parseEffect (const JSON& it, const Project& project);
     static std::vector<ImageEffectPassOverrideUniquePtr>

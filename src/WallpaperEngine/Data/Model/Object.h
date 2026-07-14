@@ -635,4 +635,46 @@ public:
 	Object (std::move (data)), CameraObjectData (std::move (camData)) { };
     ~CameraObject () override = default;
 };
+
+/**
+ * A single mesh sub-block extracted from a static (non-skeletal) MDLV "model"-keyed 3D scene
+ * object. A real .mdl file commonly contains several of these (one per material/texture used by
+ * the model), each independently indexed.
+ */
+struct Model3DSubMesh {
+    std::vector<float> positions; // 3 floats per vertex, model-local space
+    std::vector<float> normals; // 3 floats per vertex, computed from face winding
+    std::vector<float> uvs; // 2 floats per vertex
+    std::vector<uint16_t> indices;
+};
+
+struct Model3DData {
+    /** Scale (x, y, z), own copy -- see ImageData's identical rationale re: registerProperty(). */
+    UserSettingUniquePtr scale;
+    /** Rotation (x, y, z) in radians -- unlike 2D image objects, all three axes are meaningful. */
+    UserSettingUniquePtr angles;
+    /** If the model is visible or not */
+    UserSettingUniquePtr visible;
+    /** Original .mdl asset path, kept for diagnostics/logging */
+    std::string modelPath;
+    /** One entry per material/texture used by the model; material.passes has the same length and
+     * index correspondence (subMeshes[i] renders with *material.passes[i]). */
+    std::vector<Model3DSubMesh> subMeshes;
+    /** Aggregated material: one MaterialPass per sub-mesh */
+    MaterialUniquePtr material;
+};
+
+/**
+ * A static (non-skeletal) Wallpaper Engine "model"-keyed 3D scene object -- real mesh geometry
+ * with a full 3D world-space transform, as opposed to Image's flat 2D billboard. Rigged/animated
+ * models (whose .mdl carries an "MDLS" skeleton section) are explicitly out of scope and never
+ * become a Model3D -- ObjectParser::parseModel3D() falls through to the existing typeless
+ * placeholder for those, unchanged.
+ */
+class Model3D : public Object, public Model3DData {
+public:
+    explicit Model3D (ObjectData data, Model3DData modelData) noexcept :
+	Object (std::move (data)), Model3DData (std::move (modelData)) { };
+    ~Model3D () override = default;
+};
 } // namespace WallpaperEngine::Data::Model

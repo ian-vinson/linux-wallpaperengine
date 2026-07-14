@@ -19,6 +19,7 @@
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Data/Model/UserSetting.h"
 #include "WallpaperEngine/Data/Parsers/MaterialParser.h"
+#include "WallpaperEngine/Data/Parsers/MdlvMeshParser.h"
 #include "WallpaperEngine/Data/Utils/BinaryReader.h"
 #include "WallpaperEngine/Data/Utils/MemoryStream.h"
 #include "WallpaperEngine/Logging/Log.h"
@@ -77,34 +78,21 @@ struct PuppetMeshBlock {
     uint32_t indexBytes = 0;
 };
 
+// Delegates to the shared MDLV block scanner (WallpaperEngine::Data::Parsers::findMdlvMeshBlocks,
+// also used by ObjectParser's static "model"-keyed 3D object loader) and keeps only the first
+// block found, preserving this function's original single-block behavior exactly.
 std::optional<PuppetMeshBlock> findPuppetMeshBlock (
     const BinaryReader& reader, size_t markerSize, size_t mdlsOffset, size_t meshHeaderSize, size_t vertexStride
 ) {
-    for (size_t offset = markerSize; offset + meshHeaderSize + sizeof (uint32_t) < mdlsOffset; offset++) {
-	reader.base ().seekg (static_cast<std::streamoff> (offset + sizeof (uint32_t)), std::ios::beg);
-	const uint32_t candidateVertexBytes = reader.nextUInt32 ();
-	const size_t verticesOffset = offset + meshHeaderSize;
-	const size_t indexLengthOffset = verticesOffset + candidateVertexBytes;
+    const auto blocks = findMdlvMeshBlocks (reader, markerSize, mdlsOffset, meshHeaderSize, vertexStride);
 
-	if (candidateVertexBytes == 0 || candidateVertexBytes % vertexStride != 0
-	    || indexLengthOffset + sizeof (uint32_t) > mdlsOffset) {
-	    continue;
-	}
-
-	reader.base ().seekg (static_cast<std::streamoff> (indexLengthOffset), std::ios::beg);
-	const uint32_t candidateIndexBytes = reader.nextUInt32 ();
-	const size_t indicesOffset = indexLengthOffset + sizeof (uint32_t);
-	if (candidateIndexBytes == 0 || candidateIndexBytes % (sizeof (uint16_t) * 3) != 0
-	    || indicesOffset + candidateIndexBytes > mdlsOffset) {
-	    continue;
-	}
-
-	return PuppetMeshBlock { .headerOffset = offset,
-				 .vertexBytes = candidateVertexBytes,
-				 .indexBytes = candidateIndexBytes };
+    if (blocks.empty ()) {
+	return std::nullopt;
     }
 
-    return std::nullopt;
+    return PuppetMeshBlock { .headerOffset = blocks.front ().headerOffset,
+			     .vertexBytes = blocks.front ().vertexBytes,
+			     .indexBytes = blocks.front ().indexBytes };
 }
 }
 

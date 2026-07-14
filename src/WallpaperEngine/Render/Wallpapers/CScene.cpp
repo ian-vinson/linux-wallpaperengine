@@ -1,4 +1,5 @@
 #include "WallpaperEngine/Render/Objects/CImage.h"
+#include "WallpaperEngine/Render/Objects/CModel.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
 #include "WallpaperEngine/Render/Objects/CSound.h"
 #include "WallpaperEngine/Render/Objects/CText.h"
@@ -317,6 +318,8 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
 	}
 
 	renderObject = new Objects::CParticle (*this, particleData);
+    } else if (object.is<Model3D> ()) {
+	renderObject = new Objects::CModel (*this, *object.as<Model3D> ());
     } else if (object.is<CameraObject> ()) {
 	const auto& cam = *object.as<CameraObject> ();
 	if (cam.cameraName == "default" && cam.origin && cam.origin->value) {
