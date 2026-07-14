@@ -332,19 +332,52 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #47 — Ocarina of Time still renders grey after #46's fix — registration bug confirmed fixed, but something else still keeps 42 of 45 characters invisible
+### #47 — Ocarina of Time's grey screen is NOT primarily about the 45 character sub-objects — it's a missing "model"-keyed 3D object type, affecting 39% of the scene
 
-#46's registerProperty() collision fix is confirmed correct (wiring
-verified via pointer-identity diagnostic: visible/scale/angles on all
-sampled characters now correctly point at the subclass's own field).
-But applying the fix alone did not make Ocarina of Time's screenshot
-change -- still pixel-identical 100% grey. The known getAnimation
-error from #45 only accounts for 3 of the 45 cycle-involved character
-objects. What keeps the other 42 invisible is not yet identified --
-not investigated beyond confirming the registration fix alone doesn't
-resolve it. Needs its own fresh discovery pass: something else in the
-visibility/scripting/rendering path for these specific objects is
-still wrong.
+**Original hypothesis, refuted 2026-07-14**: suspected character-select
+scripts targeting plain (non-ScriptableObject) containers like
+link_child/link_adult couldn't take effect because those containers
+can't be scripted. Confirmed this premise is factually TRUE (verified
+via live diagnostic: object.is<Image>()=0 for these containers, and
+their own "visible" fields do carry real character-select scripts,
+e.g. link_adult: update() returns visible=(shared.timeTravel==1)) --
+but confirmed it's NOT the actual gate. Directly checked CScene's
+render loop and CImage::render(): there is no ancestor-visibility
+propagation anywhere in the codebase -- each object's render() checks
+only its own "visible" field, never a parent container's. So even a
+perfectly-wired container script would have zero effect on whether
+children draw.
+
+**The real cause, confirmed via the same --render-debug pass-log
+cross-reference technique #45 used**: `ObjectParser::parse()`
+(ObjectParser.cpp:88-128) has no handling at all for a top-level
+"model" key (Wallpaper Engine's format for actual 3D geometry layers,
+distinct from flat "image" sprites) -- it only recognizes "image",
+"sound", "particle", "text", "camera". Any object using "model":
+"<path>.mdl" instead of "image" falls straight into the generic/
+pure-group fallback and is silently discarded as an empty placeholder
+with zero geometry. Confirmed scene-wide via a direct count: 148 of
+381 objects (39%) in this scene use "model" without "image" --
+including sky_day, sky_night, sky_cloudy, castle_courtyard (the entire
+environment) and every character's actual 3D body, not just the
+eyes/mouth overlays originally suspected. Cross-checked against
+--render-debug pass-log: none of these 148 objects ever receive a draw
+call. Only 33 of 381 objects render at all in a full run (UI/interface
+elements).
+
+**Reframing**: this was never really about 45 character sub-objects --
+it's that this fork appears to have no parsing/rendering support for
+Wallpaper Engine's 3D-model scene-object type at all, unlike existing
+bugs in this session (#40-#46), which were all cases of existing logic
+doing something incorrectly. This looks like an unimplemented feature,
+not a bug in existing code. The eyes/mouth static "visible"=false gap
+(no script at all) is real but secondary -- even fully fixed, character
+bodies still wouldn't render without "model" support.
+
+**Next step, per direction from Ian**: scope how large "supporting
+3D-model objects" actually is before deciding whether to pursue it (see
+next investigation) -- not yet decided whether this gets implemented,
+documented as a known limitation, or something in between.
 
 ### #48 — AlbumTexture/D-Bus album-art race — real, pre-existing crash, hit twice across unrelated sessions, not yet fixed
 
