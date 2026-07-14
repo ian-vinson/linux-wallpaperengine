@@ -332,34 +332,29 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #46 — Reconsider #42's cycle-handling blast radius: skipping one cyclic edge appears to silently drop the entire object, not just that link
+### #46 — Ocarina of Time's 45 characters ARE constructed but never render — cycle-guard construction-cascade hypothesis refuted, real cause is post-construction
 
-Surfaced 2026-07-13 while investigating #45 (see #45's closure in
-Completed Items for the full finding). #42's cycle-guard correctly
-stops the crash, but on "Ocarina of Time" it appears to cause every
-one of ~20 playable characters (45 body/eyes/mouth sub-objects total,
-all caught in the identical cycle pattern) to never render at all --
-not just the specific cyclic link being dropped. Hypothesis, not yet
-confirmed: a body object's eyes/mouth overlay lists the body as its
-*parent* (transform inheritance) while the body separately lists the
-eyes/mouth as a *dependency* (draw/composite order) -- a legitimate,
-probably common WE authoring pattern -- and if a failed parent/
-dependency resolution (nullptr from the cycle guard) currently causes
-the *caller* to abort its own construction rather than just leaving
-that one slot unresolved, a single skipped edge would cascade into
-the entire connected cluster never being built, exactly matching what
-was observed.
+**Original hypothesis, refuted 2026-07-14**: suspected a cycle-skip in
+CScene::createObject() caused the calling object's own construction to
+abort, cascading into the whole connected cluster never being built.
+Traced the actual code and confirmed empirically this is NOT what
+happens: every recursive dependency/parent resolution's return value
+is discarded in CScene::createObject() (never checked/assigned), so a
+nested cycle-guard nullptr has no effect on the caller. Instrumented
+all 45 real cycle-involved object IDs from "Ocarina of Time"
+(3737268876) and confirmed all 45 are present in both m_objects and
+m_objectsByRenderOrder after construction -- none were dropped.
+Repo-wide grep confirmed nothing else gates on dependencies/parent
+either. #42's cycle-guard fix itself needs no reconsideration on these
+grounds.
 
-Needs a discovery pass to confirm the actual propagation mechanism
-(what happens to a nullptr dependency/parent return value in
-CScene::createObject() and its callers) before deciding on a fix.
-Leaning toward changing a cycle-skip into a *tolerated missing link*
-(log a warning, leave that slot unresolved, still construct and
-register the object using whatever it did resolve) rather than a more
-invasive two-pass build-then-link restructure -- but only if the
-codebase doesn't already assume "if a CObject* exists, all its links
-are fully resolved" (the same kind of assumption that ruled out
-approach 1 back in #42 -- worth checking for the same landmine here).
+**Real question, not yet answered**: the 45 characters ARE built and
+registered in render order, yet #45 established none of them appear
+in any of 9,126 real render-pass log lines. Whatever suppresses their
+rendering happens after render-order registration -- most likely in
+scripting (several of these same 45 objects throw getAnimation/
+getParent/visible-of-undefined TypeErrors, already flagged in #45) or
+some other per-frame visibility/culling path. Not yet investigated.
 
 ---
 
