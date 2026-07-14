@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-14 (#46 root-caused AND scoped, fix not yet implemented: Ocarina of Time's characters have visible=0 forever because of a silent property-registration collision in ScriptableObject::registerProperty() — CImage's own "visible"/"scale"/"angles" registrations are silently discarded in favor of an unrelated base-class copy the render/transform code never reads, confirmed via pointer-identity diagnostics. Scoping pass confirmed this is universal, not wallpaper-specific: 100% collision rate across every scene wallpaper tested (6/6 with CImage/CParticle/CText content), and it also silently kills self-contained property scripts (e.g. Gengar UI elements, moon-phase objects) whose own script is proven dead by control flow in ScriptEngine::queueScript(), not just Ocarina's cross-object "selector never lands" pattern. A naive last-wins fix is unsafe — queueScript()'s own key-dedup would bind the executing JS module to the wrong copy — and CImage::localTransform() shows the base registration is load-bearing for plain group/container objects, so it can't just be deleted either. Recommended direction: decouple registration (last-wins) from script-queuing (deferred to run once per object after its full constructor chain completes). Active Priority Order: #35, #46)
+**Last updated:** 2026-07-14 (#46 DONE — fixed the universal property-registration collision in ScriptableObject::registerProperty() (last-wins overwrite + deferred, once-per-object script-queuing via finalizeProperties()), confirmed via 100% collision rate across every scene wallpaper tested. Verified safe: #44 interaction explicitly checked (sequential, non-overlapping stages), full regression better than baseline (439/1/0 vs 438/2/0), and a new crash risk found during longer manual verification was run to ground and confirmed unrelated — a pre-existing D-Bus/album-art race first seen in #4, now logged as #48. Two loose ends spun off, neither blocking this fix: #47 (Ocarina of Time still renders grey — registration bug fixed but 42 of 45 characters remain invisible for an unidentified reason) and #48 (the AlbumTexture/D-Bus race itself, hit twice now, not yet root-caused). Active Priority Order: #35, #47, #48)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -332,136 +332,38 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #46 — Ocarina of Time's characters have visible=0 forever — confirmed root cause: silent property-registration collision in registerProperty(), likely a general engine bug, fix not yet designed
+### #47 — Ocarina of Time still renders grey after #46's fix — registration bug confirmed fixed, but something else still keeps 42 of 45 characters invisible
 
-**Root cause, confirmed via live diagnostic (pointer-identity proof,
-not inference)**: ScriptableObject's base constructor registers a
-"visible" property from object.groupVisible. CImage's own constructor
-separately registers its own "visible" from image.visible -- a
-different, independently-parsed value, and the one CImage::render()
-actually reads at the render-gate check (CImage.cpp, "do not try to
-render something that did not initialize successfully" guard).
-registerProperty()'s m_properties.emplace() silently no-ops on a
-duplicate key -- since the base class constructor runs first,
-CImage's own registration is always discarded. Diagnostic confirmed:
-for 5 sampled character objects, registerProperty("visible", ...) was
-called twice with two different pointer addresses; the second call
-(the one render() reads) always logged already_present=1 and was
-dropped.
+#46's registerProperty() collision fix is confirmed correct (wiring
+verified via pointer-identity diagnostic: visible/scale/angles on all
+sampled characters now correctly point at the subclass's own field).
+But applying the fix alone did not make Ocarina of Time's screenshot
+change -- still pixel-identical 100% grey. The known getAnimation
+error from #45 only accounts for 3 of the 45 cycle-involved character
+objects. What keeps the other 42 invisible is not yet identified --
+not investigated beyond confirming the registration fix alone doesn't
+resolve it. Needs its own fresh discovery pass: something else in the
+visibility/scripting/rendering path for these specific objects is
+still wrong.
 
-Consequence: any script targeting .visible on these objects writes to
-the orphaned base-class copy. image.visible -- the copy that actually
-gates rendering -- stays frozen forever at its JSON-parsed initial
-value (false for these character sprites), regardless of what any
-script does. This is silent: no error, no exception, no crash --
-confirmed the getAnimation/getParent/visible-of-undefined TypeErrors
-from #45 are NOT the cause (checked directly: none of the 45 affected
-objects even have a logged error for this).
+### #48 — AlbumTexture/D-Bus album-art race — real, pre-existing crash, hit twice across unrelated sessions, not yet fixed
 
-**Why this may be bigger than one wallpaper**: this is a general
-mechanism bug in registerProperty()'s silent-duplicate-key behavior,
-not something specific to this wallpaper's data. Any CImage (or
-similarly-structured subclass) re-registering a base-class property
-name could be silently broken the same way, with zero errors logged
--- a materially different risk profile than #40/#42/#43/#44/#45,
-which all announced themselves via a crash or error tag.
-
-**Scoping investigation, 2026-07-14 -- collision confirmed universal,
-fix design NOT yet implemented (see below for why a naive fix is
-unsafe)**:
-
-Every suspected collision was confirmed with the same pointer-identity
-diagnostic technique used for "visible", not by reading code and
-assuming:
-- CImage: "visible", "scale", AND "angles" all collide the same way
-  (image.visible/scale/angles vs. object.groupVisible/groupScale/
-  groupAngles).
-- CParticle: same three (particle.visible/scale/angles vs.
-  object.group*) -- confirmed.
-- CText: "visible" and "scale" collide the same way (text.visible/
-  scale vs. object.group*). "angles" does NOT collide -- Text never
-  redeclares its own angles field, so the base's groupAngles is used
-  uncontested. Checked whether this is a live orphan too: no code
-  path in CText ever reads groupAngles for rotation, so this is inert
-  (Text was simply never wired to rotate at all), not a second
-  instance of the same bug.
-- "origin" never collides on any type -- Image/Text/Particle never
-  reparse their own origin; both registrations reference the literal
-  same underlying field.
-
-**Corpus spot-check**: ran the collision diagnostic against 6 real
-scene wallpapers (Ocarina of Time, Gengar/3300031038, 2249718613,
-3248239912, Abyss Gaming/3675966045, 3044659344). Every single one
-with any CImage/CParticle/CText content showed the identical 100%
-collision rate on scale/angles/visible -- this is not a narrow edge
-case, it is the default state of the entire object model for every
-scene wallpaper tested. The one wallpaper with zero hits (793602574)
-is a web wallpaper and doesn't use this native object model at all.
-
-**A worse variant than Ocarina's, found in this pass**: some objects
-have the identical script text independently parsed into BOTH
-colliding copies (Gengar's UI elements, 3248239912's moon-phase
-images -- e.g. object id=114 "Sun"'s own scale field carries a script
-in both copies). Traced ScriptEngine::queueScript() (ScriptEngine.cpp
-~655) directly: registerProperty()'s collision branch returns before
-ever calling queueScript(), so the losing copy's script is never
-compiled or evaluated at all -- proven dead by control flow, not by
-absence of an observed symptom. (A live 20-second sample of id=114's
-scale value showed no divergence in that window, but that's
-inconclusive on timing, not a refutation -- the dead-code path is
-proven directly from the code.)
-
-**Nothing relies on the current first-wins behavior**: grepped every
-getProperty("scale"/"visible"/"angles"/"origin") call site -- none
-exist; the only readers (ScriptableObjectAdapter.cpp exotic get/set)
-take a JS-supplied dynamic name, never a hardcoded one expecting the
-base copy specifically. ScriptableObject::getProperties() (the full
-map) has zero external callers today. Found one existing comment
-(CPass.cpp's registerScriptedConstant(), ~line 1033) where a prior
-author already recognized registerProperty()'s silent-clobber-on-
-duplicate-name behavior as dangerous and deliberately routed around
-it for a different collision axis (multiple effects on one object
-reusing generic constant names like "multiply"/"alpha") via a
-uniquely-keyed direct queueScript() call bypassing registerProperty()
-entirely -- confirming the design was already known to be unsafe for
-name reuse, just not recognized for this base/derived-class case.
-
-**Why a simple "flip to last-wins" is not a safe fix on its own**:
-queueScript() dedupes by the key "name_id", identical for both the
-base and subclass registrations of the same property. If
-registerProperty() were changed to just overwrite-and-always-queue,
-the SECOND call's queueScript() would find the key already present
-(from the first/base call) and no-op -- meaning the actually-executing
-JS module would stay permanently bound to the base (orphaned) value's
-script, while m_properties[name] (read by the JS exotic get/set) now
-points at the subclass's value. That's a new, different mismatch, not
-a fix.
-
-**A real design wrinkle for the eventual fix**: CImage::localTransform()
-(CImage.cpp ~111-129) explicitly dispatches -- Image/Text read their
-own scale/angles, but plain group/container objects with no Image/
-Text/Particle data (e.g. Ocarina's own "zelda_child") explicitly fall
-back to object.groupScale/groupAngles for transform propagation down
-the parent chain. The base registration is NOT dead weight -- it's
-load-bearing for plain containers. A fix cannot simply delete the base
-registration; it has to make the subclass's copy win when one exists,
-while leaving the base copy correct and active for objects that have
-no subclass-specific override.
-
-**Recommended direction, not yet implemented**: decouple property
-registration from script-queuing. Registration keeps last-wins
-overwrite semantics (subclasses always register after their base
-per C++ constructor order, so this naturally makes the more-specific
-field win). Defer the actual queueScript() call to run exactly once
-per (name, id), after an object's full constructor chain completes,
-using whatever value is left standing in the map at that point. This
-avoids both the observed bug and the "wrong module bound" trap a
-naive fix would introduce. This is a real, if contained, restructuring
-of ScriptableObject's construction-time behavior -- not a one-line
-patch.
-
-**Not yet fixed** -- scoping is done; the actual fix implementation
-and its own verification pass are still pending.
+A rare, timing-dependent SIGSEGV in AlbumTexture::copyContents(),
+reached via DBusMediaSource::parseMetadata -> MediaSource::
+fireAlbumArtListeners() when a real MPRIS media-source signal (e.g.
+Firefox playing a YouTube video) arrives within a narrow window during
+TextureCache's album-art listener lifecycle. First seen 2026-07-06
+during unrelated #4 (offset/scaling) testing (3/3 identical retries ran
+clean afterward -- confirmed non-reproducible on demand at the time).
+Seen again 2026-07-14 while verifying #46 (1/7 runs at 45-55s), with
+the mechanism this time directly confirmed via live dbus-monitor
+capture of real PropertiesChanged signals (one captured run received 2
+signals and did NOT crash, confirming a narrow timing window is
+required, not mere signal arrival). Confirmed via full backtrace
+(coredumpctl gdb, bt full) to have zero overlap with #46's changes or
+any scripting-related code. Not yet root-caused at the
+TextureCache/AlbumTexture level or fixed -- needs its own investigation
+whenever picked up.
 
 ---
 
@@ -471,6 +373,70 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #46 — DONE 2026-07-14: fixed silent property-registration collision in ScriptableObject::registerProperty() — confirmed universal across scene wallpapers, fix verified safe
+
+**Root cause, confirmed via pointer-identity diagnostics across this
+investigation's several passes**: ScriptableObject's base constructor
+registers generic properties (visible/scale/angles from
+object.groupVisible/groupScale/groupAngles) before subclasses (CImage,
+CParticle, CText) register their own more-specific versions of the
+same names. registerProperty()'s m_properties.emplace() silently
+no-oped on the duplicate key, so the subclass's own registration --
+the one actually read at render/transform time -- was always
+discarded, and its script (if any) was never queued
+(ScriptEngine::queueScript() proven unreachable for the losing copy by
+control flow, not by absence of an observed symptom). Confirmed
+universal: 100% collision rate across every scene wallpaper tested
+(6/6 with any CImage/CParticle/CText content) -- the default state of
+the entire object model, not a narrow case.
+
+**Fix**: registerProperty() now uses erase-then-emplace for last-wins
+overwrite semantics (PropertyEntry::value is a reference and can't be
+reassigned in place). Script-queuing decoupled into a new
+finalizeProperties(), called exactly once per object from
+CScene::dispatchObjectType() right after that object's full
+constructor chain (base + derived) completes, using whatever
+registration is left standing -- avoiding the "wrong script bound to
+the wrong copy" trap a naive inline last-wins would have caused via
+queueScript()'s own name+id key-dedup.
+
+**Verification**:
+- Wiring confirmed correct via diagnostic on Ocarina's characters:
+  visible/scale/angles all now correctly point at the subclass's own
+  field, not the base's orphaned one.
+- #44 interaction explicitly checked, not assumed: finalizeProperties()
+  runs entirely inside CScene's construction loop, which fully
+  completes for every object before runPendingInits() (#44's fix)
+  begins -- sequential, non-overlapping stages, no inversion or
+  duplicate-queuing risk.
+- Plain group/container objects confirmed structurally unaffected:
+  they never derive from ScriptableObject and never call
+  registerProperty() at all (corrected an earlier, slightly imprecise
+  "load-bearing base registration" framing once the real reason was
+  found).
+- Full 440-wallpaper regression: 439 clean, 1 error, 0 crashes (vs.
+  #44's 438/2/0 baseline) -- numerically better. The one remaining
+  error (Power | Chainsaw Man [4K]) is #43's already-known,
+  independently root-caused GLSL bug. One previously-erroring
+  wallpaper went clean; cause not chased down, not claimed as credit.
+- **A new crash risk surfaced during verification and was run to
+  ground rather than waved off**: longer (45-60s) manual testing
+  showed a 1/7 crash rate on wallpaper 3248239912 with the fix applied
+  vs. 0/7 on the original code -- initially suspicious, since this fix
+  makes previously-dead scripts execute for the first time. Full
+  investigation (real backtrace via coredumpctl gdb, live dbus-monitor
+  capture) refuted this: the crash is entirely inside
+  AlbumTexture::copyContents(), a real, pre-existing, timing-dependent
+  D-Bus/album-art race first documented in the unrelated #4
+  investigation months earlier -- zero overlap with anything this fix
+  touches. Confirmed unrelated to #46, not fixed here, logged
+  separately as #48 since it's now been hit twice.
+
+**Known limitation, not resolved by this fix**: Ocarina of Time's
+grey screen is not fixed by this change alone -- the registration bug
+is confirmed corrected, but 42 of its 45 characters remain invisible
+for a still-unidentified reason. Logged separately as #47.
 
 ### #45 — DONE 2026-07-13 (root-caused, no independent fix — remediation folded into #46): "Ocarina of Time"'s grey screen is a direct consequence of #42 correctly handling this wallpaper's own cyclic scene graph, not a new bug
 

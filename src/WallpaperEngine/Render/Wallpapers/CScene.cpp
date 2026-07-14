@@ -331,6 +331,14 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
 	renderObject = new CObject (*this, object);
     }
 
+    // Every registerProperty() call across this object's full constructor chain (base
+    // ScriptableObject ctor, then the derived class's own ctor body) has now run, so whichever
+    // registration won each property name is final -- safe to queue scripts now, before this
+    // object's own setup() runs.
+    if (renderObject->is<Scripting::ScriptableObject> ()) {
+	renderObject->as<Scripting::ScriptableObject> ()->finalizeProperties ();
+    }
+
     try {
 	renderObject->setup ();
     } catch (const std::exception& e) {

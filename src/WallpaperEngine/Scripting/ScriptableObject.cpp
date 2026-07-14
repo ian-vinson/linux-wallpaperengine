@@ -31,13 +31,16 @@ const std::map<std::string, ScriptableObject::PropertyEntry>& ScriptableObject::
 }
 
 void ScriptableObject::registerProperty (const std::string& name, DynamicValue& value) {
-    auto inserted = this->m_properties.emplace (
+    // PropertyEntry::value is a reference, so it can't be assigned in place -- erase the old
+    // entry (if any) before emplacing the new one, rather than trying to overwrite it.
+    this->m_properties.erase (name);
+    this->m_properties.emplace (
 	name, PropertyEntry { .key = name + "_" + std::to_string (this->getId ()), .value = value }
     );
+}
 
-    if (!inserted.second) {
-	return;
+void ScriptableObject::finalizeProperties () {
+    for (const auto& entry : this->m_properties | std::views::values) {
+	this->getScene ().getScriptEngine ().queueScript (entry.key, entry.value, *this);
     }
-
-    this->getScene ().getScriptEngine ().queueScript (inserted.first->second.key, inserted.first->second.value, *this);
 }
