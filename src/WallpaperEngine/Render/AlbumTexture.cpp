@@ -73,9 +73,15 @@ void AlbumTexture::copyContents (const TextureProvider& other) const noexcept {
 
     uint8_t* buffer = new uint8_t[bufferSize];
 
-    // Read the source texture
+    // Read the source texture. glGetTexImage() (core since GL 1.1) is used rather than the
+    // bounds-checked glGetnTexImage() (GL 4.5 / ARB_robustness) because bufferSize is always
+    // self-computed from other's own width/height, which are exactly the dimensions other used
+    // to allocate its GL texture storage in AlbumTexture::load() -- not an untrusted size, so the
+    // extra bounds check buys nothing. glGetnTexImage additionally requires a robust-access
+    // context that neither GL driver in this codebase requests, so GLEW leaves it null on
+    // standards-compliant drivers, making it an unconditional crash here.
     glBindTexture (GL_TEXTURE_2D, other.getTextureID (0));
-    glGetnTexImage (GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, bufferSize, buffer);
+    glGetTexImage (GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, buffer);
 
     // Upload into another texture
     glBindTexture (GL_TEXTURE_2D, this->m_textureID);

@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-14 (#47 PARKED — attempted static-mesh 3D model support for Ocarina of Time's "model"-keyed objects (39% of its scene, previously silently discarded by ObjectParser). Built a new CModel render class + generalized MdlvMeshParser utility (safely refactored from the existing puppet-mesh finder, zero regression verified against its historical baseline), but discovered the static-file mesh-layout heuristic doesn't generalize the way scoping estimated — 0/115 static objects produced valid geometry, a real reverse-engineering task, not the "cheap" tier assumed. Chose to fail safe (fall through to the existing placeholder) rather than ship wrong geometry; full regression confirmed clean via git-stash comparison. Decided to park rather than continue open-ended reverse-engineering for one confirmed corpus outlier (0/156 other sampled wallpapers affected). This closes out the full Ocarina of Time investigation thread that ran through #42/#45/#46/#47. Active Priority Order: #35, #48)
+**Last updated:** 2026-07-15 (#48 DONE — AlbumTexture::copyContents() SIGSEGV, previously thought timing-dependent, re-scoped and fixed: an unconditional call to glGetnTexImage() (GL 4.5/robustness-only) on drivers that never request a robust-access context, so GLEW always left the pointer null. Confirmed deterministic (10/10 repro via a temporary stress hook, since reverted), not a race. Swapped to plain glGetTexImage() after confirming the buffer size is always self-computed/internally consistent, never untrusted — the bounds check bought nothing. Verified pixel-correct (SHA256-identical copy, not just crash-free) and clean across the full 440-wallpaper regression (439/1/0 vs. #47's 434/6/0 baseline, 0 crashes both times). Active Priority Order: #35)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -332,25 +332,6 @@ a real, more substantial architectural improvement, but deliberately
 not scoped here; worth its own dedicated investigation later rather
 than bundling into this reactive fix.
 
-### #48 — AlbumTexture/D-Bus album-art race — real, pre-existing crash, hit twice across unrelated sessions, not yet fixed
-
-A rare, timing-dependent SIGSEGV in AlbumTexture::copyContents(),
-reached via DBusMediaSource::parseMetadata -> MediaSource::
-fireAlbumArtListeners() when a real MPRIS media-source signal (e.g.
-Firefox playing a YouTube video) arrives within a narrow window during
-TextureCache's album-art listener lifecycle. First seen 2026-07-06
-during unrelated #4 (offset/scaling) testing (3/3 identical retries ran
-clean afterward -- confirmed non-reproducible on demand at the time).
-Seen again 2026-07-14 while verifying #46 (1/7 runs at 45-55s), with
-the mechanism this time directly confirmed via live dbus-monitor
-capture of real PropertiesChanged signals (one captured run received 2
-signals and did NOT crash, confirming a narrow timing window is
-required, not mere signal arrival). Confirmed via full backtrace
-(coredumpctl gdb, bt full) to have zero overlap with #46's changes or
-any scripting-related code. Not yet root-caused at the
-TextureCache/AlbumTexture level or fixed -- needs its own investigation
-whenever picked up.
-
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -359,6 +340,75 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #48 — DONE 2026-07-15: AlbumTexture::copyContents() SIGSEGV fixed — was never a race, an unconditional call to a GL 4.5/robustness-only function on drivers that never request a robust-access context
+
+**Re-scoped from "timing-dependent" to deterministic**: earlier sessions
+(2026-07-06, 2026-07-14) saw this SIGSEGV intermittently and, lacking a
+reliable repro, reasonably suspected a narrow D-Bus signal-timing
+window. This session found the real mechanism has nothing to do with
+timing: `AlbumTexture::copyContents()` called `glGetnTexImage()`
+unconditionally, with no capability check or null guard. That function
+requires GL 4.5 core or `ARB_robustness`/`KHR_robustness` with a
+robust-access context -- neither `GLFWOpenGLDriver.cpp` nor
+`WaylandOpenGLDriver.cpp` requests one, so GLEW correctly leaves the
+function pointer null on any standards-compliant driver. It crashes the
+moment `copyContents()` is ever invoked with real content, which
+`TextureCache.cpp` only does once `m_currentThumbnail->isReady()` is
+already true -- i.e. from the *second* album-art event onward, not the
+first. That's what made prior sessions see it as "sometimes" (needed 2+
+real MPRIS signals to arrive, not a race window) rather than "never."
+Reproduced deterministically 10/10 via a temporary env-gated stress
+hook in `DBusMediaSource::update()` that bypassed real D-Bus signal
+delivery (which couldn't be triggered reliably on demand) and
+directly re-fired the same album-art callback chain against a real
+local image file.
+
+**Design question, answered from evidence, not preference**: considered
+whether the bounds-checked `glGetnTexImage()` was load-bearing here
+(i.e. the buffer size was untrusted/externally controlled) before
+picking a fix. `copyContents()` has exactly one caller
+(`TextureCache.cpp:49`), and the source (`other`) is always another
+`AlbumTexture`, whose `getTextureWidth/Height(0)` return the same
+`m_width`/`m_height` that `AlbumTexture::load()` had just used, one
+call earlier, to allocate that exact texture via `glTexImage2D`. The
+size is self-computed and internally consistent by construction --
+never attacker/externally controlled -- so the extra bounds-checking
+`glGetnTexImage()` provided was redundant safety, not a load-bearing
+guard. Fix: swapped to plain `glGetTexImage()` (core since GL 1.1, no
+extension or robust context required) -- a one-line change, no
+capability-check-and-fallback machinery needed.
+
+**Verified for real, not just "doesn't crash"**: (1) 10/10 independent
+process runs with the stress hook active and the fix applied -- 0
+crashes (all exited via the test harness's own `timeout` SIGTERM, not a
+signal from the process itself). (2) Pixel-correctness, not just
+crash-freedom: dumped the source `AlbumTexture`'s decoded buffer and
+the destination's GL-round-tripped buffer to PNG and compared --
+SHA256-identical (999x999, 3,992,004 bytes, byte-for-byte), ruling out
+a "null-guard-only" fix silently producing a blank/corrupt copy
+instead of crashing. (3) Full 440-wallpaper regression: 439 clean, 1
+error, 0 crashes (vs. this session's own #47 baseline of 434/6/0) --
+0 crashes matches exactly, and the count actually improved; the one
+remaining error (`3420062133`, "Power | Chainsaw Man [4K]",
+`GLSL_ERROR`/`SHADER_IMPLICIT_CAST`, `vec4`->`vec2` implicit cast on
+object 90) reproduced identically and deterministically across 3
+standalone re-runs, unrelated to AlbumTexture/TextureCache/media code,
+and the 439/1/0 tally matches #46's own recorded baseline -- consistent
+with this corpus's already-documented run-to-run error flakiness
+(#40/#42/#43/#46/#47), not a regression from this fix. The temporary
+stress hook and pixel-dump instrumentation were both fully reverted;
+final diff is exactly the one-line `AlbumTexture.cpp` fix.
+
+**Known gap**: the exact 5 wallpaper IDs whose error status flipped
+clean between the #47 baseline (434/6/0) and this run (439/1/0)
+couldn't be individually enumerated -- no per-wallpaper snapshot of
+#47's original error table survived to diff against. Given 0 crashes
+both times, a matching #46-era tally, and the sole current error being
+independently confirmed as a deterministic pre-existing shader bug in
+unrelated code, this was accepted as sufficient rather than re-running
+the ~45-minute full corpus a second time under pre-fix code to
+reconstruct it.
 
 ### #47 — PARKED 2026-07-14: static-mesh 3D model support attempted, built safely, but the real goal (Ocarina of Time rendering) was not achieved
 
