@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-15 (#35 DONE — Mural now debounces rapid SetWallpaper calls via a trailing-edge 200ms timer in BackendRunner.start(), confirmed live: the reproduced 5-call burst that previously killed 4 lwe processes at ~38ms each (pure black screen) now produces exactly one real start. Race-safe by construction via a generation counter checked inside the same lock that gates old-process/spawn. Verified: single-click latency adds exactly 200ms (measured via mocked runner), 69/69 tests pass. A real, pre-existing, unrelated hazard was found during verification and logged separately as #49: BackendRunner.kill_orphans()/_start_process() kill any lwe process system-wide by name, not scoped to the calling instance -- confirmed by twice killing the real production process during testing, both times caught and corrected immediately. This closes the last item in the original Priority Order from this session's engine-side investigation chain (#40-#48) plus this cross-project item. Active Priority Order: #49)
+**Last updated:** 2026-07-15 (#49 DONE — Mural's kill_orphans()/pre-spawn guard no longer match processes by bare name; both now require Mural's own --properties-file marker in cmdline plus a UID check, with a PID file (tmpfs, reboot-safe) tried first for the genuine crash-recovery case. Resolves a confirmed real cross-tool conflict with a separately-installed pacman/KDE-Plasma-plugin copy of the same binary name. Verification included an honest correction: the marker fix alone does not make concurrent same-user test/production instances safe (per-user marker, not per-instance) -- fixed correctly at the test layer instead of overclaiming. 74/74 tests pass; live desktop process confirmed untouched throughout. This closes the last open item from this entire session's investigation chain across both repos. Active Priority Order: (none))
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,26 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #49 — Mural: BackendRunner.kill_orphans()/_start_process() kill any lwe process system-wide, not scoped to the calling instance (cross-project — Mural, not this fork)
-
-Surfaced 2026-07-15 as a side effect of verifying #35's debounce fix.
-BackendRunner's kill_orphans() and _start_process()'s pre-spawn guard
-both scan the entire system for any process named
-linux-wallpaperengine and kill it, rather than scoping to the process
-the calling BackendRunner instance itself started. Confirmed twice,
-live: instantiating a second BackendRunner anywhere on the machine
-(a standalone benchmark script, and separately Mural's own existing
-test_start_and_stop/test_context_manager test cases) killed the real,
-production lwe process running on the actual desktop, requiring a
-manual systemctl --user restart mural-core.service to recover both
-times. Not caused by #35's fix -- pre-existing behavior, just not
-previously noticed because nothing had run a second BackendRunner
-instance alongside a live session before. Means routine Mural
-development (including just running the existing test suite) risks
-killing a live wallpaper session on the same machine. Not yet fixed --
-needs scoping kill_orphans()/the pre-spawn guard to the specific
-instance/PID rather than matching by process name system-wide.
-
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -324,6 +304,62 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #49 — DONE 2026-07-15: Mural's BackendRunner no longer kills processes by bare name match (cross-project — Mural, not this fork)
+
+**Root cause, confirmed via git history**: two separate mechanisms,
+added for two separate legitimate reasons, neither designed with
+awareness of the other's blast radius. kill_orphans() has existed
+since Mural's first commit for genuine crash-recovery (a previous
+mural-core instance crashing leaves its lwe child orphaned, with zero
+persistent state -- no PID file existed anywhere -- to identify it
+except "what's currently named linux-wallpaperengine"). The pre-spawn
+guard was added later (1dd5806) as a defensive patch for an unrelated
+duplicate-process-accumulation bug, assuming the only lwe process that
+could ever exist was one this same runner launched or failed to clean
+up. Confirmed a real, standing risk from this, not hypothetical: this
+machine has two actual installed binaries both named
+linux-wallpaperengine (a pacman-packaged copy used by a KDE Plasma
+wallpaper plugin, and this dev fork) -- either guard would have killed
+the other tool's legitimate process on sight.
+
+**Fix**: two complementary changes, both grounded in confirmed
+findings, not assumption.
+1. Both kill_orphans() and the pre-spawn guard now require a
+   candidate process's cmdline to contain Mural's own
+   --properties-file <live_properties.json path> marker -- a flag/value
+   no other tool would plausibly pass -- in addition to the existing
+   name/UID checks. Resolves the cross-tool conflict completely.
+2. A PID file at $XDG_RUNTIME_DIR/mural/lwe.pid (tmpfs -- cleared on
+   logout/reboot, so a stale entry can never point at a PID recycled
+   across a reboot) is written on every spawn, removed on clean stop.
+   kill_orphans() tries this surgical path first (confirm alive, right
+   UID, marker still present) and kills only that one process; falls
+   back to the broader marker-and-UID-scoped sweep only if the pidfile
+   is missing/stale/mismatched -- never a bare name-only match.
+3. Added the UID filter to kill_orphans() that the pre-spawn guard
+   already had, for consistency.
+
+**Verification, including an honest correction of an assumed-safe
+claim**: asked to confirm the marker fix alone made the two
+pre-existing tests that had killed the real desktop during #35's
+verification (test_start_and_stop/test_context_manager) safe to run
+concurrently with a live production instance -- checked concretely and
+found this false: --properties-file is a fixed per-user path, not
+per-instance, so a real production process legitimately carries the
+identical marker and would still match. Fixed correctly at the test
+layer (mocking psutil.process_iter in those two tests) rather than
+overclaiming the production fix covered a case it structurally
+cannot. 5 new tests added, each isolating one specific behavior
+(ignores other tool's process at both call sites, kills its own via
+pidfile, falls back correctly on a stale/mismatched pidfile, pidfile
+write/remove lifecycle) -- all using a fully synthetic fake-process
+object, never a real psutil.Process/subprocess. Full suite: 74/74 pass
+(69 previous + 5 new). Per the safety constraint given this
+investigation's own history of accidentally killing the live desktop
+process twice during #35: confirmed the real production lwe process
+was untouched before and after this entire session (same PID, same
+wallpapers on both monitors) -- verified, not assumed.
 
 ### #35 — DONE 2026-07-15: Mural debounces rapid SetWallpaper calls — confirmed the black-screen race live, fixed with trailing-edge debounce in BackendRunner.start()
 
