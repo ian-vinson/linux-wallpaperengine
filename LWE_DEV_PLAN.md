@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-15 (#48 DONE — AlbumTexture::copyContents() SIGSEGV, previously thought timing-dependent, re-scoped and fixed: an unconditional call to glGetnTexImage() (GL 4.5/robustness-only) on drivers that never request a robust-access context, so GLEW always left the pointer null. Confirmed deterministic (10/10 repro via a temporary stress hook, since reverted), not a race. Swapped to plain glGetTexImage() after confirming the buffer size is always self-computed/internally consistent, never untrusted — the bounds check bought nothing. Verified pixel-correct (SHA256-identical copy, not just crash-free) and clean across the full 440-wallpaper regression (439/1/0 vs. #47's 434/6/0 baseline, 0 crashes both times). Active Priority Order: #35)
+**Last updated:** 2026-07-15 (#35 DONE — Mural now debounces rapid SetWallpaper calls via a trailing-edge 200ms timer in BackendRunner.start(), confirmed live: the reproduced 5-call burst that previously killed 4 lwe processes at ~38ms each (pure black screen) now produces exactly one real start. Race-safe by construction via a generation counter checked inside the same lock that gates old-process/spawn. Verified: single-click latency adds exactly 200ms (measured via mocked runner), 69/69 tests pass. A real, pre-existing, unrelated hazard was found during verification and logged separately as #49: BackendRunner.kill_orphans()/_start_process() kill any lwe process system-wide by name, not scoped to the calling instance -- confirmed by twice killing the real production process during testing, both times caught and corrected immediately. This closes the last item in the original Priority Order from this session's engine-side investigation chain (#40-#48) plus this cross-project item. Active Priority Order: #49)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,41 +296,25 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #35 — Mural: debounce rapid wallpaper-switch requests to avoid kill/respawn races (cross-project — Mural, not this fork)
+### #49 — Mural: BackendRunner.kill_orphans()/_start_process() kill any lwe process system-wide, not scoped to the calling instance (cross-project — Mural, not this fork)
 
-Found 2026-07-10, same investigation as `#33`/`#34`. Every wallpaper
-change means this fork's binary gets fully killed and relaunched from
-scratch (new EGL context, new layer-shell surface, new decode
-pipeline) — there's no way to swap displayed content without a full
-process restart. When Mural (or a user clicking quickly) issues several
-`SetWallpaper` calls in rapid succession, a new process can get killed
-again before it finishes getting through layer-surface configure →
-first frame → commit, producing a real, user-visible black screen that
-looks like a crash but isn't one.
-
-**This is a Mural-side fix, not an engine change** — tracked here for
-visibility since it was found during this fork's own investigation, but
-belongs in Mural's own codebase/backlog. Two real options, not mutually
-exclusive:
-- **Debounce** rapid switch requests in Mural itself — coalesce several
-  quick `SetWallpaper` calls into "switch to whatever was requested
-  *last*," rather than literally respawning the process for every
-  intermediate request. Directly removes the triggering condition.
-- **A real readiness handshake**: have this fork's binary emit
-  something clear and machine-parseable once a given output has
-  actually rendered its first real frame (a distinct log line, a
-  touched state file, or a D-Bus signal — this fork's own git history
-  shows a prior move toward D-Bus-based control, worth checking if
-  that infrastructure already has a hook for this), and have Mural wait
-  for that signal before accepting another switch request for that
-  screen. Turns "hope the timing works out" into an actual, checkable
-  handshake.
-
-A more fundamental fix — letting Mural swap displayed content on an
-output without a full process teardown/rebuild — was also discussed as
-a real, more substantial architectural improvement, but deliberately
-not scoped here; worth its own dedicated investigation later rather
-than bundling into this reactive fix.
+Surfaced 2026-07-15 as a side effect of verifying #35's debounce fix.
+BackendRunner's kill_orphans() and _start_process()'s pre-spawn guard
+both scan the entire system for any process named
+linux-wallpaperengine and kill it, rather than scoping to the process
+the calling BackendRunner instance itself started. Confirmed twice,
+live: instantiating a second BackendRunner anywhere on the machine
+(a standalone benchmark script, and separately Mural's own existing
+test_start_and_stop/test_context_manager test cases) killed the real,
+production lwe process running on the actual desktop, requiring a
+manual systemctl --user restart mural-core.service to recover both
+times. Not caused by #35's fix -- pre-existing behavior, just not
+previously noticed because nothing had run a second BackendRunner
+instance alongside a live session before. Means routine Mural
+development (including just running the existing test suite) risks
+killing a live wallpaper session on the same machine. Not yet fixed --
+needs scoping kill_orphans()/the pre-spawn guard to the specific
+instance/PID rather than matching by process name system-wide.
 
 ---
 
@@ -340,6 +324,67 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #35 — DONE 2026-07-15: Mural debounces rapid SetWallpaper calls — confirmed the black-screen race live, fixed with trailing-edge debounce in BackendRunner.start()
+
+**Discovery, in Mural's own repo**: confirmed the failure mode live
+against the running mural-core.service -- 5 back-to-back SetWallpaper
+D-Bus calls produced a chain of lwe processes each killed after only
+~38ms alive (vs. 958ms for a real, isolated startup with genuine
+shader-compile time), i.e. every intermediate switch in a rapid burst
+was pure black screen for its whole lifetime. Checked the engine
+dev-plan's own assumption about existing D-Bus control infrastructure
+directly against the fork's actual git history (b016d7d) rather than
+trusting the note -- found it doesn't hold up: that commit is
+MPRIS media-metadata querying only, unrelated to process lifecycle.
+Confirmed no readiness-signal infrastructure exists on either side
+today.
+
+**Fix**: trailing-edge debounce added to BackendRunner.start()
+(mural/backend/runner.py), not SetWallpaper (service.py) --
+deliberately chosen because several internal callers (playlist tick,
+schedule tick, KDE activity-change, profile load) call _apply_all()
+directly, bypassing SetWallpaper entirely, so debouncing at the D-Bus
+layer would have left those exposed to the same race. start() now
+records the latest assignments and reschedules a 200ms
+threading.Timer on every call, canceling any prior one; the real
+kill-old/spawn-new logic only runs once the burst settles, via the
+last assignments received. Race-safety against a concurrent
+stop()/restart() is structural, not incidental: a generation counter
+is checked inside the same lock that decides old-process/spawn, and
+stop()/restart() bump that counter before touching the process, so a
+pending debounced start can never fire after an explicit stop --
+verified with an explicit mocked test for exactly that case.
+shutdown()'s guard was changed from is_running()-gated to
+unconditional, since a pending-but-not-yet-spawned debounce wouldn't
+show up as "running" and would otherwise be missed.
+
+**Verification**:
+- Live re-run of the exact same 5-call rapid-fire repro against the
+  running service: exactly one real lwe start now, using the last
+  wallpaper in the burst, ~865ms after the burst began (200ms
+  debounce + real kill/spawn cost) -- previously 4 dead ~38ms
+  processes.
+- Single-click latency measured via a fully mocked runner (isolating
+  pure scheduling overhead from wallpaper-dependent shader-compile
+  variance, which made a live measurement too noisy to trust): 200.0-
+  200.4ms added, exactly the debounce window, nothing extra.
+- 69/69 existing tests pass; 2 pre-existing tests updated to wait out
+  the new debounce window before asserting on process state -- a
+  legitimate behavior-contract change, not a masked regression.
+- Clean end state confirmed after both the live repro and the mocked
+  tests (single surviving process, no orphans).
+
+**Real operational incident during verification, handled
+transparently**: testing twice killed the actual live production lwe
+process on the desktop -- not caused by this fix, but by a genuine
+pre-existing hazard discovered as a side effect (kill_orphans()/
+_start_process() scan the entire system by process name, not scoped
+to the calling instance). Caught and corrected immediately both
+times (systemctl --user restart mural-core.service), confirmed
+unrelated to this fix via direct code inspection, and the desktop was
+confirmed restored to a correct, running state. Logged separately as
+#49, since it also affects Mural's own existing test suite.
 
 ### #48 — DONE 2026-07-15: AlbumTexture::copyContents() SIGSEGV fixed — was never a race, an unconditional call to a GL 4.5/robustness-only function on drivers that never request a robust-access context
 
