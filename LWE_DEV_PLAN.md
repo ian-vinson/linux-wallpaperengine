@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-15 (#49 DONE — Mural's kill_orphans()/pre-spawn guard no longer match processes by bare name; both now require Mural's own --properties-file marker in cmdline plus a UID check, with a PID file (tmpfs, reboot-safe) tried first for the genuine crash-recovery case. Resolves a confirmed real cross-tool conflict with a separately-installed pacman/KDE-Plasma-plugin copy of the same binary name. Verification included an honest correction: the marker fix alone does not make concurrent same-user test/production instances safe (per-user marker, not per-instance) -- fixed correctly at the test layer instead of overclaiming. 74/74 tests pass; live desktop process confirmed untouched throughout. This closes the last open item from this entire session's investigation chain across both repos. Active Priority Order: (none))
+**Last updated:** 2026-07-16 (#50 DONE — fixed Mural's Properties panel silently dropping most properties for many wallpapers: a _TYPE_MAP key mismatch ("combolist"/"combo", missing "text" alias), not a missing feature -- confirmed via a full 1,172-wallpaper real-library audit. Also implemented previously-unsupported "scenetexture" (206 real uses) and added a defensive guard against a separate, currently-dormant malformed-numeric crash risk found during the same audit. Verified: two flagged wallpapers went from 23/49 and 6/24 properties shown to 49/49 and 24/24; 83/83 tests pass (9 new). Known gap, not yet tracked as its own item: web wallpapers still get zero properties UI. Active Priority Order: (none))
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -304,6 +304,63 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #50 — DONE 2026-07-16: Mural's Properties panel was silently dropping over half of most wallpapers' real properties — a type-string key mismatch, not a missing feature (cross-project — Mural, not this fork)
+
+**Symptom**: user-reported "Properties area not showing at all" turned
+out, on investigation, to be more precisely "showing for most
+wallpapers but missing most/all controls for others" -- confirmed on
+the actual desktop's own live wallpaper (3325624777): 23 of 49 real
+properties rendered, 26 silently missing, with zero indication
+anything was wrong. Worst case in the library: 3481496333, 6 of 24
+non-group/non-action properties rendered (75% missing).
+
+**Root cause, confirmed via a full 1,172-wallpaper real-library
+audit, not assumption**: mural/utils/properties.py's _TYPE_MAP mapped
+the key "combolist", but real WE data (confirmed against
+WE_DOCS_REFERENCE.md and every real project.json in the library) uses
+"combo" -- 0 real "combolist" occurrences anywhere. Similarly, "text"
+(1,098 real uses) is a common real alias of "textinput" (342 uses)
+that was never added as a second key. Both are dict-key mismatches,
+not missing functionality -- _build_prop_widget()'s existing
+combo/text-input widget code already worked correctly, it was simply
+unreachable. Separately, "scenetexture" (206 real uses, WE's "Texture"
+property) had no widget at all -- genuinely unimplemented, distinct
+from the key-mismatch bugs. Failure mode confirmed per-property, not
+whole-file (continue on unrecognized type, 0/1,172 files lost
+everything) -- but a separate, currently-dormant landmine was found
+during the same audit: unguarded float()/int() parsing of
+min/max/precision, with no per-item try/except unlike the type
+dispatch above it, that would raise uncaught and blank an entire panel
+if any single property anywhere had a malformed value (0 real
+instances found, but real latent fragility).
+
+**Fix**: corrected _TYPE_MAP ("combolist"->"combo", added "text"
+alongside "textinput"), added "scenetexture"->"texture" with a new
+file-picker widget in _build_prop_widget() (design grounded in real
+data: every sampled instance has value: "" and wallpapers ship as
+packed .pkg files with no unpacked asset folder to browse into, so a
+plain QFileDialog image picker is correct, not an in-wallpaper asset
+browser), and wrapped the min/max/precision parsing in a per-item
+try/except matching the existing skip-and-continue pattern used
+elsewhere in the same loop.
+
+**Verification**: full 1,172-wallpaper sweep, 0 exceptions (matches
+pre-fix, confirms no regression). 3325624777: 23/49 -> 49/49. 
+3481496333: 6/24 -> 24/24. group/usershortcut/junk-type entries
+confirmed still correctly excluded across the entire library, not just
+spot-checked. New texture widget confirmed building without error
+against a real wallpaper with 4 scenetexture properties. Existing test
+suite: 74 -> 83 passing (9 new tests added, 0 regressions), targeting
+the exact bug classes found (type-string recognition, group/
+usershortcut/junk skipping, malformed-numeric handling) rather than
+generic coverage.
+
+**Known gap, explicitly out of scope for this fix**: web wallpapers
+get zero properties UI in Mural currently (file/directory-type WE
+properties are real and documented but Mural's Properties panel only
+ever processes info.type == "scene"). Not tracked as its own numbered
+item yet -- worth doing if pursued.
 
 ### #49 — DONE 2026-07-15: Mural's BackendRunner no longer kills processes by bare name match (cross-project — Mural, not this fork)
 
