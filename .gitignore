@@ -16,3 +16,4 @@ AGENTS.md
 __pycache__/
 *.pyc
 2026-*-*-*-urgent-*.txt
+build-debug/
