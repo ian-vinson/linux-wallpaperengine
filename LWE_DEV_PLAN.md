@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-16 (#50 DONE — fixed Mural's Properties panel silently dropping most properties for many wallpapers: a _TYPE_MAP key mismatch ("combolist"/"combo", missing "text" alias), not a missing feature -- confirmed via a full 1,172-wallpaper real-library audit. Also implemented previously-unsupported "scenetexture" (206 real uses) and added a defensive guard against a separate, currently-dormant malformed-numeric crash risk found during the same audit. Verified: two flagged wallpapers went from 23/49 and 6/24 properties shown to 49/49 and 24/24; 83/83 tests pass (9 new). Known gap, not yet tracked as its own item: web wallpapers still get zero properties UI. Active Priority Order: (none))
+**Last updated:** 2026-07-16 (#51 DONE — fixed nested text/UI widgets rendering at wildly wrong scale/position: CText never composed parent transforms (unlike CImage, which already did via resolveTransform()/localTransform()), confirmed via direct pkg extraction (7 wallpapers share an identical third-party widget with frozen inner scale values) and a natural-experiment quantitative proof (Persona 3 Reload's independently-built duplicate widget's hand-set scale nearly exactly matches the theoretically-correct composed value). Extracted the composition logic into the shared CObject base so CText/future types can use it; CParticle/CModel left untouched pending real evidence. Scope-checked against a separate 8-wallpaper "detached layer" cluster first — only 1 of 8 relates, the rest need independent investigation. Full regression improved (437/2/1 vs #47's 434/6/0), but a new, real crash was found and run to ground rather than dismissed — a pre-existing CUDA/nvdec decode race on an already-broken wallpaper, amplified by the fix's added per-frame work, not a new memory-safety bug — split out as #52. Active Priority Order: #52)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,6 +296,26 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
+### #52 — Aihara Mei (3388330010): fix #51 measurably increases a pre-existing CUDA/nvdec decode-race crash rate
+
+Surfaced 2026-07-16 during #51's regression verification. This
+wallpaper was already fully non-functional before #51 (crashes exit 1
+after a wall of pre-existing script TypeErrors on origin_* objects --
+same signature flagged during the broader 44-wallpaper triage as
+shared with 2120054900/3481496333, not yet root-caused). #51's added
+per-frame parent-chain-walking work measurably increases a separate,
+pre-existing crash: A/B tested 10 pre-fix runs (0 crashes) vs. 9
+post-fix runs (~6 crashes) on the same wallpaper -- confirmed via
+coredumpctl+gdb backtrace to be a CUDA context-push failure/garbled
+memory read entirely inside mpv/ffmpeg/nvdec's hardware H.264 decode
+thread, zero frames of #51's new code anywhere in that stack. Likely a
+timing-sensitivity amplification (more CPU work per frame nudging a
+pre-existing race), not a new memory-safety bug. Not investigated
+further or fixed -- this wallpaper needs its own root-cause pass on
+BOTH the origin_*/TypeError script failure and the CUDA decode race,
+likely two separate pre-existing bugs on the same wallpaper, neither
+caused by #51.
+
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -304,6 +324,74 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #51 — DONE 2026-07-16: nested text/UI widgets render at wildly wrong scale/position — CText never composed parent transforms, only CImage did
+
+**Discovery context**: found via a large batch triage of 44 wallpapers
+with reported rendering issues (grey/black screens, mispositioned
+layers, wrong effects). Confirmed 8 wallpapers shared an identical
+signature -- a day-of-week text widget spreading edge-to-edge with huge
+letter-gaps, wrong color, a detached time sub-line.
+
+**Root cause, confirmed via direct pkg extraction and code tracing,
+not assumption**: 7 of the 8 embed the identical third-party Workshop
+widget (item 2981960200, a nested Clock -> "D a y" -> Date CText
+hierarchy) with byte-identical inner scale values (e.g. "4.08332
+4.03663 3.41743") across every instance -- each wallpaper author
+independently resized only the OUTER container to fit their scene,
+leaving the nested widget's own values (authored assuming parent-
+relative composition) untouched. #46's registerProperty() fix was
+checked directly and refuted as the cause -- CText's own scale
+correctly wins its slot post-#46, no collision. The real cause:
+CText::render() built its model matrix purely from local values, with
+zero parent-chain composition anywhere in CText.cpp/.h (confirmed via
+grep, zero hits) -- unlike CImage, which has a dedicated
+resolveTransform()/localTransform() pair that walks the parent chain,
+and which already contained a dedicated (but unused-by-CText) branch
+for reading a Text object's own scale. The composition logic existed
+in exactly one place and was never wired up for CText.
+
+Quantitatively confirmed via a natural experiment: Persona 3 Reload
+(3151551777) contains a second, independently hand-built day-widget
+with no parent nesting, whose author set its scale directly to
+1.14488 -- nearly exactly matching the theoretically-correct composed
+value for the buggy nested widget (0.28038 x 4.08332 ~= 1.145).
+
+**Scope-checked against a separately-identified "detached layer"
+cluster (8 other wallpapers) before assuming it explained them too --
+it mostly didn't**: only 1 of 8 (Arknights, 3462491575) has any
+relation, and even that is partial (embeds the same imported widget,
+fixed as a side effect; its principally-reported symptom, scrambled
+character/mountain content, is unrelated CImage content that was
+already composing correctly). The other 7 are NOT explained by this
+mechanism (null parents, fully un-parented flat hierarchies, an
+already-correctly-composing deep CImage chain, and unrelated black
+FBO/compositing failures) -- each needs its own separate investigation,
+not a shared fix.
+
+**Fix**: extracted ResolvedTransform/localTransform()/resolveTransform()
+from CImage into the shared CObject base class (CImage/CText/CParticle/
+CModel all derive from it) -- the logic was already 100% generic,
+confirmed by reading the code rather than assumed. CText::render() now
+calls the inherited resolveTransform() instead of reading its own
+origin/scale directly. CParticle/CModel deliberately left untouched --
+no confirmed evidence they need it; scope kept to what was actually
+demonstrated necessary. Diff: +115/-81 across 5 files.
+
+**Verification**:
+- All 7 day-of-week wallpapers re-screenshotted and confirmed fixed --
+  text renders at readable size in the correct position, matching the
+  ~1.14x scale the Persona 3 Reload natural experiment predicted.
+  Control wallpaper (3174556087, confirmed unrelated in the prior
+  triage) re-confirmed genuinely untouched.
+- Full 440-wallpaper regression: 437 clean / 2 errors / 1 crash --
+  clean count improved vs #47's 434/6/0 baseline. The 1 new crash was
+  investigated to ground rather than accepted at face value (see #52).
+- Bonus: Arknights' clock digits (same imported widget, different
+  scale chain) fixed as a side effect, which also served as the
+  requested trivial-parent (identity transform) no-op sanity check --
+  confirmed composing through an identity parent introduces no
+  distortion.
 
 ### #50 — DONE 2026-07-16: Mural's Properties panel was silently dropping over half of most wallpapers' real properties — a type-string key mismatch, not a missing feature (cross-project — Mural, not this fork)
 

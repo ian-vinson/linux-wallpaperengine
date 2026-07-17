@@ -448,8 +448,13 @@ void CText::render () {
 
     const glm::vec4 color = m_text.color->value->getVec4 ();
     const float alpha = m_text.alpha->value->getFloat ();
-    const glm::vec3 scale = m_text.scale->value->getVec3 ();
-    const glm::vec3 origin = m_text.origin->value->getVec3 ();
+
+    // Compose this object's own origin/scale/angle with its parent chain's (see CObject::
+    // resolveTransform) instead of reading them as absolute scene coordinates -- a nested text
+    // widget's own values are authored relative to its parent, same as CImage already handles.
+    const auto transform = this->resolveTransform (this->getObject ());
+    const glm::vec3 scale = transform.scale;
+    const glm::vec3 origin = transform.origin;
 
     const float scene_w = getScene ().getCamera ().getWidth ();
     const float scene_h = getScene ().getCamera ().getHeight ();
@@ -460,6 +465,10 @@ void CText::render () {
     };
 
     glm::mat4 model = glm::translate (glm::mat4 (1.0f), gl_origin);
+    if (transform.angle != 0.0f) {
+	// Negate to account for the Y-flipped coordinate system, matching CImage's convention.
+	model = glm::rotate (model, -transform.angle, glm::vec3 (0.0f, 0.0f, 1.0f));
+    }
     model = glm::scale (model, scale);
 
     const glm::mat4 mvp = getScene ().getCamera ().getProjection () * getScene ().getCamera ().getLookAt () * model;
