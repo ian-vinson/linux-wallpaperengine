@@ -2,7 +2,9 @@
 #include "ScriptEngine.h"
 #include "WallpaperEngine/Audio/AudioContext.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h"
+#include "WallpaperEngine/Data/Model/DynamicValue.h"
 #include "WallpaperEngine/Logging/Log.h"
+#include "WallpaperEngine/Render/Camera.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 
 using namespace WallpaperEngine::Scripting;
@@ -32,6 +34,45 @@ JSValue engine_get_runtime (JSContext* ctx, JSValueConst this_val, int argc, JSV
 
 JSValue engine_get_daytime (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     return JS_NewFloat64 (ctx, g_Daytime);
+}
+
+// screenResolution/canvasSize read the live scene size on every access (rather than caching it)
+// so a resize is reflected immediately, matching how engine_is_portrait reads CScene directly.
+JSValue engine_get_screen_resolution (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* engine = static_cast<EngineObject*> (JS_GetAnyOpaque (this_val, &classId));
+
+    if (engine == nullptr) {
+	return JS_ThrowTypeError (ctx, "invalid receiver for screenResolution");
+    }
+
+    const auto& scene = engine->getScene ();
+    DynamicValue value (glm::vec2 (scene.getWidth (), scene.getHeight ()));
+
+    return engine->getEngine ().getAdapters ().vec2->instantiate (value, true);
+}
+
+// canvasSize is documented as 2D-scenes-only (WE_DOCS_REFERENCE.md:242, lib.sceneScript.d.ts:2477).
+// This fork's only signal for "2D scene" is an orthogonal camera projection (set from the scene's
+// general.orthogonalprojection setting) -- 3D/perspective scenes leave the camera non-orthogonal,
+// so canvasSize is undefined there, same as real Wallpaper Engine restricts it to 2D scenes.
+JSValue engine_get_canvas_size (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+    auto* engine = static_cast<EngineObject*> (JS_GetAnyOpaque (this_val, &classId));
+
+    if (engine == nullptr) {
+	return JS_ThrowTypeError (ctx, "invalid receiver for canvasSize");
+    }
+
+    const auto& scene = engine->getScene ();
+
+    if (!scene.getCamera ().isOrthogonal ()) {
+	return JS_UNDEFINED;
+    }
+
+    DynamicValue value (glm::vec2 (scene.getWidth (), scene.getHeight ()));
+
+    return engine->getEngine ().getAdapters ().vec2->instantiate (value, true);
 }
 
 JSValue engine_stop_interval (
@@ -308,6 +349,16 @@ EngineObject::EngineObject (ScriptEngine& engine, Render::Wallpapers::CScene& sc
     JS_DefinePropertyGetSet (
 	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "timeOfDay"),
 	JS_NewCFunction (this->m_engine.getContext (), engine_get_daytime, "get", 0),
+	JS_NewCFunction (this->m_engine.getContext (), engine_set_value, "set", 1), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyGetSet (
+	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "screenResolution"),
+	JS_NewCFunction (this->m_engine.getContext (), engine_get_screen_resolution, "get", 0),
+	JS_NewCFunction (this->m_engine.getContext (), engine_set_value, "set", 1), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyGetSet (
+	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "canvasSize"),
+	JS_NewCFunction (this->m_engine.getContext (), engine_get_canvas_size, "get", 0),
 	JS_NewCFunction (this->m_engine.getContext (), engine_set_value, "set", 1), JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (

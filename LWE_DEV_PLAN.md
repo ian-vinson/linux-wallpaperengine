@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-16 (#51 DONE — fixed nested text/UI widgets rendering at wildly wrong scale/position: CText never composed parent transforms (unlike CImage, which already did via resolveTransform()/localTransform()), confirmed via direct pkg extraction (7 wallpapers share an identical third-party widget with frozen inner scale values) and a natural-experiment quantitative proof (Persona 3 Reload's independently-built duplicate widget's hand-set scale nearly exactly matches the theoretically-correct composed value). Extracted the composition logic into the shared CObject base so CText/future types can use it; CParticle/CModel left untouched pending real evidence. Scope-checked against a separate 8-wallpaper "detached layer" cluster first — only 1 of 8 relates, the rest need independent investigation. Full regression improved (437/2/1 vs #47's 434/6/0), but a new, real crash was found and run to ground rather than dismissed — a pre-existing CUDA/nvdec decode race on an already-broken wallpaper, amplified by the fix's added per-frame work, not a new memory-safety bug — split out as #52. Active Priority Order: #52)
+**Last updated:** 2026-07-19 (#52 DONE — implemented engine.canvasSize/screenResolution (documented, never existed), fixed zero-arg Vec2/3/4() construction, and fixed two uncaught-exception crash paths in tick()/runPendingInits() (the second found only while verifying the first). Also fixed a real "Lens Flare .size" crash, including a bug introduced and caught mid-fix (TypeCaster::as<T>() throwing on mismatch). The previously "confirmed unfixable" CUDA/nvdec crash on 3388330010 appears to have actually been undefined behavior from the uncaught-exception paths, not a separate hardware race — fixing both took a 30×60s stress test from 85% crash rate to 0/30, though this can't be proven with total certainty for a hardware-level race. Full regression: 440/0/0 vs #51's 437/2/1. Active Priority Order: (none))
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,26 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #52 — Aihara Mei (3388330010): fix #51 measurably increases a pre-existing CUDA/nvdec decode-race crash rate
-
-Surfaced 2026-07-16 during #51's regression verification. This
-wallpaper was already fully non-functional before #51 (crashes exit 1
-after a wall of pre-existing script TypeErrors on origin_* objects --
-same signature flagged during the broader 44-wallpaper triage as
-shared with 2120054900/3481496333, not yet root-caused). #51's added
-per-frame parent-chain-walking work measurably increases a separate,
-pre-existing crash: A/B tested 10 pre-fix runs (0 crashes) vs. 9
-post-fix runs (~6 crashes) on the same wallpaper -- confirmed via
-coredumpctl+gdb backtrace to be a CUDA context-push failure/garbled
-memory read entirely inside mpv/ffmpeg/nvdec's hardware H.264 decode
-thread, zero frames of #51's new code anywhere in that stack. Likely a
-timing-sensitivity amplification (more CPU work per frame nudging a
-pre-existing race), not a new memory-safety bug. Not investigated
-further or fixed -- this wallpaper needs its own root-cause pass on
-BOTH the origin_*/TypeError script failure and the CUDA decode race,
-likely two separate pre-existing bugs on the same wallpaper, neither
-caused by #51.
-
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -324,6 +304,85 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #52 — DONE 2026-07-19: fixed two documented-but-unimplemented engine.* scripting APIs, two uncaught-exception crash paths, and a bug introduced mid-fix — the original "unfixable CUDA/nvdec crash" appears to have actually been UB from one of those crash paths, not a separate hardware race
+
+**Context**: originated from a two-part investigation on Aihara Mei
+(3388330010) -- a script-crash signature shared with 2 other
+wallpapers, and a separately-confirmed 85%-rate CUDA/nvdec SIGSEGV
+believed genuinely upstream and unfixable. Both parts turned out to be
+real, but the relationship between them was not what it first looked
+like.
+
+**Fix 1 -- engine.canvasSize/screenResolution**: neither existed in
+C++ at all, despite both being documented (WE_DOCS_REFERENCE.md:242,
+lib.sceneScript.d.ts:2477) -- confirmed via repo-wide grep, not
+assumed. Implemented both in EngineObject.cpp, reading live off
+CScene::getWidth()/getHeight(); canvasSize additionally gated on
+Camera::isOrthogonal() (this fork's only "2D scene" signal), matching
+the docs' "2D scenes only" restriction. Verified via synthetic
+scene: orthogonal -> both resolve; perspective -> canvasSize
+undefined, screenResolution still resolves.
+
+**Fix 2 -- zero-argument Vec2()/Vec3()/Vec4()**: confirmed all three
+share one templated constructor (not Vec3-specific), which rejected
+`new Vec3()` as an error. Idiomatic script code (`parent ?
+value.subtract(parent.origin) : new Vec3()`) uses this as a standard
+"no parent -> zero vector" fallback. Fixed to return the
+already-zero-initialized instance instead of throwing.
+
+**Fix 3 -- two uncaught-exception crash paths, not one**: the literal
+ask was tick()'s unguarded jsToDynamicValue() call (throws on a
+malformed vector-like return value, previously propagating uncaught to
+main()'s top-level catch and killing the whole process). Fixed to
+match runPendingInits()'s existing logJSException pattern. While
+verifying, found the IDENTICAL unguarded call in runPendingInits()
+itself (2 sites) -- the very function cited as the "already-safe"
+reference pattern for this fix. Live-tested with 3388330010: fixing
+only tick() left 13/20 exit-139 + 7/20 silent exit-1 over 20 runs;
+also fixing runPendingInits() brought it to 20/20 clean at both 10s
+and 20s timeouts.
+
+**Fix 4 -- Lens Flare .size, plus a bug introduced mid-fix, caught and
+fixed via testing rather than assumption**: the original "uncaught
+getProperty() throw" framing was wrong -- that path was already caught.
+Registered "size" for CImage only (IEffectLayer.size, "resolution of
+the image layer in pixels" -- doesn't apply to CParticle-backed
+layers like Lens Flare's parent). First attempt used self->as<CImage>()
+directly, not knowing TypeCaster::as<T>() throws std::bad_cast on a
+type mismatch (unlike a plain dynamic_cast) -- this crashed both Lens
+Flare wallpapers immediately; caught via live testing, fixed by
+checking is<CImage>() first. The actual original crash, once past
+that: .size resolving to undefined on the particle object, passed into
+a Vec2/Vec3 method, hit vector_get()'s fallthrough throw for an
+unhandled type tag -- fixed by treating undefined/null the same as the
+zero-vector fallback from Fix 2.
+
+**The CUDA/nvdec crash -- likely resolved as a side effect, not
+separately fixed**: the original investigation's own prediction (that
+fixing the script-exception race would fully expose the CUDA crash at
+~100%) did NOT happen -- instead, fixing both uncaught-exception paths
+took 3388330010 to 20/20 clean at 10s/20s, then a dedicated 30x60s
+stress test (30 cumulative minutes of sustained nvdec playback,
+confirmed genuinely active via logs every run, known script exceptions
+confirmed still firing every run but now caught gracefully) to 0/30
+crashes. Working hypothesis: an uncaught C++ exception unwinding
+through QuickJS's plain-C call stack is undefined behavior, and
+plausibly produced some or all of what the original investigation's
+backtrace read as an independent nvdec/CUDA hardware race, rather than
+a genuinely separate concurrent bug. Not proven with certainty --
+hardware/driver races can't be shown absent from a finite sample, and
+the original crash's coredump was evicted by an intervening reboot
+before a direct backtrace re-comparison could be done. No CUDA/nvdec-
+specific code was touched; nothing was fixed there directly. If this
+resurfaces later, that would indicate a genuinely separate residual
+issue rather than disproving this finding.
+
+**Full verification**: all 4 originally-affected wallpapers
+(3388330010, 3481496333, 2120054900, 2887626497) run clean. Full
+440-wallpaper regression: 440 clean / 0 errors / 0 crashes, vs #51's
+baseline of 437/2/1 -- a genuine improvement (all 4 target wallpapers
+now clean, delta matches exactly), not flakiness.
 
 ### #51 — DONE 2026-07-16: nested text/UI widgets render at wildly wrong scale/position — CText never composed parent transforms, only CImage did
 

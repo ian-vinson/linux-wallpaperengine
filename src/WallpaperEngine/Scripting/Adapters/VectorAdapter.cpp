@@ -90,6 +90,16 @@ template <int components> auto vector_get (JSContext* ctx, JSValue source) -> de
 
     int tag = JS_VALUE_GET_TAG (source);
 
+    // A script commonly passes through a property that's legitimately absent for the object
+    // it's called on (e.g. `.size` on a non-CImage ScriptableObject-backed layer, always
+    // undefined by design -- see ScriptableObjectAdapter's "size" handling) into a Vec2/Vec3/Vec4
+    // method. Treating that the same as an explicit zero vector -- the same "no value -> zero
+    // vector" fallback used for `new Vec3()` -- avoids turning a merely-inapplicable property
+    // read into a process-ending uncaught exception.
+    if (tag == JS_TAG_UNDEFINED || tag == JS_TAG_NULL || tag == JS_TAG_UNINITIALIZED) {
+	return vector_new<components> ();
+    }
+
     if (tag == JS_TAG_INT) {
 	int32_t value = 0;
 
@@ -389,10 +399,6 @@ template JSValue vector_length<4> (JSContext* ctx, JSValueConst this_val, int ar
 
 template <int components>
 JSValue vector_constructor (JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv, int magic) {
-    if (argc == 0) {
-	return JS_ThrowTypeError (ctx, "Vec%d constructor requires at least 1 argument", components);
-    }
-
     auto it = vectorAdapterInstances<components>.find (magic);
 
     if (it == vectorAdapterInstances<components>.end ()) {
@@ -404,6 +410,13 @@ JSValue vector_constructor (JSContext* ctx, JSValueConst new_target, int argc, J
     auto* container = static_cast<VectorOpaqueContainer<components>*> (JS_GetAnyOpaque (result, &classId));
 
     VEC_MAGIC_CHECK_EXCEPTION (container, components);
+
+    // `new Vec3()` with no arguments is idiomatic script code for "give me a zero vector" (e.g.
+    // a fallback when there's no parent to derive one from) -- instantiate() above already
+    // built container->value as a value-initialized (zero) vector, so there's nothing left to do.
+    if (argc == 0) {
+	return result;
+    }
 
     // `new Vec3(x, y, z)` / `new Vec2(x, y)` with one numeric argument per component is the
     // common case in real scripts — handle it explicitly instead of falling through to

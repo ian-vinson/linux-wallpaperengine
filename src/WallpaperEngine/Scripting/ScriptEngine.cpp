@@ -851,7 +851,15 @@ void ScriptEngine::runPendingInits () {
 	    if (JS_IsException (initResult)) {
 		logJSException (this->m_context, key.c_str ());
 	    } else if (!JS_IsUndefined (initResult)) {
-		jsToDynamicValue (this->m_context, initResult, currentValue);
+		// See the matching comment in tick() -- jsToDynamicValue() throws (already logged
+		// via sLog.exception) on a malformed return value, and left uncaught here it would
+		// unwind straight out of runPendingInits(), skipping every other pending script's
+		// init this pass and every object's first tick(), all the way to main()'s
+		// top-level catch.
+		try {
+		    jsToDynamicValue (this->m_context, initResult, currentValue);
+		} catch (const std::exception&) {
+		}
 	    } else {
 		// No init() exported — fall back to a first update() call to prime the value.
 		JSValue args[] = { this->dynamicToJs (currentValue) };
@@ -865,7 +873,10 @@ void ScriptEngine::runPendingInits () {
 		if (JS_IsException (result)) {
 		    logJSException (this->m_context, key.c_str ());
 		} else {
-		    jsToDynamicValue (this->m_context, result, currentValue);
+		    try {
+			jsToDynamicValue (this->m_context, result, currentValue);
+		    } catch (const std::exception&) {
+		    }
 		}
 	    }
 
@@ -891,7 +902,7 @@ void ScriptEngine::tick () {
     // run any pending notifications
 
     // run all update methods
-    for (auto& module : this->m_scriptModules | std::views::values) {
+    for (auto& [key, module] : this->m_scriptModules) {
 	this->m_runningModule = &module;
 
 	// thisLayer must be rebound before every call — each property script in m_scriptModules
@@ -908,8 +919,22 @@ void ScriptEngine::tick () {
 	    JS_FreeValue (this->m_context, args[0]);
 	});
 
-	if (!JS_IsException (result) && !JS_IsUndefined (result)) {
-	    jsToDynamicValue (this->m_context, result, module.value);
+	// A script's update() throwing here previously propagated no differently than success --
+	// the exception was silently discarded and this object's value just never got updated
+	// this frame. Log it the same way runPendingInits() logs init()/applyUserProperties()
+	// exceptions, so a bad update() is visible instead of behaving like a silent no-op.
+	if (JS_IsException (result)) {
+	    logJSException (this->m_context, key.c_str ());
+	} else if (!JS_IsUndefined (result)) {
+	    // jsToDynamicValue() throws (via sLog.exception) if update() returns an object
+	    // missing numeric x/y, e.g. a malformed vector-like return value. That throw already
+	    // logs the error, but left uncaught here it unwinds straight out of tick() and past
+	    // every other object's update() this frame, all the way to main()'s top-level catch --
+	    // catch it so one bad script only skips its own value update, not the whole process.
+	    try {
+		jsToDynamicValue (this->m_context, result, module.value);
+	    } catch (const std::exception&) {
+	    }
 	}
     }
 

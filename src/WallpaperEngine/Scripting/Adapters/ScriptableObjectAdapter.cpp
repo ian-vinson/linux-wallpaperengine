@@ -4,7 +4,9 @@
 #include <stdexcept>
 #include <utility>
 
+#include "WallpaperEngine/Data/Model/DynamicValue.h"
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
+#include "WallpaperEngine/Render/Objects/CImage.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
 #include "WallpaperEngine/Render/Objects/CRenderable.h"
 #include "WallpaperEngine/Render/Objects/CSound.h"
@@ -485,6 +487,27 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     }
     if (strcmp (name, "id") == 0) {
 	return JS_NewInt32 (ctx, self->getId ());
+    }
+
+    // IEffectLayer.size (lib.sceneScript.d.ts) -- "resolution of the image layer in pixels".
+    // Only image layers (CImage) have a pixel resolution to report; it's not backed by a
+    // DynamicValue like origin/scale/etc. are, so it can't go through registerProperty()/
+    // getProperty() below. Other layer types (e.g. a particle system) have no equivalent
+    // concept and fall through to plain undefined, same as any other inapplicable property on
+    // ILayer's unified interface (see the ISoundLayer handling above for the same pattern).
+    if (strcmp (name, "size") == 0) {
+	// is<T>() first, not as<T>() alone -- TypeCaster::as<T>() throws std::bad_cast on a
+	// type mismatch (it's not a plain dynamic_cast<T*> that returns nullptr), so calling it
+	// directly on a non-CImage object here (e.g. a CParticle-backed layer) would throw
+	// uncaught at this call site instead of falling through to undefined.
+	if (self->is<WallpaperEngine::Render::Objects::CImage> ()) {
+	    const auto* image = self->as<WallpaperEngine::Render::Objects::CImage> ();
+	    DynamicValue value (image->getSize ());
+
+	    return container->adapter.getEngine ().getAdapters ().vec2->instantiate (value, true);
+	}
+
+	return JS_UNDEFINED;
     }
 
     try {
