@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-20 (#53 opened, 2 of 5 causes fixed — reopened Abyss Gaming (3675966045) after a 44-wallpaper triage found its "fire effect only" symptom wasn't fully explained by #44. Fixed a JSON parser strictness gap on WE's own bundled stock content (trailing comma) and a shader #include-ordering heuristic bug, the latter through 3 design iterations that each caught a real regression via broad verification before shipping (including a SIGSEGV on an unrelated wallpaper). Full regression: 440/0/0, matches #52's baseline. Character still doesn't render -- gated on a separate vec4/vec2 GLSL division bug on the object holding it, not yet fixed, plus a broader question of whether one failing effect should really wipe an entire 14-effect object. Active Priority Order: #53)
+**Last updated:** 2026-07-21 (#53 DONE — fixed Abyss Gaming's remaining 2 causes: a one-off third-party vec4/vec2 shader swizzle bug (targeted compatibility pass, not a third-party asset patch) and implemented effect-isolation in CImage::setup() so one bad effect no longer deletes an entire object — confirmed real benefit on 2 other objects in the same wallpaper beyond the target bug. Full regression: 440/440 clean, 0 errors, 0 crashes, matches baseline exactly. Character confirmed rendering correctly once fixed, but still visually occluded by a separate, newly-found, much broader bug: Wallpaper Engine's own stock "solid color layer" model renders opaque black instead of tint/transparency, affecting 107 of 586 local corpus wallpapers — logged as #54, not yet investigated. Active Priority Order: #54)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,75 +296,22 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #53 — Abyss Gaming (3675966045): "renders fire effect only" — 2 of 5 identified causes fixed, character still doesn't render
+### #54 — Stock "solid color layer" (models/util/solidlayer.json) renders its final pass as opaque black instead of tint/transparency — affects 107 of 586 local corpus wallpapers
 
-Reopened from the original #44 investigation after a broader
-44-wallpaper triage found the current symptom ("renders and plays but
-completely wrong, showing fire effect and that is all") isn't fully
-explained by #44's known TypeError fix or its already-documented
-auto_sway combo-JSON issue. Reinvestigation found 5 distinct causes
-behind 11 of this wallpaper's 30 top-level objects failing to render,
-only one of which (the character/fox illustration itself, object 23)
-is the actual gate on the reported symptom:
-
-1. auto_sway combo-JSON error (#44, confirmed genuinely invalid
-   third-party JSON, correctly not fixed) — unchanged.
-2. FIXED 2026-07-20: WallpaperParser::parseObjects() was too strict
-   on a trailing comma in Wallpaper Engine's own bundled
-   effects/fluidsimulation/effect.json (stock content, not
-   third-party) -- dropped the containing object (547) entirely.
-   Added WallpaperEngine::Data::JSON::parseLenient() (JSON.cpp/.h):
-   tries strict nlohmann::json::parse() first (confirmed no built-in
-   trailing-comma tolerance exists), retries after a string-literal-
-   aware trailing-comma strip only on failure, and re-throws the
-   ORIGINAL error unchanged if stripping doesn't fix it -- so
-   genuinely different malformed JSON (like #1's missing quote) still
-   fails exactly as before. Wired into all 7 real WE-content parse
-   call sites (scene/effect/material/model/particle/project.json x2);
-   deliberately left the ShaderUnit combo/parameter-metadata parsers
-   and the app's own config parser untouched.
-3. FIXED 2026-07-20: ShaderUnit::preprocessIncludes()'s insertion-point
-   heuristic (find the last uniform/varying/attribute before main(),
-   insert #include content there) broke down on auto_sway.vert (33KB,
-   ~600 uniforms) -- M_PI ended up used by helper functions before its
-   own #define, killing object 3679. This went through 3 design
-   iterations, each one testing beyond just this wallpaper per review
-   and catching a real regression before it shipped: position-0
-   insertion broke common_blur.h (needs a host-declared g_Texture0
-   already in scope before the include); in-place substitution broke
-   the opposite case (one workshop wallpaper's own bundled
-   godrays_gaussian.frag declares g_Texture0 AFTER its #include); the
-   final design (insert before the first brace-depth-0 function body,
-   comment-aware so a `// {json}` parameter-metadata comment's braces
-   can't be mistaken for a real function, hoisted out of any enclosing
-   #if for multi-main() shaders) caught a real SIGSEGV on an unrelated
-   wallpaper ("Winter day/night by Vitaliy Prusakov") from an earlier
-   iteration's comment-blindness before the final version shipped.
-   Verified via full 440-wallpaper regression: 440 clean/0 errors/
-   0 crashes, matching #52's baseline exactly; hand-verified against
-   auto_sway.vert, both godrays_gaussian.frag variants, and
-   genericropeparticle.vert's two-main() case; Ocarina of Time's
-   pre-existing GLSL error confirmed identical on a stashed pre-fix
-   build (not a new regression).
-4. Stray semicolons in a third-party GLSL #elif (community "Simple
-   Gradient Audio Bar" effect) -- flagged as ambiguous (engine-should-
-   tolerate vs. author typo), not yet fixed.
-5. NOT YET FIXED, the actual gate on this wallpaper's reported
-   symptom: object 23 (the character/fox illustration itself) stacks
-   14 effects; one third-party effect divides a uniform vec4
-   (g_Texture0Resolution) directly against a vec2 without a swizzle,
-   which glslang rejects outright. CScene::createObject() deletes the
-   ENTIRE object on the first effect-pass compile failure (out of 14),
-   so this one bad effect currently prevents any chance of the
-   character rendering regardless of whether the other 13 would
-   compile cleanly. Also flagged as a separate, broader robustness
-   question worth its own consideration: should one failing effect
-   really wipe the whole object, rather than just that effect layer?
-
-Fixing #5 (and possibly the effect-isolation question) would plausibly
-restore the character/fox art -- unverified until attempted, since
-setup() currently never gets past the first failure to know whether
-the other 13 effects compile cleanly.
+Surfaced 2026-07-21 while verifying #53's fix on Abyss Gaming: even
+with the character's own effects fixed and rendering, a sharp-edged
+opaque black rectangle from a solidlayer object still covers most of
+the frame, hiding it. Confirmed pre-existing (via git stash, present
+before any of #53's changes) and confirmed via --render-debug
+no-solid-final (disabling solidlayer's final pass makes the rectangle
+vanish and reveals correct artwork underneath) that this is a real,
+specific bug in how this stock model's final render pass handles
+tint/transparency, not something wallpaper-specific. Prevalence
+checked across the full local workshop corpus: 107 of 586 wallpapers
+(not just the 440-scene set) reference this stock model -- a
+substantially broader-impact bug than most items in this dev plan.
+Not yet investigated beyond confirming the symptom and prevalence --
+needs its own root-cause session.
 
 ---
 
@@ -374,6 +321,61 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #53 — DONE 2026-07-21: Abyss Gaming's remaining causes fixed (#5 shader bug + effect-isolation architecture change); character confirmed rendering correctly once occluded by a separate, newly-found bug (#54)
+
+Closes out the reopened Abyss Gaming investigation (started #44,
+continued via a 2-of-5-causes fix earlier this session). Final 2
+causes:
+
+**#5 -- FIXED**: workshop/3221939295's effect (used 6x on object 23,
+the character) divides a vec2 constructor directly against the vec4
+built-in g_Texture0Resolution without a swizzle
+(`CAST2(500) / g_Texture0Resolution`), which glslang rejects outright.
+Confirmed the correct fix (`.xy`) by checking the same shader file's
+7 other correct usages of the identical uniform. Corpus-wide scope
+check (586 local wallpapers, broader than the 440-scene set): exactly
+1 occurrence -- a genuine one-off third-party authoring mistake, not
+a systemic pattern. Rather than patch the undistributable third-party
+asset directly, added a narrow, targeted compatibility pass
+(ShaderUnit::applyTextureResolutionSwizzleCompatibility) that only
+fires on this exact unswizzled-vec4-against-vec2 pattern, following
+this codebase's existing precedent for this class of HLSL->GLSL
+compatibility shim.
+
+**Effect-isolation architecture change -- IMPLEMENTED**: confirmed
+mechanically safe before changing anything (each CPass is only pushed
+to m_passes after its own constructor fully succeeds, so an
+object-level abort was always clean, nothing dangles). Wrapped each
+effect instance's pass construction in CImage::setup() in its own
+try/catch, so a single failing effect (among however many are stacked
+on an object) now only skips itself instead of deleting the entire
+object. Concrete evidence of benefit beyond the target bug: two OTHER
+objects in this same wallpaper (659, 3679 -- the latter broken via the
+separate, pre-existing #44 combo-JSON issue) each have one broken +
+one working effect, and both now correctly keep their base image and
+working effect instead of being wholly deleted.
+
+**Verification**: full 440-wallpaper regression: 440 clean / 0 errors
+/ 0 crashes, matches the pre-existing baseline exactly -- zero
+regressions anywhere in the corpus. Zero OBJECT_SETUP_FAIL occurrences
+now for objects 23/659/3679 (all previously present). Abyss Gaming
+itself now lists clean in the corpus run.
+
+**Honest caveat, not part of this fix**: even with both fixes, the
+character doesn't visually appear in a real screenshot -- traced to a
+separate, pre-existing, unrelated bug in Wallpaper Engine's own stock
+solidlayer model rendering opaque black instead of its intended
+tint/transparency, confirmed via --render-debug no-solid-final to be
+occluding otherwise-correctly-rendering fox/character artwork. Logged
+separately as #54, given its much broader prevalence (107/586 corpus
+wallpapers) than this fix's own scope.
+
+**Remaining, unchanged from earlier this session**: #1 (auto_sway
+combo-JSON, confirmed genuinely invalid third-party content) and #4
+(stray semicolons, ambiguous engine-tolerance-vs-authoring-typo) are
+both still open questions but out of scope -- neither blocks Abyss
+Gaming's core rendering any further.
 
 ### #52 — DONE 2026-07-19: fixed two documented-but-unimplemented engine.* scripting APIs, two uncaught-exception crash paths, and a bug introduced mid-fix — the original "unfixable CUDA/nvdec crash" appears to have actually been UB from one of those crash paths, not a separate hardware race
 

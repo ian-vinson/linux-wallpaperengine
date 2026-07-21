@@ -121,6 +121,13 @@ private:
      */
     [[nodiscard]] std::string applyFloatTernaryCompatibility (std::string source) const;
     /**
+     * WE's builtin g_Texture<N>Resolution uniforms are vec4 (xy = texture size, zw = real size).
+     * Some workshop effects divide/multiply/add/subtract them directly against a CAST2()/vec2()
+     * operand without a swizzle, relying on HLSL's implicit vec4->vec2 truncation; standard
+     * glslang rejects the mismatched arithmetic outright. Adds the missing .xy.
+     */
+    [[nodiscard]] std::string applyTextureResolutionSwizzleCompatibility (std::string source) const;
+    /**
      * Removes unmatched #endif directives (workshop shaders sometimes emit one extra #endif
      * that HLSL's preprocessor silently ignores but GLSL's does not).
      */

@@ -590,76 +590,90 @@ void CImage::setup () {
 		continue;
 	    }
 
-	    const auto fboProvider = std::make_shared<FBOProvider> (this);
+	    // A single bad effect (one glslang-rejected shader among many stacked on this object)
+	    // must not take the whole object down with it -- CScene::createObject()'s own catch
+	    // already deletes the ENTIRE object (all effects, base image included) on any setup()
+	    // exception, so anything thrown here needs to be contained to just this one effect
+	    // instance. Any CPass objects already pushed for a partially-constructed effect stay
+	    // (harmless -- CImage's destructor cleans up m_passes regardless of how it was filled),
+	    // so this is at worst one visually incomplete effect layer, never a dangling resource.
+	    try {
+		const auto fboProvider = std::make_shared<FBOProvider> (this);
 
-	    // create all the fbos for this effect
-	    for (const auto& fbo : cur->effect->fbos) {
-		fboProvider->create (*fbo, this->m_texture->getFlags (), this->getSize ());
-	    }
+		// create all the fbos for this effect
+		for (const auto& fbo : cur->effect->fbos) {
+		    fboProvider->create (*fbo, this->m_texture->getFlags (), this->getSize ());
+		}
 
-	    // TODO: MAKE USE OF ZIP OPERATOR IN BOOST? WAY OVERKILL JUST FOR THIS...
+		// TODO: MAKE USE OF ZIP OPERATOR IN BOOST? WAY OVERKILL JUST FOR THIS...
 
-	    auto curEffect = cur->effect->passes.begin ();
-	    auto endEffect = cur->effect->passes.end ();
-	    auto curOverride = cur->passOverrides.begin ();
-	    auto endOverride = cur->passOverrides.end ();
+		auto curEffect = cur->effect->passes.begin ();
+		auto endEffect = cur->effect->passes.end ();
+		auto curOverride = cur->passOverrides.begin ();
+		auto endOverride = cur->passOverrides.end ();
 
-	    for (; curEffect != endEffect; ++curEffect) {
-		if (!(*curEffect)->material.has_value ()) {
-		    if (!(*curEffect)->command.has_value ()) {
-			sLog.error ("Pass without material and command not supported");
-			continue;
-		    }
+		for (; curEffect != endEffect; ++curEffect) {
+		    if (!(*curEffect)->material.has_value ()) {
+			if (!(*curEffect)->command.has_value ()) {
+			    sLog.error ("Pass without material and command not supported");
+			    continue;
+			}
 
-		    if (!(*curEffect)->source.has_value ()) {
-			sLog.error ("Pass without material and source not supported");
-			continue;
-		    }
+			if (!(*curEffect)->source.has_value ()) {
+			    sLog.error ("Pass without material and source not supported");
+			    continue;
+			}
 
-		    if (!(*curEffect)->target.has_value ()) {
-			sLog.error ("Pass without material and target not supported");
-			continue;
-		    }
+			if (!(*curEffect)->target.has_value ()) {
+			    sLog.error ("Pass without material and target not supported");
+			    continue;
+			}
 
-		    if ((*curEffect)->command != Command_Copy) {
-			sLog.error ("Only copy command is supported for pass without material");
-			continue;
-		    }
+			if ((*curEffect)->command != Command_Copy) {
+			    sLog.error ("Only copy command is supported for pass without material");
+			    continue;
+			}
 
-		    auto virtualPass
-			= std::make_unique<MaterialPass> (MaterialPass { .blending = BlendingMode_Normal,
-									 .cullmode = CullingMode_Disable,
-									 .depthtest = DepthtestMode_Disabled,
-									 .depthwrite = DepthwriteMode_Disabled,
-									 .shader = "commands/copy",
-									 .textures = { { 0, *(*curEffect)->source } },
-									 .combos = {},
-									 .constants = {} });
+			auto virtualPass
+			    = std::make_unique<MaterialPass> (MaterialPass { .blending = BlendingMode_Normal,
+									     .cullmode = CullingMode_Disable,
+									     .depthtest = DepthtestMode_Disabled,
+									     .depthwrite = DepthwriteMode_Disabled,
+									     .shader = "commands/copy",
+									     .textures = { { 0, *(*curEffect)->source } },
+									     .combos = {},
+									     .constants = {} });
 
-		    const auto& config = *this->m_virtualPassess.emplace_back (std::move (virtualPass));
+			const auto& config = *this->m_virtualPassess.emplace_back (std::move (virtualPass));
 
-		    // build a pass for a copy shader
-		    this->m_passes.push_back (new CPass (
-			*this, fboProvider, config, std::nullopt, std::nullopt, (*curEffect)->target.value ()
-		    ));
-		} else {
-		    for (auto& pass : (*curEffect)->material.value ()->passes) {
-			const auto override = curOverride != endOverride
-			    ? **curOverride
-			    : std::optional<std::reference_wrapper<const ImageEffectPassOverride>> (std::nullopt);
-			const auto target = (*curEffect)->target.has_value ()
-			    ? *(*curEffect)->target
-			    : std::optional<std::reference_wrapper<std::string>> (std::nullopt);
+			// build a pass for a copy shader
+			this->m_passes.push_back (new CPass (
+			    *this, fboProvider, config, std::nullopt, std::nullopt, (*curEffect)->target.value ()
+			));
+		    } else {
+			for (auto& pass : (*curEffect)->material.value ()->passes) {
+			    const auto override = curOverride != endOverride
+				? **curOverride
+				: std::optional<std::reference_wrapper<const ImageEffectPassOverride>> (std::nullopt);
+			    const auto target = (*curEffect)->target.has_value ()
+				? *(*curEffect)->target
+				: std::optional<std::reference_wrapper<std::string>> (std::nullopt);
 
-			this->m_passes.push_back (
-			    new CPass (*this, fboProvider, *pass, override, (*curEffect)->binds, target)
-			);
-		    }
+			    this->m_passes.push_back (
+				new CPass (*this, fboProvider, *pass, override, (*curEffect)->binds, target)
+			    );
+			}
 
-		    if (curOverride != endOverride) {
-			++curOverride;
+			if (curOverride != endOverride) {
+			    ++curOverride;
+			}
 		    }
 		}
+	    } catch (const std::exception& e) {
+		sLog.error (
+		    "Failed to setup effect ", cur->id, " on object ", this->getId (), ", skipping this effect: ",
+		    e.what ()
+		);
 	    }
 	}
     }

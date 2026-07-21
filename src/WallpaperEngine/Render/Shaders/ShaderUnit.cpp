@@ -843,6 +843,26 @@ std::string ShaderUnit::applyFloatTernaryCompatibility (std::string source) cons
     return patched;
 }
 
+std::string ShaderUnit::applyTextureResolutionSwizzleCompatibility (std::string source) const {
+    // g_Texture<N>Resolution is always declared vec4 (xy = texture size, zw = real size -- see
+    // CTexture::setupResolution()). Some workshop effects divide/multiply/add/subtract it
+    // directly against a CAST2()/vec2() operand, relying on HLSL's implicit vec4->vec2
+    // truncation. Only fire when the other operand is unambiguously a vec2 constructor --
+    // this must not touch legitimate whole-vec4 arithmetic (e.g. combining two resolutions).
+    static const std::regex vec2ThenRes (
+        R"((CAST2\s*\([^()]*\)|vec2\s*\([^()]*\))(\s*[*/+-]\s*)(g_Texture\d+Resolution)\b(?!\.))"
+    );
+    static const std::regex resThenVec2 (
+        R"((g_Texture\d+Resolution)\b(?!\.)(\s*[*/+-]\s*)(CAST2\s*\([^()]*\)|vec2\s*\([^()]*\)))"
+    );
+    std::string patched = std::regex_replace (source, vec2ThenRes, "$1$2$3.xy");
+    patched = std::regex_replace (patched, resThenVec2, "$1.xy$2$3");
+    if (patched != source) {
+        sLog.out ("Applied g_TextureResolution vec4/vec2 swizzle compatibility in ", this->m_file);
+    }
+    return patched;
+}
+
 void ShaderUnit::stripOrphanedEndifs () {
     // Workshop shaders (authored for HLSL's lenient preprocessor) sometimes emit one extra
     // #endif that has no matching #if.  GLSL's preprocessor rejects these.  Walk the shader
@@ -958,7 +978,8 @@ const std::string& ShaderUnit::compile () {
 	+= this->applyFragmentTexCoordCompatibility (
 	    this->applyFragmentWritableVaryings (
 		this->applyFloatTernaryCompatibility (
-		    this->applyLinkedVaryingCompatibility (this->m_preprocessed))));
+		    this->applyTextureResolutionSwizzleCompatibility (
+			this->applyLinkedVaryingCompatibility (this->m_preprocessed)))));
 
     // the pass itself handles shader compilation, the unit doesn't have enough information for this step
     return this->m_final;
