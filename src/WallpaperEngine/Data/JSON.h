@@ -207,4 +207,14 @@ private:
     [[nodiscard]] const base_type& base () const { return *static_cast<const base_type*> (this); }
 };
 
+/**
+ * Parses WE content JSON, tolerating trailing commas before a closing ']'/'}' -- nlohmann::json
+ * has no built-in flag for this (only allow_exceptions/ignore_comments), and real-world bundled
+ * Wallpaper Engine content (including the engine's own stock effects, not just workshop content)
+ * ships with them. Strict parsing is tried first; the lenient retry only kicks in on a parse
+ * failure, and only actually returns successfully if stripping trailing commas was what fixed it --
+ * any other malformed JSON still throws the original error unchanged.
+ */
+[[nodiscard]] JSON parseLenient (const std::string& text);
+
 } // namespace WallpaperEngine::Data::JSON

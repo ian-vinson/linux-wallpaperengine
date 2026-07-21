@@ -77,7 +77,6 @@ ShaderUnit::ShaderUnit (
 
 void ShaderUnit::preprocess () {
     this->m_preprocessed = this->m_content;
-    this->m_includes = "";
 
     this->preprocessIncludes ();
     this->preprocessRequires ();
@@ -137,7 +136,10 @@ void ShaderUnit::preprocessVariables () {
 
 void ShaderUnit::preprocessIncludes () {
     size_t start = 0, end = 0;
-    // prepare the include content
+    std::string includes;
+
+    // Resolve every #include directive's content (handling nested #includes inside it too),
+    // removing the directives from the source and accumulating their resolved content in order.
     while ((start = this->m_preprocessed.find ("#include", end)) != std::string::npos) {
 	// TODO: CHECK FOR ERRORS HERE, MALFORMED INCLUDES WILL NOT BE PROPERLY HANDLED
 	const size_t quoteStart = this->m_preprocessed.find_first_of ('"', start) + 1;
@@ -147,45 +149,33 @@ void ShaderUnit::preprocessIncludes () {
 	// some includes might not be present
 	// and that should not be treated as an error mainly because these could come from
 	// commented out content
-	std::string content;
-
 	try {
-	    content += "// begin of include from file ";
-	    content += filename;
-	    content += "\n";
-	    content += this->m_assetLocator.includeShader (filename);
-	    content += "\n// end of included from file ";
-	    content += filename;
-	    content += "\n";
+	    includes += "// begin of include from file ";
+	    includes += filename;
+	    includes += "\n";
+	    includes += this->m_assetLocator.includeShader (filename);
+	    includes += "\n// end of included from file ";
+	    includes += filename;
+	    includes += "\n";
 	} catch (AssetLoadException&) {
-	    content += "// tried including file ";
-	    content += filename;
-	    content += " but was not found\n";
+	    includes += "// tried including file ";
+	    includes += filename;
+	    includes += " but was not found\n";
 	}
 
 	// replace the first two letters with a comment so the filelength doesn't change
 	this->m_preprocessed = this->m_preprocessed.replace (start, 2, "//");
-
-	this->m_includes += content;
-
-	// go to the end of the line
 	end = start;
     }
 
-    // ensure the included files do not include other files
+    // resolve any #include found inside the accumulated content itself
     end = 0;
+    while ((start = includes.find ("#include", end)) != std::string::npos) {
+	const size_t lineEnd = includes.find_first_of ('\n', start);
+	const size_t quoteStart = includes.find_first_of ('"', start) + 1;
+	const size_t quoteEnd = includes.find_first_of ('"', quoteStart);
+	const std::string filename = includes.substr (quoteStart, quoteEnd - quoteStart);
 
-    // then apply includes in-place
-    while ((start = this->m_includes.find ("#include", end)) != std::string::npos) {
-	const size_t lineEnd = this->m_includes.find_first_of ('\n', start);
-	// TODO: CHECK FOR ERRORS HERE, MALFORMED INCLUDES WILL NOT BE PROPERLY HANDLED
-	const size_t quoteStart = this->m_includes.find_first_of ('"', start) + 1;
-	const size_t quoteEnd = this->m_includes.find_first_of ('"', quoteStart);
-	const std::string filename = this->m_includes.substr (quoteStart, quoteEnd - quoteStart);
-
-	// some includes might not be present
-	// and that should not be treated as an error mainly because these could come from
-	// commented out content
 	std::string content;
 
 	try {
@@ -202,114 +192,120 @@ void ShaderUnit::preprocessIncludes () {
 	    content += " but was not found\n";
 	}
 
-	// file contents ready, replace things
-	this->m_includes = this->m_includes.replace (start, lineEnd - start, content);
-
-	// go back to the beginning of the line to properly continue detecting things
+	includes = includes.replace (start, lineEnd - start, content);
 	end = start;
     }
 
-    // search for the main function and add the includes before that for now
-    end = 0;
-    bool includesAdded = false;
+    if (includes.empty ()) {
+	return;
+    }
 
-    // finally, try to place the include contents before the main function
-    while ((start = this->m_preprocessed.find (" main", end)) != std::string::npos) {
-	char value = this->m_preprocessed.at (start + 5);
+    this->m_preprocessed.insert (this->findIncludeInsertionPoint (), includes + '\n');
+}
 
-	end = start + 5;
+size_t ShaderUnit::findIncludeInsertionPoint () const {
+    // Find the opening brace of the first *top-level* (brace-depth 0) function body -- this
+    // distinguishes a real function definition from a constructor call like `vec4(x, y, z, w)`
+    // showing up inside an already-open function body, which a simple "look for ') {'" text
+    // search can't tell apart.
+    size_t depth = 0;
+    size_t firstFunctionBrace = std::string::npos;
+    const size_t length = this->m_preprocessed.size ();
 
-	if (value != ' ' && value != '(') {
+    for (size_t i = 0; i < length; i++) {
+	const char c = this->m_preprocessed[i];
+
+	// Braces inside comments (e.g. a `// {"label": ...}` parameter-metadata comment) aren't
+	// real structure -- skip past the whole comment so they can't be mistaken for one.
+	if (c == '/' && i + 1 < length && this->m_preprocessed[i + 1] == '/') {
+	    const size_t lineEnd = this->m_preprocessed.find ('\n', i);
+	    i = (lineEnd == std::string::npos) ? length : lineEnd;
+	    continue;
+	}
+	if (c == '/' && i + 1 < length && this->m_preprocessed[i + 1] == '*') {
+	    const size_t commentEnd = this->m_preprocessed.find ("*/", i + 2);
+	    i = (commentEnd == std::string::npos) ? length : commentEnd + 1;
 	    continue;
 	}
 
-	// main located, search for uniforms and find the latest one available
-	size_t lastAttribute = this->m_preprocessed.rfind ("attribute", start);
-	size_t lastVarying = this->m_preprocessed.rfind ("varying", start);
-	size_t lastUniform = this->m_preprocessed.rfind ("uniform", start);
-	size_t latest = lastAttribute;
-
-	if (latest == std::string::npos) {
-	    latest = lastVarying;
-	} else if (latest < lastVarying && lastVarying != std::string::npos) {
-	    latest = lastVarying;
+	if (c == '{') {
+	    if (depth == 0) {
+		firstFunctionBrace = i;
+		break;
+	    }
+	    depth++;
+	} else if (c == '}' && depth > 0) {
+	    depth--;
 	}
+    }
 
-	if (latest == std::string::npos) {
-	    latest = lastUniform;
-	} else if (latest < lastUniform && lastUniform != std::string::npos) {
-	    latest = lastUniform;
-	}
+    // No function body found at all (shouldn't happen for a real shader) -- nothing to anchor
+    // to, so just put the includes at the very start.
+    if (firstFunctionBrace == std::string::npos) {
+	return 0;
+    }
 
-	if (latest < start) {
-	    // find the end of the current line
-	    latest = this->m_preprocessed.find ('\n', latest);
+    // Walk back from that brace to the nearest previous statement/block end (';' or '}'), which
+    // lands right before the function's own return type/name/parameter list -- not inside it.
+    // This is the anchor: everything the host shader declared up to this point (regardless of
+    // whether that's "just before main()", like most shaders, or earlier, like auto_sway.vert's
+    // M_PI-using helper functions) is already visible, and the include's own content only ever
+    // needs to be visible to code that comes *after* it.
+    size_t insertAt = firstFunctionBrace;
+
+    while (insertAt > 0 && this->m_preprocessed[insertAt - 1] != ';' && this->m_preprocessed[insertAt - 1] != '}') {
+	insertAt--;
+    }
+
+    // That boundary character might have a trailing `// {json}` parameter-metadata comment on
+    // the same line (preprocessVariables() expects "uniform ...; // {...}" to stay on one line
+    // to pair them up) -- advance to the start of the *next* line so the include never lands
+    // between a declaration and its own comment, capped at the function brace in case the
+    // declaration and the function happen to share a line.
+    const size_t lineEnd = this->m_preprocessed.find ('\n', insertAt);
+    if (lineEnd != std::string::npos) {
+	insertAt = std::min (lineEnd + 1, firstFunctionBrace);
+    }
+
+    // Safety net: if that landed inside a still-open #if/#ifdef/#ifndef block (e.g.
+    // genericropeparticle.vert wraps two entire alternate main()s in `#if GS_ENABLED`/`#else`,
+    // each needing common_particles.h's declarations), hoist to before the outermost such block
+    // instead, so the include is visible to every branch rather than just the one it landed in.
+    std::stack<size_t> ifdefStack;
+    const std::regex ifdef (R"(#(if|ifdef|ifndef|endif)\b)");
+    std::smatch match;
+    size_t current = 0;
+
+    while (current < insertAt &&
+	   std::regex_search (
+	       this->m_preprocessed.cbegin () + static_cast<std::ptrdiff_t> (current),
+	       this->m_preprocessed.cbegin () + static_cast<std::ptrdiff_t> (insertAt), match, ifdef
+	   )) {
+	const size_t matchPos = current + match.position (0);
+
+	if (match[0].str () == "#endif") {
+	    if (!ifdefStack.empty ()) {
+		ifdefStack.pop ();
+	    }
 	} else {
-	    // find the end of the previous line
-	    latest = this->m_preprocessed.rfind ('\n', start);
+	    ifdefStack.push (matchPos);
 	}
 
-	// update the function start to point to the end of the previous line
-	// as this will be used to determine the position of the includes
-	start = this->m_preprocessed.rfind ('\n', start);
+	current = matchPos + match.length (0);
+    }
 
-	// keeps track of the start and end of ifdefs to look for the right
-	// place to put the includes in
-	std::stack<size_t> ifdefStack;
-
-	// start looking for #if and #endif results and add to the stack so we find the start of the current chain of
-	// ifdefs and use that as point
-
-	// for this we'll use regex
-	const std::regex ifdef (R"((#if|#endif))");
-	std::smatch match;
-	size_t current = 0;
-
-	while (
-	    std::regex_search (this->m_preprocessed.cbegin () + current, this->m_preprocessed.cend (), match, ifdef)) {
-	    current += match.position ();
-
-	    // if it's opening an #ifdef keep track of the start of the block
-	    // and that's it
-	    if (this->m_preprocessed.substr (current, 3) == "#if") {
-		// go to the next character so the regex doesn't match with the same thing again
-		ifdefStack.push (current++);
-		continue;
-	    }
-
-	    // go to the next character so the regex doesn't match with the same thing again
-	    current++;
-
-	    // most likely a syntax error, but we'll ignore it for now...
-	    if (ifdefStack.empty ()) {
-		continue;
-	    }
-
-	    size_t stackStart = ifdefStack.top ();
+    if (!ifdefStack.empty ()) {
+	// unwind to the outermost still-open conditional and insert right before it
+	while (!ifdefStack.empty ()) {
+	    insertAt = ifdefStack.top ();
 	    ifdefStack.pop ();
-
-	    if (latest > stackStart && latest <= current) {
-		// The insertion point is inside a conditional block.
-		// Move to BEFORE the #if so includes are available to all branches
-		// (e.g. genericropeparticle.vert has #if GS_ENABLED wrapping two main() functions).
-		size_t beforeIfdef = this->m_preprocessed.rfind ('\n', stackStart);
-		latest = (beforeIfdef != std::string::npos) ? beforeIfdef : 0;
-	    }
 	}
 
-	// no more matches, get the one that happens the earliest
-	// TODO: IS THIS GOOD ENOUGH? MAYBE WE SHOULD BE GETTING THE FIRST #IF BLOCK INSTEAD?
-	latest = std::min (latest, start);
-
-	// finally insert it there
-	this->m_preprocessed.insert (latest + 1, this->m_includes + '\n');
-	includesAdded = true;
-	break;
+	const size_t beforeIfdef = this->m_preprocessed.rfind ('\n', insertAt);
+	insertAt = (beforeIfdef != std::string::npos) ? beforeIfdef + 1 : 0;
     }
 
-    if (!includesAdded) {
-	sLog.exception ("Could not find where to place includes for shader unit ", this->m_file);
-    }
+    return insertAt;
 }
 
 void ShaderUnit::preprocessRequires () {

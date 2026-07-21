@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-19 (#52 DONE — implemented engine.canvasSize/screenResolution (documented, never existed), fixed zero-arg Vec2/3/4() construction, and fixed two uncaught-exception crash paths in tick()/runPendingInits() (the second found only while verifying the first). Also fixed a real "Lens Flare .size" crash, including a bug introduced and caught mid-fix (TypeCaster::as<T>() throwing on mismatch). The previously "confirmed unfixable" CUDA/nvdec crash on 3388330010 appears to have actually been undefined behavior from the uncaught-exception paths, not a separate hardware race — fixing both took a 30×60s stress test from 85% crash rate to 0/30, though this can't be proven with total certainty for a hardware-level race. Full regression: 440/0/0 vs #51's 437/2/1. Active Priority Order: (none))
+**Last updated:** 2026-07-20 (#53 opened, 2 of 5 causes fixed — reopened Abyss Gaming (3675966045) after a 44-wallpaper triage found its "fire effect only" symptom wasn't fully explained by #44. Fixed a JSON parser strictness gap on WE's own bundled stock content (trailing comma) and a shader #include-ordering heuristic bug, the latter through 3 design iterations that each caught a real regression via broad verification before shipping (including a SIGSEGV on an unrelated wallpaper). Full regression: 440/0/0, matches #52's baseline. Character still doesn't render -- gated on a separate vec4/vec2 GLSL division bug on the object holding it, not yet fixed, plus a broader question of whether one failing effect should really wipe an entire 14-effect object. Active Priority Order: #53)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -295,6 +295,76 @@ messages, API status table) — gaps (#2, #6, #7, #8) are items that were
 completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
+
+### #53 — Abyss Gaming (3675966045): "renders fire effect only" — 2 of 5 identified causes fixed, character still doesn't render
+
+Reopened from the original #44 investigation after a broader
+44-wallpaper triage found the current symptom ("renders and plays but
+completely wrong, showing fire effect and that is all") isn't fully
+explained by #44's known TypeError fix or its already-documented
+auto_sway combo-JSON issue. Reinvestigation found 5 distinct causes
+behind 11 of this wallpaper's 30 top-level objects failing to render,
+only one of which (the character/fox illustration itself, object 23)
+is the actual gate on the reported symptom:
+
+1. auto_sway combo-JSON error (#44, confirmed genuinely invalid
+   third-party JSON, correctly not fixed) — unchanged.
+2. FIXED 2026-07-20: WallpaperParser::parseObjects() was too strict
+   on a trailing comma in Wallpaper Engine's own bundled
+   effects/fluidsimulation/effect.json (stock content, not
+   third-party) -- dropped the containing object (547) entirely.
+   Added WallpaperEngine::Data::JSON::parseLenient() (JSON.cpp/.h):
+   tries strict nlohmann::json::parse() first (confirmed no built-in
+   trailing-comma tolerance exists), retries after a string-literal-
+   aware trailing-comma strip only on failure, and re-throws the
+   ORIGINAL error unchanged if stripping doesn't fix it -- so
+   genuinely different malformed JSON (like #1's missing quote) still
+   fails exactly as before. Wired into all 7 real WE-content parse
+   call sites (scene/effect/material/model/particle/project.json x2);
+   deliberately left the ShaderUnit combo/parameter-metadata parsers
+   and the app's own config parser untouched.
+3. FIXED 2026-07-20: ShaderUnit::preprocessIncludes()'s insertion-point
+   heuristic (find the last uniform/varying/attribute before main(),
+   insert #include content there) broke down on auto_sway.vert (33KB,
+   ~600 uniforms) -- M_PI ended up used by helper functions before its
+   own #define, killing object 3679. This went through 3 design
+   iterations, each one testing beyond just this wallpaper per review
+   and catching a real regression before it shipped: position-0
+   insertion broke common_blur.h (needs a host-declared g_Texture0
+   already in scope before the include); in-place substitution broke
+   the opposite case (one workshop wallpaper's own bundled
+   godrays_gaussian.frag declares g_Texture0 AFTER its #include); the
+   final design (insert before the first brace-depth-0 function body,
+   comment-aware so a `// {json}` parameter-metadata comment's braces
+   can't be mistaken for a real function, hoisted out of any enclosing
+   #if for multi-main() shaders) caught a real SIGSEGV on an unrelated
+   wallpaper ("Winter day/night by Vitaliy Prusakov") from an earlier
+   iteration's comment-blindness before the final version shipped.
+   Verified via full 440-wallpaper regression: 440 clean/0 errors/
+   0 crashes, matching #52's baseline exactly; hand-verified against
+   auto_sway.vert, both godrays_gaussian.frag variants, and
+   genericropeparticle.vert's two-main() case; Ocarina of Time's
+   pre-existing GLSL error confirmed identical on a stashed pre-fix
+   build (not a new regression).
+4. Stray semicolons in a third-party GLSL #elif (community "Simple
+   Gradient Audio Bar" effect) -- flagged as ambiguous (engine-should-
+   tolerate vs. author typo), not yet fixed.
+5. NOT YET FIXED, the actual gate on this wallpaper's reported
+   symptom: object 23 (the character/fox illustration itself) stacks
+   14 effects; one third-party effect divides a uniform vec4
+   (g_Texture0Resolution) directly against a vec2 without a swizzle,
+   which glslang rejects outright. CScene::createObject() deletes the
+   ENTIRE object on the first effect-pass compile failure (out of 14),
+   so this one bad effect currently prevents any chance of the
+   character rendering regardless of whether the other 13 would
+   compile cleanly. Also flagged as a separate, broader robustness
+   question worth its own consideration: should one failing effect
+   really wipe the whole object, rather than just that effect layer?
+
+Fixing #5 (and possibly the effect-isolation question) would plausibly
+restore the character/fox art -- unverified until attempted, since
+setup() currently never gets past the first failure to know whether
+the other 13 effects compile cleanly.
 
 ---
 

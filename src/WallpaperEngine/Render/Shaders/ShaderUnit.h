@@ -80,6 +80,12 @@ private:
      */
     void preprocessIncludes ();
     /**
+     * Finds where resolved #include content should land in m_preprocessed: right before the
+     * first top-level function definition, hoisted out of any conditional block it would
+     * otherwise land inside of
+     */
+    [[nodiscard]] size_t findIncludeInsertionPoint () const;
+    /**
      * Parses the input shader looking for require directives and resolves them into generated code
      */
     void preprocessRequires ();
@@ -147,10 +153,6 @@ private:
      * Shader's original contents
      */
     std::string m_content;
-    /**
-     * Includes content to be added on compilation
-     */
-    std::string m_includes;
     /**
      * Shader's content after the preprocessing step
      */

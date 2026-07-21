@@ -245,7 +245,7 @@ void WallpaperApplication::loadBackgrounds () {
 
 ProjectUniquePtr WallpaperApplication::loadBackground (const std::string& bg) {
     auto container = this->setupAssetLocator (bg);
-    auto json = WallpaperEngine::Data::JSON::JSON::parse (container->readString ("project.json"));
+    auto json = WallpaperEngine::Data::JSON::parseLenient (container->readString ("project.json"));
 
     // when a background is loaded, reset the screenshot variables
     // this allows taking screenshots after a background changes
@@ -396,7 +396,7 @@ bool WallpaperApplication::preflightWallpaper (const std::string& path) {
     try {
 	// avoid mutating state, just ensure project.json parses
 	auto container = this->setupAssetLocator (path);
-	const auto json = WallpaperEngine::Data::JSON::JSON::parse (container->readString ("project.json"));
+	const auto json = WallpaperEngine::Data::JSON::parseLenient (container->readString ("project.json"));
 	if (!json.contains ("type") || !json.contains ("file")) {
 	    sLog.error ("Preflight failed for ", path, ": missing required fields");
 	    return false;
