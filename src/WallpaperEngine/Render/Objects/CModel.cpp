@@ -70,6 +70,8 @@ void CModel::updateModelMatrix () {
     this->m_modelMatrix = model;
     this->m_normalModelMatrix = glm::inverseTranspose (glm::mat3 (model));
     this->m_viewProjectionMatrix = this->getScene ().getCamera ().getProjection () * this->getScene ().getCamera ().getLookAt ();
+    this->m_modelViewProjectionMatrix = this->m_viewProjectionMatrix * this->m_modelMatrix;
+    this->m_modelViewProjectionMatrixInverse = glm::inverse (this->m_modelViewProjectionMatrix);
 }
 
 void CModel::setup () {
@@ -90,8 +92,21 @@ void CModel::setup () {
 
 	sub.pass = new CPass (*this, fboProvider, materialPass, std::nullopt, std::nullopt, std::nullopt);
 	sub.pass->setDestination (this->getScene ().getFBO ());
+	// CPass::render() unconditionally skips the draw call ("no input texture set") unless an
+	// input is set -- a gate designed for CImage/CParticle's multi-pass effect chains, where
+	// "input" is the previous pass's output. CModel has no previous pass, so this must be the
+	// sub-mesh's own base texture, the same role CParticle::setup() fills with its own single
+	// texture (`m_pass->setInput(getTexture())`). resolveTexture0() already resolves this pass's
+	// own material (including "_rt_"/"_alias_" FBO references, which a plain resolveTexture(name)
+	// call can't handle) -- reusing it here instead of duplicating that resolution logic. Without
+	// this, CModel never drew a single pixel regardless of correct geometry.
+	sub.pass->setInput (sub.pass->resolveTexture0 ());
 	sub.pass->setModelMatrix (&this->m_modelMatrix);
 	sub.pass->setViewProjectionMatrix (&this->m_viewProjectionMatrix);
+	// See m_modelViewProjectionMatrix's declaration in CModel.h -- without these, any shader
+	// declaring g_ModelViewProjectionMatrix/Inverse reads an uninitialized CPass member pointer.
+	sub.pass->setModelViewProjectionMatrix (&this->m_modelViewProjectionMatrix);
+	sub.pass->setModelViewProjectionMatrixInverse (&this->m_modelViewProjectionMatrixInverse);
 	// g_NormalModelMatrix (mat3) has no public CPass::addUniform() overload, and with
 	// LIGHTING/REFLECTION forced off above, the shader's only consumer of the normal it
 	// produces is dead code under those combos -- deliberately left unset rather than

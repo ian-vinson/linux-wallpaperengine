@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-21 (#54 DONE — implemented Timeline Animation (single-mode only; Loop/Mirror deferred per scoping analysis, same disposition as #47), with real cubic-Bezier interpolation verified against actual corpus keyframe data. Found and fixed a separate, more consequential bug as a prerequisite: g_Alpha/g_Color/g_Color4/g_Brightness/g_UserAlpha were bound as one-time snapshot uniforms, never refreshed per frame — silently freezing ANY runtime change to these (script-driven as much as animation-driven) across the whole engine, not just this feature. Verified with real before/after pixel proof matching expected math. Full regression: 440/440 clean, 0 errors, 0 crashes, matches baseline. Active Priority Order: (none))
+**Last updated:** 2026-07-22 (#47 DONE — resumed the parked static-mesh 3D model work: reverse-engineered the real 48-byte static vertex layout (confirmed via two independent geometric proofs — face-normal alignment and a perfect sphere falling out of raw bytes), then found and fixed two real bugs beyond the original scope: CModel never wired a pass input at all (100% of draw calls silently skipped since #47's original implementation) and, once exposed by that fix, a dormant uninitialized-matrix crash affecting 3 real wallpapers (confirmed via identical coredumpctl backtraces). Full regression: 440/440 clean, 0 errors, 0 crashes, matches baseline exactly, including all 3 previously-crashing wallpapers. Flagged but explicitly NOT fixed, likely the real remaining blocker on Ocarina looking correct: camera-projection selection falls back to a mismatched orthographic projection for normal fov-based 3D scenes — logged as #55, out of scope here since it affects projection selection corpus-wide. Active Priority Order: #55)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -295,6 +295,27 @@ messages, API status table) — gaps (#2, #6, #7, #8) are items that were
 completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
+
+### #55 — Camera-projection selection likely mis-selects orthographic instead of perspective for normal fov-based 3D scenes (found while completing #47)
+
+This fork's camera-projection logic only calls
+setPerspectiveProjection() when perspectiveOverrideFov is present;
+scenes using the normal (and apparently more common) fov field with
+orthogonalprojection=null instead fall through to
+setOrthogonalProjection() at screen-pixel dimensions -- fundamentally
+wrong for any scene with real 3D world-space geometry (e.g. #47's
+now-working static 3D models). Suspected to be the actual root cause
+of Ocarina of Time's long-standing grey/incorrect appearance, deeper
+than any earlier hypothesis in #42/#45/#46/#47. Confirmed present via
+a temporary, reverted diagnostic patch during #47's verification (a
+perspective projection using the scene's own fov/nearz/farz values
+produced a correctly-rendering castle courtyard; the real shipped
+ortho-fallback path does not). Not yet root-caused at the "why does
+this selection logic look like this" level, and not yet fixed --
+affects camera-projection selection broadly (all 440 corpus
+wallpapers use one path or the other), not just Ocarina, so needs its
+own scoped investigation into what the correct selection criteria
+should actually be, not a narrow patch for one wallpaper.
 
 ---
 
@@ -838,79 +859,71 @@ unrelated code, this was accepted as sufficient rather than re-running
 the ~45-minute full corpus a second time under pre-fix code to
 reconstruct it.
 
-### #47 — PARKED 2026-07-14: static-mesh 3D model support attempted, built safely, but the real goal (Ocarina of Time rendering) was not achieved
+### #47 — DONE 2026-07-22: static-mesh 3D model support, resumed and completed — 2 real bugs fixed, but a separate camera-projection bug likely still blocks correct on-screen display
 
-**Full arc**: started as "Ocarina of Time still grey after #46's fix."
-Refuted the character-select/plain-container hypothesis (factually
-true -- containers can't be scripted -- but not the actual gate, since
-no code path propagates visibility from a parent container to its
-children). Found the real cause: ObjectParser::parse() has no handling
-for a top-level "model" key at all, silently discarding any object
-using WE's 3D-model format -- confirmed scene-wide at 148/381 objects
-(39%), including the entire environment and every character's body,
-not just the 45 originally-suspected sub-objects. A feasibility
-scoping pass found CImage::loadPuppetMesh() already parses the same
-MDLV binary format for an unrelated feature (puppet-warp), and split
-the work into two tiers: static geometry (no "MDLS" skeleton section,
-115/148 objects, estimated cheap/reusable) vs. full skeletal-animated
-characters (33/148, confirmed multi-week, undocumented binary format).
-Corpus-wide, this pattern was found in zero of 156 other sampled
-workshop wallpapers -- a genuine outlier, not a common gap.
+**Resumed from parked state**: the original attempt correctly
+identified that CImage::loadPuppetMesh()'s vertex-block heuristic
+didn't generalize to static (non-MDLS) .mdl files, and parked rather
+than ship guessed-at geometry. A dedicated reverse-engineering pass
+derived the real byte layout with strong evidence: static MDLV0023
+blocks use a 48-byte vertex stride (position/normal/tangent/tangent.w/
+uv, with REAL stored normals, not synthetic face-winding computation),
+discriminated from the existing 80-byte skeletal layout via a 4-byte
+flags word (0x0000000f static vs 0x0180000f skeletal). Confirmed via
+two independent, self-consistent checks: castle_courtyard.mdl's
+1,479/1,479 sampled triangles' geometrically-computed face normals
+matched the stored per-vertex normals; an unrelated built-in
+sphere.mdl asset's 559 vertices sat at radius 100.0 +/- 0.0002 with
+normals parallel to the radial direction (dot 0.9998-1.0) -- a
+perfect sphere falling out of raw byte interpretation, unambiguous
+confirmation.
 
-**Decision**: pursue the static tier only, given the low estimated
-cost and the skeletal tier's confirmed large scope for one outlier
-wallpaper.
+**Two real bugs fixed, not one**:
+1. Vertex stride, as scoped -- MdlvMeshParser.cpp now derives stride
+   per-block from the flags word rather than a single hardcoded
+   value. CImage::loadPuppetMesh() (the existing skeletal/puppet-warp
+   path) calls the original function directly with its own fixed
+   stride, completely untouched.
+2. Found during verification, more fundamental: even with correct
+   geometry parsing, the screen stayed grey. CModel::setup() never
+   called CPass::setInput(), and CPass::render() unconditionally
+   skips its draw call without one -- meaning no CModel object had
+   EVER rendered a single pixel since #47's original implementation,
+   regardless of parsing correctness. Fixed by wiring
+   setInput(resolveTexture0()) (making resolveTexture0() public,
+   reused rather than duplicating its existing _rt_/_alias_ FBO
+   resolution logic). This exposed a second, fully dormant bug: 3
+   wallpapers in the regression suite immediately segfaulted once
+   render() could finally proceed -- confirmed via coredumpctl
+   backtraces, byte-identical across all 3, all in
+   CPass::setupRenderReferenceUniforms() dereferencing CModel's never-
+   initialized g_ModelViewProjectionMatrix/Inverse pointers. Fixed by
+   giving CModel real, per-frame-refreshed MVP/inverse matrices,
+   mirroring CImage's already-correct pattern.
 
-**What was actually built**: a new CModel render class (parallel to
-CImage/CParticle/CText, using real 3D world-space transforms via the
-existing camera projection code, reusing the existing shader/material
-pipeline with forced LIGHTING=0/REFLECTION=0/FOG=0 combo overrides), a
-generalized MdlvMeshParser utility extracted from the existing
-puppet-mesh finder (with the original puppet-warp code refactored to a
-thin wrapper -- zero behavior change, verified against its historical
-baseline), and safe MDLS-based routing (model+no MDLS -> new static
-path, model+MDLS -> unchanged existing placeholder, no model key ->
-unchanged existing behavior).
+**Verification**: full 440-wallpaper regression: 440 clean / 0 errors
+/ 0 crashes, matches the historical baseline exactly -- including all
+3 previously-crashing wallpapers (one dip at 437/0/3 mid-session was
+investigated to a confirmed root cause via real backtraces, not
+hand-waved as flakiness, then fixed and re-verified clean). Puppet-
+warp path (Gwen Stacy, 3002198572) confirmed byte-exact against its
+documented baseline (vertices=4631, MDLV0019) both before and after
+the second fix. The shipped C++ parser itself (not just the earlier
+Python analysis) independently re-confirmed against all 4 known
+sample files.
 
-**Why it didn't achieve the goal**: the static-tier cost estimate,
-made during scoping, turned out to be wrong once actually attempted.
-The existing mesh-block-finding heuristic (correct for puppet-warp's
-character-mesh region) does not generalize to genuinely static .mdl
-files -- tested across all 115 static objects in this scene, 0
-produced valid geometry; every candidate block failed index-sanity
-validation as a false-positive byte-pattern match. Static .mdl files
-use a different internal layout the puppet-mesh parser was never
-designed for, and reverse-engineering that layout is itself a real,
-unscoped investigation -- not the "nearly free" tier originally
-estimated.
-
-**Verified safe rather than shipped broken**: parseModel3D() returns
-nullptr whenever no valid sub-mesh is found, so every static object
-falls through to the exact same placeholder as before this change --
-chose not to ship code that would silently render garbled/wrong
-geometry. Verification: Ocarina of Time's screenshot is pixel-identical
-to before (confirmed via diff, not just "looks similar"); all 33
-skeletal character objects still correctly route through the
-unchanged hasSkeleton early-return; puppet-warp's existing feature
-(Gwen Stacy, 3002198572) regression-checked clean against its exact
-historical baseline (vertices=4631, MDLV0019); full 440-wallpaper
-regression showed 434 clean/6 errors/0 crashes (vs #46's 439/1/0),
-investigated rather than accepted at face value -- confirmed via git
-stash + direct re-test that every new/changed entry (including a
-CRASH_EXCEPTION on Honkai: Star Rail) reproduces byte-identically on
-the original pre-#47 code, consistent with the corpus-timing flakiness
-already documented throughout this session (#40/#42/#43/#46), not a
-real regression.
-
-**Decision to park, not continue**: given the static-tier estimate
-already proved wrong once, the real remaining work is now genuine,
-unscoped binary reverse-engineering for one confirmed corpus outlier
-(0/156 other sampled wallpapers affected) -- not pursued further.
-The shipped code is safe and inert for this wallpaper (falls back
-identically to before), but has independent value: the shared
-MdlvMeshParser utility is cleaner than the prior single-purpose
-puppet-mesh finder it replaces, and a real CModel class now exists as
-a foundation if this is ever picked back up.
+**Flagged, not fixed -- likely the real remaining blocker on Ocarina
+actually looking correct on screen**: this fork's camera-projection
+selection only uses perspective projection when a rarely-set
+perspectiveoverridefov field is present. Ocarina's normal fov-based
+camera authoring instead falls through to a screen-pixel-sized
+orthographic projection -- fundamentally mismatched with real 3D
+world-space mesh coordinates. This is likely the actual root cause of
+the wallpaper's long-standing grey/incorrect appearance, deeper than
+any prior #42/#45/#46/#47 hypothesis -- but affects camera-projection
+selection for all 440 corpus wallpapers, not just this one, so it was
+correctly left out of scope here rather than folded into this fix.
+Logged separately as #55.
 
 ### #46 — DONE 2026-07-14: fixed silent property-registration collision in ScriptableObject::registerProperty() — confirmed universal across scene wallpapers, fix verified safe
 

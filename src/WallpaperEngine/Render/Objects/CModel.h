@@ -62,6 +62,20 @@ private:
     glm::mat4 m_modelMatrix { 1.0f };
     glm::mat4 m_viewProjectionMatrix { 1.0f };
     glm::mat3 m_normalModelMatrix { 1.0f };
+    // CPass::setupUniforms() unconditionally registers g_ModelViewProjectionMatrix/Inverse (and
+    // g_EffectModelViewProjectionMatrix) as reference uniforms pointing at CPass's own
+    // m_modelViewProjectionMatrix{,Inverse} member pointers, for any shader that declares them --
+    // those member pointers are never written unless something calls CPass::
+    // setModelViewProjectionMatrix()/setModelViewProjectionMatrixInverse(). CImage always does;
+    // CModel's original implementation never did, leaving them uninitialized garbage. That was
+    // silently harmless only because CPass::render() always bailed out earlier ("no input texture
+    // set") before reaching setupRenderReferenceUniforms() -- once that gate was fixed, any shader
+    // actually using these uniforms dereferenced the garbage pointer and crashed the GL driver on
+    // the resulting NaN/garbage matrix (confirmed via coredumpctl backtraces on 3 real wallpapers,
+    // all landing in CPass::setupRenderReferenceUniforms()). These two members give CPass a real,
+    // always-valid combined matrix to point at, refreshed every frame in updateModelMatrix().
+    glm::mat4 m_modelViewProjectionMatrix { 1.0f };
+    glm::mat4 m_modelViewProjectionMatrixInverse { 1.0f };
 
     float m_brightness = 1.0f;
     float m_alpha = 1.0f;

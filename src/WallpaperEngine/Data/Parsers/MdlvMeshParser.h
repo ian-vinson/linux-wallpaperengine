@@ -17,19 +17,25 @@ struct MdlvMeshBlock {
 };
 
 // Locates every mesh sub-block (a 4-byte vertex-buffer-length prefix + vertex data + a 4-byte
-// index-buffer-length prefix + index data) between markerSize and endOffset in an MDLV file.
-// Shared by CImage's puppet-warp mesh loader (which only ever consumes the first block found)
-// and ObjectParser's static "model"-keyed 3D object loader (which consumes every block up to the
-// optional MDLS skeleton section) -- both rely on the identical MDLV sub-block layout.
+// index-buffer-length prefix + index data) between markerSize and endOffset in an MDLV file, at a
+// single caller-supplied vertex stride. Used directly by CImage's puppet-warp mesh loader (which
+// only ever consumes the first block found, fixed at stride 80 -- confirmed correct for skeletal/
+// puppet files, unchanged). ObjectParser's static "model"-keyed 3D object loader does NOT use this
+// function directly (see findMdlvMeshBlocksAuto in the .cpp, file-local) -- static (non-MDLS) MDLV
+// files use a different, confirmed 48-byte vertex stride with real stored normal/tangent/uv
+// fields, not the 80-byte skeletal layout.
 std::vector<MdlvMeshBlock> findMdlvMeshBlocks (
     const BinaryReader& reader, size_t markerSize, size_t endOffset, size_t meshHeaderSize, size_t vertexStride
 );
 
 struct MdlvSubMesh {
     std::vector<float> positions; // 3 floats per vertex
-    std::vector<float> normals; // 3 floats per vertex -- computed from face winding; MDLV has no
-                                 // confirmed stored-normal byte offset, so these are derived rather
-                                 // than trusting an unverified layout guess
+    std::vector<float> normals; // 3 floats per vertex -- read directly from the confirmed offset
+                                 // (12) in a static-layout (48-byte stride) block; for a skinned-
+                                 // layout (80-byte stride) block encountered in a non-MDLS file
+                                 // (not observed in practice, but handled defensively) the stored
+                                 // normal offset is unconfirmed, so these are instead computed from
+                                 // face winding, same as this parser's original behavior
     std::vector<float> uvs; // 2 floats per vertex
     std::vector<uint16_t> indices;
     std::optional<std::string> materialPath; // nearest preceding embedded ".json" path, if any

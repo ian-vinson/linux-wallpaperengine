@@ -45,6 +45,13 @@ public:
     void setBlendingMode (BlendingMode blendingmode);
     [[nodiscard]] BlendingMode getBlendingMode () const;
     [[nodiscard]] std::shared_ptr<const CFBO> resolveFBO (const std::string& name) const;
+    // Whatever texture unit 0 will actually be bound to at render time -- resolved from this
+    // pass's own material (including "_rt_"/"_alias_" FBO references) during construction, with
+    // the same input/previous-input fallback chain resolveTexture0() always used. Exposed so a
+    // renderable with no "previous pass" (unlike CImage/CParticle's multi-pass effect chains) can
+    // still give this pass a real setInput() -- CPass::render() otherwise unconditionally skips
+    // the draw call when no input is set, regardless of whether m_textures[0] is already valid.
+    [[nodiscard]] std::shared_ptr<const TextureProvider> resolveTexture0 ();
 
     [[nodiscard]] std::shared_ptr<const FBOProvider> getFBOProvider () const;
     [[nodiscard]] const CRenderable& getRenderable () const;
@@ -169,7 +176,6 @@ private:
 
     void setupRenderFramebuffer () const;
     void setupRenderTexture ();
-    [[nodiscard]] std::shared_ptr<const TextureProvider> resolveTexture0 ();
     [[nodiscard]] TextureAnimationState
     resolveTextureAnimationState (const std::shared_ptr<const TextureProvider>& texture) const;
     void bindTextureUnit (int index, const std::shared_ptr<const TextureProvider>& texture, uint32_t frame) const;
