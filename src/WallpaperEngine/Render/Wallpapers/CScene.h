@@ -79,6 +79,17 @@ public:
      */
     bool destroyObject (int id);
 
+    /**
+     * Registers a DynamicValue that carries an AnimationMode::Single Timeline Animation
+     * (WE_DOCS_REFERENCE.md section 13) for per-frame ticking. Mirrors ScriptEngine::queueScript's
+     * registration shape (object identity kept alongside the value so a destroyed object's
+     * entries can be cleaned up the same way ScriptEngine::forgetObject already does for
+     * property-scripts) but needs no JS involvement -- ticking is pure elapsed-time math.
+     * No-op if `value` has no animation or its mode isn't Single (Loop/Mirror are parsed but
+     * intentionally left untouched for now, see AnimationTimeline.h).
+     */
+    void queueAnimation (Data::Model::DynamicValue& value, CObject& object);
+
 protected:
     void renderFrame (const glm::ivec4& viewport) override;
     void updateMouse (const glm::ivec4& viewport);
@@ -94,6 +105,24 @@ private:
      * frame from renderFrame(), immediately after tick() returns. */
     void processPendingDestructions ();
 
+    /** Advances every registered single-mode Timeline Animation by this frame's delta time and
+     * pushes the interpolated value via DynamicValue::update(..., UpdateSource::Animation).
+     * Called once per frame from renderFrame(), alongside the existing scriptEngine tick(). */
+    void tickAnimations ();
+
+    /** Removes every animation entry belonging to the given object -- tickAnimations() derefs
+     * every entry's object pointer unconditionally, every frame, so this must happen before the
+     * object is deleted (same reasoning as ScriptEngine::forgetObject, called from the same
+     * processPendingDestructions() cleanup step). */
+    void forgetObjectAnimations (const CObject& object);
+
+    struct AnimatedPropertyEntry {
+        Data::Model::DynamicValue* value = nullptr;
+        CObject* object = nullptr;
+        double elapsedTime = 0.0;
+        bool completed = false;
+    };
+
     std::unique_ptr<Scripting::ScriptEngine> m_scriptEngine;
     std::unique_ptr<Camera> m_camera;
     ObjectUniquePtr m_bloomObjectData;
@@ -108,6 +137,7 @@ private:
     std::vector<CObject*> m_objectsByRenderOrder = {};
     std::unordered_set<int> m_pendingDestruction = {};
     std::vector<DynamicValue*> m_scriptedValues = {};
+    std::vector<AnimatedPropertyEntry> m_animatedProperties = {};
     glm::vec2 m_mousePosition = {};
     glm::vec2 m_mousePositionLast = {};
     glm::vec2 m_mousePositionNormalized = {};

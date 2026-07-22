@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AnimationTimeline.h"
 #include "Color.h"
 #include "Types.h"
 
@@ -46,6 +47,7 @@ public:
 	Initialization = 0,
 	Script = 1,
 	User = 2,
+	Animation = 3,
     };
 
     DynamicValue () = default;
@@ -137,6 +139,15 @@ public:
      */
     void setProperties (std::map<std::string, UserSettingUniquePtr> properties);
 
+    /**
+     * Associates a parsed Timeline Animation with this dynamic value (see AnimationTimeline.h).
+     */
+    void setAnimation (AnimationTimeline animation);
+    /**
+     * @return The Timeline Animation associated with this dynamic value, if any
+     */
+    [[nodiscard]] const std::optional<AnimationTimeline>& getAnimation () const;
+
 private:
     /**
      * Notifies any listeners that the value has changed
@@ -159,5 +170,6 @@ private:
     std::optional<ConditionInfo> m_condition = std::nullopt;
     /** All the properties this script takes in */
     std::map<std::string, UserSettingUniquePtr> m_properties;
+    std::optional<AnimationTimeline> m_animation = std::nullopt;
 };
 }

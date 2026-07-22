@@ -489,6 +489,8 @@ void CScene::processPendingDestructions () {
 	    this->getScriptEngine ().forgetObject (*object->as<Scripting::ScriptableObject> ());
 	}
 
+	this->forgetObjectAnimations (*object);
+
 	// (c) Remove from both containers that let anything else find this object by id or by
 	// render-order scan (getLayer/getLayerByID/enumerateLayers/getChildren/getParent/
 	// getObject all go through one of these two).
@@ -517,6 +519,74 @@ void CScene::processPendingDestructions () {
 	// — no changes needed there.
 	delete object;
     }
+}
+
+void CScene::queueAnimation (DynamicValue& value, CObject& object) {
+    const auto& animation = value.getAnimation ();
+
+    if (!animation.has_value () || animation->mode != AnimationMode::Single) {
+        return;
+    }
+
+    this->m_animatedProperties.push_back (AnimatedPropertyEntry { .value = &value, .object = &object });
+}
+
+void CScene::tickAnimations () {
+    if (this->m_animatedProperties.empty ()) {
+        return;
+    }
+
+    const auto delta = static_cast<double> (g_Time - g_TimeLast);
+
+    for (auto& entry : this->m_animatedProperties) {
+        if (entry.completed) {
+            continue;
+        }
+
+        entry.elapsedTime += delta;
+
+        const auto& animation = entry.value->getAnimation ();
+
+        // Nothing clears a DynamicValue's animation after queueAnimation() registers it, but
+        // this is cheap enough to re-check defensively rather than assume it forever.
+        if (!animation.has_value ()) {
+            entry.completed = true;
+            continue;
+        }
+
+        const glm::vec4 result = animation->evaluate (entry.elapsedTime);
+
+        // Combine only as many components as this property actually animates (one channel per
+        // vector component) -- pushing a wider type than the property's own would silently
+        // change its UnderlyingType and break any downstream getFloat()/getVec3() assumption.
+        switch (animation->channels.size ()) {
+            case 1:
+                entry.value->update (result.x, DynamicValue::UpdateSource::Animation);
+                break;
+            case 2:
+                entry.value->update (glm::vec2 (result), DynamicValue::UpdateSource::Animation);
+                break;
+            case 3:
+                entry.value->update (glm::vec3 (result), DynamicValue::UpdateSource::Animation);
+                break;
+            default:
+                entry.value->update (result, DynamicValue::UpdateSource::Animation);
+                break;
+        }
+
+        // AnimationMode::Single "holds its final state forever" (WE_DOCS_REFERENCE.md section
+        // 13) -- AnimationTimeline::evaluate() already clamps to the last keyframe's value past
+        // this point, so one more push settles it and this entry never needs ticking again.
+        if (entry.elapsedTime >= animation->durationSeconds ()) {
+            entry.completed = true;
+        }
+    }
+}
+
+void CScene::forgetObjectAnimations (const CObject& object) {
+    std::erase_if (this->m_animatedProperties, [&object] (const AnimatedPropertyEntry& entry) {
+        return entry.object == &object;
+    });
 }
 
 ScriptEngine& CScene::getScriptEngine () const { return *this->m_scriptEngine; }
@@ -574,6 +644,12 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 
     // run a tick in the javascript logic
     this->getScriptEngine ().tick ();
+
+    // advance any single-mode Timeline Animations (WE_DOCS_REFERENCE.md section 13) registered
+    // via queueAnimation() -- deliberately after scriptEngine.tick() so a script that creates a
+    // layer this frame (registering its own animations synchronously during construction) still
+    // gets ticked in the same frame, matching how newly-created objects' scripts are handled.
+    this->tickAnimations ();
 
     // Actually tear down anything thisScene.destroyLayer() marked during the tick just above —
     // deliberately after tick() (every script this frame, including the one that called

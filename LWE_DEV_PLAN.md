@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-21 (#53 DONE — fixed Abyss Gaming's remaining 2 causes: a one-off third-party vec4/vec2 shader swizzle bug (targeted compatibility pass, not a third-party asset patch) and implemented effect-isolation in CImage::setup() so one bad effect no longer deletes an entire object — confirmed real benefit on 2 other objects in the same wallpaper beyond the target bug. Full regression: 440/440 clean, 0 errors, 0 crashes, matches baseline exactly. Character confirmed rendering correctly once fixed, but still visually occluded by a separate, newly-found, much broader bug: Wallpaper Engine's own stock "solid color layer" model renders opaque black instead of tint/transparency, affecting 107 of 586 local corpus wallpapers — logged as #54, not yet investigated. Active Priority Order: #54)
+**Last updated:** 2026-07-21 (#54 DONE — implemented Timeline Animation (single-mode only; Loop/Mirror deferred per scoping analysis, same disposition as #47), with real cubic-Bezier interpolation verified against actual corpus keyframe data. Found and fixed a separate, more consequential bug as a prerequisite: g_Alpha/g_Color/g_Color4/g_Brightness/g_UserAlpha were bound as one-time snapshot uniforms, never refreshed per frame — silently freezing ANY runtime change to these (script-driven as much as animation-driven) across the whole engine, not just this feature. Verified with real before/after pixel proof matching expected math. Full regression: 440/440 clean, 0 errors, 0 crashes, matches baseline. Active Priority Order: (none))
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,23 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #54 — Stock "solid color layer" (models/util/solidlayer.json) renders its final pass as opaque black instead of tint/transparency — affects 107 of 586 local corpus wallpapers
-
-Surfaced 2026-07-21 while verifying #53's fix on Abyss Gaming: even
-with the character's own effects fixed and rendering, a sharp-edged
-opaque black rectangle from a solidlayer object still covers most of
-the frame, hiding it. Confirmed pre-existing (via git stash, present
-before any of #53's changes) and confirmed via --render-debug
-no-solid-final (disabling solidlayer's final pass makes the rectangle
-vanish and reveals correct artwork underneath) that this is a real,
-specific bug in how this stock model's final render pass handles
-tint/transparency, not something wallpaper-specific. Prevalence
-checked across the full local workshop corpus: 107 of 586 wallpapers
-(not just the 440-scene set) reference this stock model -- a
-substantially broader-impact bug than most items in this dev plan.
-Not yet investigated beyond confirming the symptom and prevalence --
-needs its own root-cause session.
-
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -321,6 +304,94 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #54 — DONE 2026-07-21: implemented Timeline Animation (single-mode), and fixed a separate, previously-undiscovered bug that silently froze alpha/color/brightness for ANY runtime change, not just animation
+
+**Origin**: surfaced while verifying #53's fix on Abyss Gaming -- an
+opaque black rectangle from a stock "solid color layer" object
+occluded otherwise-correctly-rendering artwork. Root-caused not to a
+solidlayer-specific bug but to Wallpaper Engine's documented Timeline
+Animation feature (keyframed property animation independent of
+scripting) being entirely unimplemented -- DynamicValueParser never
+read the "animation" JSON block at all, on 126 of 586 local corpus
+wallpapers (1160 animation instances total), silently freezing every
+animated property at its initial value forever. A feasibility scoping
+pass (mirroring #47's static-mesh-vs-skeletal approach) found the real
+keyframe format is richer than documented (per-channel arrays with
+full Bezier tangent handles, not flat linear keyframes -- 48.2% of
+real keyframes have non-default handles) and recommended implementing
+single-mode support first: it fully explains 10 of the 11 specific
+solidlayer wallpapers that triggered this investigation (91%), versus
+45% of all 1160 instances corpus-wide (the rest being Loop/Mirror
+ambient motion -- spins, pulses, sway -- a different, broader, and
+separately-scoped problem).
+
+**Implemented**: real cubic-Bezier-in-time interpolation (not linear
+lerp) in a new AnimationTimeline class, parsing every mode
+(single/loop/mirror) but only ticking mode=="single" -- deliberately
+future-proofing the parse step without expanding scope. A new
+per-frame animation registry (CScene::queueAnimation/tickAnimations),
+modeled directly on ScriptEngine's existing per-frame registry
+pattern, hooked in right after the existing script tick. Covers both
+object-level properties (alpha/scale/origin/etc.) and effect-pass
+constantshadervalues, per the original scoping's "the surface is
+broader than object properties alone" finding. Verified against a real
+corpus example's actual keyframe/tangent data (not synthetic): exact
+values at keyframes, correct eased (non-linear) interpolation between
+them, correct flat-plateau and pre/post-range clamping. Honestly
+scoped: the exact tangent-handle-to-Bezier-control-point conversion is
+a reasonable standard interpretation, not reverse-engineered
+byte-for-byte from Valve's proprietary client, since none is
+available -- verified for correct shape, not claimed as pixel-perfect
+parity.
+
+**A separate, previously-undiscovered bug found and fixed as a
+prerequisite**: ticking was confirmed internally correct (elapsed time
+advancing properly frame to frame) but produced no visible change --
+traced to CPass::setupUniforms() binding g_Alpha/g_Color/g_Color4/
+g_Brightness/g_UserAlpha via a by-value overload that heap-copies a
+one-time snapshot at pass construction and never refreshes it, unlike
+position matrices and constantshadervalues, which already correctly
+use the live pointer-taking overload. This silently froze these five
+uniforms against ANY runtime change -- script-driven just as much as
+animation-driven -- meaning this bug likely affected scripted
+alpha/color/brightness changes on other wallpapers too, independent of
+Timeline Animation entirely. Fixed by adding
+CPass::setupRenderableUniforms(), mirroring the existing
+g_Texture0Rotation/Translation live-uniform pattern already
+established in the same file, called every frame from render().
+Verified with real before/after pixel values on the same object at the
+same timestamp: (0,0,0) frozen opaque black before the fix, (118,3,0)
+a real in-progress fade after -- matching the expected math (elapsed
+time -> keyframe position -> alpha value -> blend darkening
+percentage), not just "looks different."
+
+**Verification**: full 440-wallpaper regression: 440 clean / 0 errors
+/ 0 crashes, matches baseline exactly. All 11 confirmed solidlayer
+wallpapers from the original investigation appear in the clean list,
+plus 6 additional single-mode-animation wallpapers sampled outside
+that set, all clean. Loop-mode correctly confirmed untouched (a
+rotating loop-mode wallpaper's delay=1-vs-delay=5 screenshots differ
+by only 0.18% -- consistent with normal time-based rendering variance,
+not new large-scale motion appearing -- confirming queueAnimation()
+correctly gates on mode==Single and never registers other modes for
+ticking).
+
+**Known honest gap**: could not capture a screenshot past the
+environment's ~1-second screenshot-delay cap to visually confirm the
+"hold forever at final keyframe" behavior once an animation completes
+(needs ~1.78s for the specific object tested) -- the in-progress
+interpolation itself IS confirmed live with real pixels; the
+hold-forever claim rests on the clamp logic verified directly in a
+Python mirror of the C++ evaluator, not an additional live screenshot.
+
+**Deferred, not implemented**: full Loop/Mirror mode support (per the
+scoping pass's tier (b)) -- covers the remaining 55% of corpus-wide
+animation instances (ambient looping motion), but carries real
+reverse-engineering risk around wraploop's exact transition semantics.
+Not tracked as a new numbered item -- revisit if real-world impact
+from tier (a) alone proves insufficient, same disposition as #47's
+parked skeletal-animation tier.
 
 ### #53 — DONE 2026-07-21: Abyss Gaming's remaining causes fixed (#5 shader bug + effect-isolation architecture change); character confirmed rendering correctly once occluded by a separate, newly-found bug (#54)
 

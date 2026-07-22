@@ -176,6 +176,15 @@ private:
     void bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const TextureProvider>& texture0) const;
     void setupRenderUniforms ();
     void setupRenderReferenceUniforms ();
+    /**
+     * Refreshes g_Alpha/g_Color/g_Color4/g_Brightness/g_UserAlpha from the renderable's live
+     * DynamicValue every frame. These can't go through the generic addUniform(name, value)
+     * by-value overload (a one-time heap-copied snapshot, taken once at setupUniforms() and never
+     * refreshed -- fine for genuinely static values, but silently freezes anything meant to
+     * change at runtime, whether script- or Timeline-Animation-driven) the way position matrices
+     * and constantshadervalues already correctly do via their pointer-taking overloads.
+     */
+    void setupRenderableUniforms () const;
     void setupRenderAttributes () const;
     void renderGeometry () const;
     void cleanupRenderSetup ();
@@ -219,6 +228,11 @@ private:
     // shader variables used temporary
     GLint g_Texture0Rotation;
     GLint g_Texture0Translation;
+    GLint g_AlphaLocation;
+    GLint g_ColorLocation;
+    GLint g_Color4Location;
+    GLint g_BrightnessLocation;
+    GLint g_UserAlphaLocation;
     GLuint a_TexCoord;
     GLuint a_Position;
     GLuint m_vao;

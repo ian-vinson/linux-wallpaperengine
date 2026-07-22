@@ -400,6 +400,29 @@ void CPass::setupRenderUniforms () {
     }
 }
 
+void CPass::setupRenderableUniforms () const {
+    if (this->g_AlphaLocation != -1) {
+        glUniform1f (this->g_AlphaLocation, this->m_renderable.getAlpha ());
+    }
+
+    if (this->g_ColorLocation != -1) {
+        glUniform3fv (this->g_ColorLocation, 1, glm::value_ptr (this->m_renderable.getColor ()));
+    }
+
+    if (this->g_Color4Location != -1) {
+        const glm::vec4 color4 = this->m_renderable.getColor4 ();
+        glUniform4fv (this->g_Color4Location, 1, glm::value_ptr (color4));
+    }
+
+    if (this->g_BrightnessLocation != -1) {
+        glUniform1f (this->g_BrightnessLocation, this->m_renderable.getBrightness ());
+    }
+
+    if (this->g_UserAlphaLocation != -1) {
+        glUniform1f (this->g_UserAlphaLocation, this->m_renderable.getUserAlpha ());
+    }
+}
+
 void CPass::setupRenderAttributes () const {
     if (this->m_setupAttribsCallback) {
 	this->m_setupAttribsCallback ();
@@ -504,6 +527,7 @@ void CPass::render () {
     this->setupRenderTexture ();
     this->setupRenderUniforms ();
     this->setupRenderReferenceUniforms ();
+    this->setupRenderableUniforms ();
     this->setupRenderAttributes ();
     this->renderGeometry ();
     this->cleanupRenderSetup ();
@@ -689,6 +713,11 @@ void CPass::setupShaders () {
     // support three textures for now
     this->g_Texture0Rotation = glGetUniformLocation (this->m_programID, "g_Texture0Rotation");
     this->g_Texture0Translation = glGetUniformLocation (this->m_programID, "g_Texture0Translation");
+    this->g_AlphaLocation = glGetUniformLocation (this->m_programID, "g_Alpha");
+    this->g_ColorLocation = glGetUniformLocation (this->m_programID, "g_Color");
+    this->g_Color4Location = glGetUniformLocation (this->m_programID, "g_Color4");
+    this->g_BrightnessLocation = glGetUniformLocation (this->m_programID, "g_Brightness");
+    this->g_UserAlphaLocation = glGetUniformLocation (this->m_programID, "g_UserAlpha");
 }
 
 void CPass::setupAttributes () {
@@ -884,12 +913,11 @@ void CPass::setupUniforms () {
     // lighting variables
     this->addUniform ("g_LightAmbientColor", sceneData.colors.ambient->value->getVec3 ());
     this->addUniform ("g_LightSkylightColor", sceneData.colors.skylight->value->getVec3 ());
-    // register variables like brightness and alpha with some default value
-    this->addUniform ("g_Brightness", renderable.getBrightness ());
-    this->addUniform ("g_UserAlpha", renderable.getUserAlpha ());
-    this->addUniform ("g_Alpha", renderable.getAlpha ());
-    this->addUniform ("g_Color", renderable.getColor ());
-    this->addUniform ("g_Color4", renderable.getColor4 ());
+    // g_Brightness/g_UserAlpha/g_Alpha/g_Color/g_Color4 are intentionally NOT bound here via
+    // addUniform(name, value) -- that overload heap-copies a one-time snapshot and never
+    // refreshes it, silently freezing anything meant to change at runtime (a script, or a
+    // Timeline Animation). setupRenderableUniforms() (called every frame from render(), same as
+    // position matrices already are) reads these live from the renderable instead.
     if (!this->m_uniforms.contains ("g_CompositeColor")) {
 	this->addUniform ("g_CompositeColor", renderable.getCompositeColor ());
     }
@@ -1031,6 +1059,14 @@ void CPass::setupShaderVariables () {
 }
 
 void CPass::registerScriptedConstant (const std::string& name, const char* scope, DynamicValue& value) const {
+    // Timeline Animations (WE_DOCS_REFERENCE.md section 13) on a constantshadervalues entry --
+    // e.g. an effect pass fading its own "multiply"/"alpha" constant in and out -- use the exact
+    // same "animation" JSON shape as object-level properties (confirmed during #54's scoping
+    // scan) and tick independently of any script, so check for this regardless of getScriptSource.
+    // Only CObject identity is needed here (not ScriptableObject specifically), since ticking is
+    // pure elapsed-time math with no JS involved.
+    this->m_renderable.getScene ().queueAnimation (value, this->m_renderable);
+
     if (!value.getScriptSource ().has_value ()) {
 	return;
     }

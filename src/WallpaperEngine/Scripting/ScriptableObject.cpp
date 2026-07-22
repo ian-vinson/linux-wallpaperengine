@@ -42,5 +42,6 @@ void ScriptableObject::registerProperty (const std::string& name, DynamicValue& 
 void ScriptableObject::finalizeProperties () {
     for (const auto& entry : this->m_properties | std::views::values) {
 	this->getScene ().getScriptEngine ().queueScript (entry.key, entry.value, *this);
+	this->getScene ().queueAnimation (entry.value, *this);
     }
 }
