@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-22 (#47 DONE — resumed the parked static-mesh 3D model work: reverse-engineered the real 48-byte static vertex layout (confirmed via two independent geometric proofs — face-normal alignment and a perfect sphere falling out of raw bytes), then found and fixed two real bugs beyond the original scope: CModel never wired a pass input at all (100% of draw calls silently skipped since #47's original implementation) and, once exposed by that fix, a dormant uninitialized-matrix crash affecting 3 real wallpapers (confirmed via identical coredumpctl backtraces). Full regression: 440/440 clean, 0 errors, 0 crashes, matches baseline exactly, including all 3 previously-crashing wallpapers. Flagged but explicitly NOT fixed, likely the real remaining blocker on Ocarina looking correct: camera-projection selection falls back to a mismatched orthographic projection for normal fov-based 3D scenes — logged as #55, out of scope here since it affects projection selection corpus-wide. Active Priority Order: #55)
+**Last updated:** 2026-07-22 (#55 DONE — fixed a dead-code branch in CScene.cpp's projection selection (perspectiveOverrideFov was never the real deciding signal for any of 440 corpus wallpapers; merged into a perspective-by-default else using the scene's real fov/nearz/farz). Verified via full regression (440/0/0, zero status changes line-by-line against baseline) and confirmed zero impact on the 4 other ortho-absent wallpapers or Shiina Mashiro. Caught an important gap during verification: the investigation's earlier "confirmed" Ocarina screenshot was taken under a debug env var (LWE_DISABLE_CAMERA_OBJECT=1), not default runtime — under the real shipped fix, Ocarina's castle still doesn't show, due to a second, separate bug (Camera::applyObjectCamera() unconditionally rebuilding orthographic projection for scenes with camera-type objects, undoing this fix). Logged as #56, not yet investigated. Active Priority Order: #56)
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,26 +296,28 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #55 — Camera-projection selection likely mis-selects orthographic instead of perspective for normal fov-based 3D scenes (found while completing #47)
+### #56 — Camera::applyObjectCamera() unconditionally rebuilds orthographic projection, silently overriding #55's fix for scenes with "camera"-type objects
 
-This fork's camera-projection logic only calls
-setPerspectiveProjection() when perspectiveOverrideFov is present;
-scenes using the normal (and apparently more common) fov field with
-orthogonalprojection=null instead fall through to
-setOrthogonalProjection() at screen-pixel dimensions -- fundamentally
-wrong for any scene with real 3D world-space geometry (e.g. #47's
-now-working static 3D models). Suspected to be the actual root cause
-of Ocarina of Time's long-standing grey/incorrect appearance, deeper
-than any earlier hypothesis in #42/#45/#46/#47. Confirmed present via
-a temporary, reverted diagnostic patch during #47's verification (a
-perspective projection using the scene's own fov/nearz/farz values
-produced a correctly-rendering castle courtyard; the real shipped
-ortho-fallback path does not). Not yet root-caused at the "why does
-this selection logic look like this" level, and not yet fixed --
-affects camera-projection selection broadly (all 440 corpus
-wallpapers use one path or the other), not just Ocarina, so needs its
-own scoped investigation into what the correct selection criteria
-should actually be, not a narrow patch for one wallpaper.
+Found 2026-07-22 while verifying #55's real shipped fix -- the
+investigation phase's earlier "confirmed correctly-rendering castle
+courtyard" screenshot for Ocarina of Time was captured with the
+existing LWE_DISABLE_CAMERA_OBJECT=1 debug env var set, not default
+runtime; this wasn't caught until final verification under the real
+shipped fix showed Ocarina still grey. Root cause: any "camera"-type
+scene object (Ocarina has 11) triggers Camera::applyObjectCamera()
+after scene construction, which unconditionally calls
+setOrthogonalProjection() with no perspective path at all --
+silently undoing #55's projection selection regardless of what it
+determined. Confirmed via the LWE_DISABLE_CAMERA_OBJECT=1 escape
+hatch: with camera objects disabled, the castle renders correctly,
+proving #55's fix is itself correct and this is a separate, later
+override. Not yet investigated at the "what's the correct fix" level
+(e.g. does applyObjectCamera() need its own perspective/orthogonal
+branch mirroring #55's logic, or should it respect whatever
+CScene.cpp already decided rather than unconditionally rebuilding
+orthogonal) -- needs its own discovery pass, same rigor as #55
+(real corpus scan of how many wallpapers use camera-type objects,
+verified rule, full regression) before implementing anything.
 
 ---
 
@@ -325,6 +327,54 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #55 — DONE 2026-07-22: fixed dead perspectiveOverrideFov branch in CScene.cpp's projection selection — necessary but not sufficient for Ocarina to visually render (see #56)
+
+**Root cause, confirmed via a full 440-wallpaper corpus scan**:
+CScene.cpp's projection selection checked orthogonalprojection first
+(correct, unchanged), then perspectiveOverrideFov > 0 as a fallback
+gate for perspective, then defaulted to a screen-pixel-sized
+orthographic fallback. This perspectiveOverrideFov branch was
+introduced by commit e890a572 (2026-06-29) to fix Shiina Mashiro
+(missing orthogonalprojection) but turned out to be dead code for
+the entire real corpus: 100% of the 179/440 wallpapers that set
+perspectiveOverrideFov also have orthogonalprojection present, so the
+first check always wins regardless -- the branch this replaced could
+never fire for any real wallpaper. The 5 wallpapers genuinely lacking
+orthogonalprojection are exactly the 5 with model-keyed 3D objects
+(a 100% clean correlation with #47's finding) -- confirmed as
+genuinely-authored 3D scenes (distinct eye/center vectors, standard
+fov, sane nearz/farz), not degenerate edge cases.
+
+**Fix**: merged the dead branch into the final else -- any scene
+without orthogonalprojection now always uses real perspective
+projection via the scene's own fov/nearz/farz fields (never
+perspectiveOverrideFov, confirmed never the deciding signal in
+practice). hasOrthogonal's priority as the first check is unchanged.
+
+**Verification, all against the real shipped fix, not a temporary
+patch**: full 440-wallpaper regression: 440 clean/0 errors/0 crashes;
+a line-by-line pass/fail diff against the pre-#55 baseline (not just
+matching aggregate counts) confirmed genuinely zero wallpapers changed
+status. The other 4 ortho-absent wallpapers (Starscape, 玉盘/Moon,
+水滴 Droplet, 实时太阳系 Live Solar System) confirmed byte-identical
+via cmp before/after the real fix -- independently broken by unrelated
+bugs (garbled material paths, broken scripts, a missing FBO), genuinely
+unaffected by this change either way. Shiina Mashiro (has both fields
+set) confirmed still renders correctly as 2D, hasOrthogonal still wins
+as designed.
+
+**Honest, load-bearing caveat**: this fix alone does not make Ocarina
+of Time's castle courtyard visible under default runtime. Verification
+caught a real discrepancy -- the investigation phase's earlier
+"confirmed" castle screenshot was captured with the existing
+LWE_DISABLE_CAMERA_OBJECT=1 debug env var set, not default runtime.
+Under the real shipped fix with normal runtime, Ocarina is still
+grey -- traced to a second, separate bug (Camera::applyObjectCamera()
+unconditionally rebuilding orthographic projection for scenes with
+"camera"-type objects, silently overriding this fix). With the debug
+env var confirming #55's fix is itself correct, the new bug is logged
+separately as #56, not fixed here.
 
 ### #54 — DONE 2026-07-21: implemented Timeline Animation (single-mode), and fixed a separate, previously-undiscovered bug that silently froze alpha/color/brightness for ANY runtime change, not just animation
 

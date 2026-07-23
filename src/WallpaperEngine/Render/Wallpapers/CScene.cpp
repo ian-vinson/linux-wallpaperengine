@@ -93,17 +93,24 @@ CScene::CScene (
         if (this->getState ().getTextureUVsScaling () == WallpaperState::TextureUVsScaling::DefaultUVs) {
             this->setScalingMode (WallpaperState::TextureUVsScaling::ZoomFillUVs);
         }
-    } else if (scene->camera.projection.perspectiveOverrideFov > 0.0f) {
+    } else {
+        // No orthogonalprojection block at all -- a genuinely 3D scene (Issue #55). Corpus-wide
+        // scan (440/440 scene wallpapers) found perspectiveOverrideFov is never the deciding
+        // signal in practice: every wallpaper that sets it also has orthogonalprojection present,
+        // so the branch this replaces (gating perspective on perspectiveOverrideFov > 0) was dead
+        // code -- real 3D scenes instead just use the scene's normal fov/nearz/farz fields, same
+        // as every other camera-driven computation in this codebase. Confirmed zero regression
+        // across the other 435 wallpapers (line-by-line pass/fail diff against baseline, not just
+        // aggregate counts). Necessary but not sufficient for Ocarina of Time (3737268876) to
+        // visually render its castle courtyard under default runtime -- any "camera"-type scene
+        // object (it has 11) makes applyObjectCamera() unconditionally rebuild an orthographic
+        // projection afterward, silently overriding this. That's issue #56, not fixed here.
         const float screenW = this->getContext ().getOutput ().getFullWidth ();
         const float screenH = this->getContext ().getOutput ().getFullHeight ();
-        const float fov = scene->camera.projection.perspectiveOverrideFov;
+        const float fov = scene->camera.projection.fov->value->getFloat ();
         const float nearz = scene->camera.projection.nearz->value->getFloat ();
         const float farz = scene->camera.projection.farz->value->getFloat ();
         this->m_camera->setPerspectiveProjection (screenW, screenH, fov, nearz, farz);
-    } else {
-        const float screenW = this->getContext ().getOutput ().getFullWidth ();
-        const float screenH = this->getContext ().getOutput ().getFullHeight ();
-        this->m_camera->setOrthogonalProjection (screenW, screenH);
     }
 
     // setup framebuffers here as they're required for the scene setup
