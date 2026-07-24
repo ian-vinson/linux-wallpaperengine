@@ -1,5 +1,5 @@
 # LWE Mural Fork — Developer Plan
-**Last updated:** 2026-07-22 (#55 DONE — fixed a dead-code branch in CScene.cpp's projection selection (perspectiveOverrideFov was never the real deciding signal for any of 440 corpus wallpapers; merged into a perspective-by-default else using the scene's real fov/nearz/farz). Verified via full regression (440/0/0, zero status changes line-by-line against baseline) and confirmed zero impact on the 4 other ortho-absent wallpapers or Shiina Mashiro. Caught an important gap during verification: the investigation's earlier "confirmed" Ocarina screenshot was taken under a debug env var (LWE_DISABLE_CAMERA_OBJECT=1), not default runtime — under the real shipped fix, Ocarina's castle still doesn't show, due to a second, separate bug (Camera::applyObjectCamera() unconditionally rebuilding orthographic projection for scenes with camera-type objects, undoing this fix). Logged as #56, not yet investigated. Active Priority Order: #56)
+**Last updated:** 2026-07-24 (#56 DONE — fixed Camera::applyObjectCamera() unconditionally rebuilding an orthographic projection for scenes with "camera" objects, silently clobbering #55's perspective selection. WE's own ICamera docs confirm camera-object zoom is 2D-only, fov is 3D-only — this was a pure regression, not a missing feature. One-line guard, verified on the real shipped build: Ocarina's castle now renders under true default runtime (no debug env var), Moon fixed from solid grey to correct 3D rendering, Droplet's remaining brokenness confirmed unrelated/pre-existing. Full regression: a parallel-run count discrepancy (430/9/1 vs 437/2/1) was investigated rather than accepted — traced to GPU-context contention from parallelism, confirmed via serial re-runs as 440/440 parity with zero real regressions. This closes the full Ocarina of Time chain: #42→#45→#46→#47→#55→#56. Active Priority Order: (none))
 **Fork:** https://github.com/ian-vinson/linux-wallpaperengine
 
 ---
@@ -296,29 +296,6 @@ completed and moved to the **Completed Items** section below, not renumbered
 away. New items get the next unused number rather than filling gaps, so a
 number always means the same thing across the whole document's history.
 
-### #56 — Camera::applyObjectCamera() unconditionally rebuilds orthographic projection, silently overriding #55's fix for scenes with "camera"-type objects
-
-Found 2026-07-22 while verifying #55's real shipped fix -- the
-investigation phase's earlier "confirmed correctly-rendering castle
-courtyard" screenshot for Ocarina of Time was captured with the
-existing LWE_DISABLE_CAMERA_OBJECT=1 debug env var set, not default
-runtime; this wasn't caught until final verification under the real
-shipped fix showed Ocarina still grey. Root cause: any "camera"-type
-scene object (Ocarina has 11) triggers Camera::applyObjectCamera()
-after scene construction, which unconditionally calls
-setOrthogonalProjection() with no perspective path at all --
-silently undoing #55's projection selection regardless of what it
-determined. Confirmed via the LWE_DISABLE_CAMERA_OBJECT=1 escape
-hatch: with camera objects disabled, the castle renders correctly,
-proving #55's fix is itself correct and this is a separate, later
-override. Not yet investigated at the "what's the correct fix" level
-(e.g. does applyObjectCamera() need its own perspective/orthogonal
-branch mirroring #55's logic, or should it respect whatever
-CScene.cpp already decided rather than unconditionally rebuilding
-orthogonal) -- needs its own discovery pass, same rigor as #55
-(real corpus scan of how many wallpapers use camera-type objects,
-verified rule, full regression) before implementing anything.
-
 ---
 
 ## Completed Items (done/closed/resolved — moved here for readability)
@@ -327,6 +304,64 @@ These were originally tracked in Priority Order above but are finished —
 kept here as a record of what was investigated/fixed and why, rather than
 mixed in with items that still need work. Numbers match their original
 Priority Order identifiers.
+
+### #56 — DONE 2026-07-24: Camera::applyObjectCamera() no longer clobbers #55's perspective projection for 3D scenes with camera objects — closes the full Ocarina of Time investigation chain (#42/#45/#46/#47/#55/#56)
+
+**Root cause, confirmed via git blame + WE's own documented ICamera
+interface**: "camera" scene objects are camera-path animation objects
+(keyframed position/orientation/FOV for cutscene-style movement).
+Wallpaper Engine's own docs explicitly split zoom ("2D scenes only")
+from fov ("3D scenes only"), and real corpus JSON matches this split
+exactly -- perspective-scene camera objects carry fov+world-space
+origin with zoom always inert at 1.0; orthographic-scene camera
+objects carry a user zoom slider with no fov.
+Camera::applyObjectCamera() ignored this split entirely, unconditionally
+calling glm::ortho() regardless of scene type -- silently clobbering
+any 3D scene's #55-determined perspective projection. Confirmed a pure
+regression, not a partially-implemented feature.
+
+**Corpus prevalence (440/440 scanned)**: 22 wallpapers have any camera
+object; 18 also have orthogonalprojection (harmless no-op, confirmed
+byte-identical); only 4 are actually affected -- Ocarina of Time (11
+camera objects), 玉盘/Moon, 水滴/Droplet, 实时太阳系/Live Solar System
+(the same 4 flagged in #55's own investigation).
+
+**Fix**: a one-line guard at the top of applyObjectCamera() --
+`if (!this->m_isOrthogonal) return;` -- skips the orthographic rebuild
+entirely for non-orthogonal scenes. Explicitly not full camera-path
+support: fov/angles per-object positioning remains unimplemented
+(m_lookat is only built once at construction, never revisited) --
+correctly scoped out as a separate, larger feature.
+
+**Verification, on the real shipped build**: Ocarina's castle
+courtyard renders under true default runtime (no debug env var),
+pixel-identical to the LWE_DISABLE_CAMERA_OBJECT=1 reference baseline
+used throughout #55/#56. Moon: solid grey -> correctly rendered 3D
+moon. Droplet: still broken, but confirmed to be the same distinct,
+pre-existing, unrelated bug both before and after this change -- not a
+regression this fix caused. 4 ortho+camera 2D wallpapers spot-checked
+(including 3448290956, the wallpaper actually running live on this
+machine's desktop) confirmed identical framing/zoom, only frame-to-
+frame animation differing between separate runs, as expected.
+
+Full 440-wallpaper regression via a new, faster --dump-structure-based
+parallel harness (~2.5 min/pass): raw counts shifted between two
+parallel runs (430/9/1 -> 437/2/1) -- investigated rather than
+accepted at face value. Diffed per-wallpaper and found all 11 status
+flips shared an identical `EGL: Failed to make context current`
+signature -- GPU-context contention from running 8 parallel processes,
+unrelated to the code change in either direction. Re-ran all 11 plus a
+separate timeout case serially against both the fixed and pre-fix
+binaries: all 12 pass clean on both -- confirming genuine 440/440
+parity, zero real regressions.
+
+**This closes the full Ocarina of Time investigation chain that ran
+through #42 (crash fix), #45 (grey-screen root-caused to #42's
+cycle-guard, no independent fix), #46 (universal property-registration
+collision), #47 (static-mesh 3D model parsing, resumed and completed),
+#55 (dead perspective-selection branch), and #56 (this fix)** -- the
+castle courtyard now renders correctly end-to-end under normal
+runtime, with no debug flags required.
 
 ### #55 — DONE 2026-07-22: fixed dead perspectiveOverrideFov branch in CScene.cpp's projection selection — necessary but not sufficient for Ocarina to visually render (see #56)
 

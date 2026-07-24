@@ -59,6 +59,13 @@ void Camera::setPerspectiveProjection (const float width, const float height, co
 }
 
 void Camera::applyObjectCamera (const glm::vec3& eye, float zoom) {
+    // "camera" scene objects' zoom field is documented (WE's own ICamera scripting
+    // interface) as 2D-scene-only. Never rebuild an orthographic projection over a
+    // scene #55 already determined is perspective -- that silently clobbers it (#56).
+    if (!this->m_isOrthogonal) {
+	return;
+    }
+
     if (zoom <= 0.0f)
 	zoom = 1.0f;
 
